@@ -6,6 +6,34 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		042F016A2F69DCC30087BDC2 /* GolfPlayerDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 042F01692F69DCC30087BDC2 /* GolfPlayerDetailView.swift */; };
+		042F016C2F6C99910087BDC2 /* FullHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 042F016B2F6C99910087BDC2 /* FullHistoryView.swift */; };
+		0469ADCE2F7E61E60035C895 /* AnalyticsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0469ADCD2F7E61E60035C895 /* AnalyticsView.swift */; };
+		0469AF212F8CC1E00035C895 /* PlayoffTiersData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0469AF202F8CC1E00035C895 /* PlayoffTiersData.swift */; };
+		04747F312FA5CAB9009F757D /* TennisBracketData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04747F302FA5CAB9009F757D /* TennisBracketData.swift */; };
+		048067CC2FBF863A00861A1E /* Lobster-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 048067CB2FBF863A00861A1E /* Lobster-Regular.ttf */; };
+		048067D22FC1411000861A1E /* SoccerTiersData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 048067D12FC1411000861A1E /* SoccerTiersData.swift */; };
+		048067DC2FC1785400861A1E /* UFCDFSData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 048067DB2FC1785400861A1E /* UFCDFSData.swift */; };
+		048067DE2FC184B400861A1E /* NFLDFSData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 048067DD2FC184B400861A1E /* NFLDFSData.swift */; };
+		048067E02FC18B3300861A1E /* NCAAFBDFSData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 048067DF2FC18B3300861A1E /* NCAAFBDFSData.swift */; };
+		048067E22FC1B14300861A1E /* GolfTiersSettledDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 048067E12FC1B14300861A1E /* GolfTiersSettledDetailView.swift */; };
+		04A32BE72FB1B48500EFB19C /* SoccerDFSData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04A32BE62FB1B48500EFB19C /* SoccerDFSData.swift */; };
+		04A32C922FB4777800EFB19C /* GolfTiersData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04A32C912FB4777800EFB19C /* GolfTiersData.swift */; };
+		04A32C942FB478EC00EFB19C /* GolfTiersViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04A32C932FB478EC00EFB19C /* GolfTiersViewModel.swift */; };
+		04A32C962FB479DC00EFB19C /* GolfTiersLobbyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04A32C952FB479DC00EFB19C /* GolfTiersLobbyView.swift */; };
+		04A32C982FB479DD00EFB19C /* GolfTiersLiveView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04A32C972FB479DD00EFB19C /* GolfTiersLiveView.swift */; };
+		04A32C9A2FB479DF00EFB19C /* GolfTiersGroupDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04A32C992FB479DF00EFB19C /* GolfTiersGroupDetailView.swift */; };
+		04E02D0F2F579009009A4D3A /* SportsData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E02D0E2F579009009A4D3A /* SportsData.swift */; };
+		04E02D112F579627009A4D3A /* DFSData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E02D102F579627009A4D3A /* DFSData.swift */; };
+		04E02D172F588486009A4D3A /* SupabaseService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E02D162F588486009A4D3A /* SupabaseService.swift */; };
+		04E02D192F58849B009A4D3A /* AuthViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E02D182F58849B009A4D3A /* AuthViewModel.swift */; };
+		04E02D1B2F58849C009A4D3A /* AuthView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E02D1A2F58849C009A4D3A /* AuthView.swift */; };
+		04E02D1D2F5885F6009A4D3A /* supabase_schema.sql in Resources */ = {isa = PBXBuildFile; fileRef = 04E02D1C2F5885F6009A4D3A /* supabase_schema.sql */; };
+		04E02DC32F5BD7A9009A4D3A /* BestBallData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E02DC22F5BD7A9009A4D3A /* BestBallData.swift */; };
+		04E02E722F611884009A4D3A /* GolfDFSData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E02E712F611884009A4D3A /* GolfDFSData.swift */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		04E02CF22F578B82009A4D3A /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -24,15 +52,53 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		04E02CDF2F578B80009A4D3A /* GameOn.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = GameOn.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		04E02CF12F578B82009A4D3A /* GameOnTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = GameOnTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		04E02CFB2F578B82009A4D3A /* GameOnUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = GameOnUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		042F01692F69DCC30087BDC2 /* GolfPlayerDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GolfPlayerDetailView.swift; sourceTree = "<group>"; };
+		042F016B2F6C99910087BDC2 /* FullHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullHistoryView.swift; sourceTree = "<group>"; };
+		0469ADCD2F7E61E60035C895 /* AnalyticsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalyticsView.swift; sourceTree = "<group>"; };
+		0469AF202F8CC1E00035C895 /* PlayoffTiersData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayoffTiersData.swift; sourceTree = "<group>"; };
+		04747F302FA5CAB9009F757D /* TennisBracketData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TennisBracketData.swift; sourceTree = "<group>"; };
+		048067CB2FBF863A00861A1E /* Lobster-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Lobster-Regular.ttf"; sourceTree = "<group>"; };
+		048067D12FC1411000861A1E /* SoccerTiersData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoccerTiersData.swift; sourceTree = "<group>"; };
+		048067DB2FC1785400861A1E /* UFCDFSData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UFCDFSData.swift; sourceTree = "<group>"; };
+		048067DD2FC184B400861A1E /* NFLDFSData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NFLDFSData.swift; sourceTree = "<group>"; };
+		048067DF2FC18B3300861A1E /* NCAAFBDFSData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NCAAFBDFSData.swift; sourceTree = "<group>"; };
+		048067E12FC1B14300861A1E /* GolfTiersSettledDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GolfTiersSettledDetailView.swift; sourceTree = "<group>"; };
+		04A32BE62FB1B48500EFB19C /* SoccerDFSData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoccerDFSData.swift; sourceTree = "<group>"; };
+		04A32C912FB4777800EFB19C /* GolfTiersData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GolfTiersData.swift; sourceTree = "<group>"; };
+		04A32C932FB478EC00EFB19C /* GolfTiersViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GolfTiersViewModel.swift; sourceTree = "<group>"; };
+		04A32C952FB479DC00EFB19C /* GolfTiersLobbyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GolfTiersLobbyView.swift; sourceTree = "<group>"; };
+		04A32C972FB479DD00EFB19C /* GolfTiersLiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GolfTiersLiveView.swift; sourceTree = "<group>"; };
+		04A32C992FB479DF00EFB19C /* GolfTiersGroupDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GolfTiersGroupDetailView.swift; sourceTree = "<group>"; };
+		04E02CDF2F578B80009A4D3A /* DuelFantasy.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DuelFantasy.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		04E02CF12F578B82009A4D3A /* DuelFantasyTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DuelFantasyTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		04E02CFB2F578B82009A4D3A /* DuelFantasyUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DuelFantasyUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		04E02D0E2F579009009A4D3A /* SportsData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SportsData.swift; sourceTree = "<group>"; };
+		04E02D102F579627009A4D3A /* DFSData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DFSData.swift; sourceTree = "<group>"; };
+		04E02D162F588486009A4D3A /* SupabaseService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseService.swift; sourceTree = "<group>"; };
+		04E02D182F58849B009A4D3A /* AuthViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthViewModel.swift; sourceTree = "<group>"; };
+		04E02D1A2F58849C009A4D3A /* AuthView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthView.swift; sourceTree = "<group>"; };
+		04E02D1C2F5885F6009A4D3A /* supabase_schema.sql */ = {isa = PBXFileReference; lastKnownFileType = text; path = supabase_schema.sql; sourceTree = "<group>"; };
+		04E02DC22F5BD7A9009A4D3A /* BestBallData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BestBallData.swift; sourceTree = "<group>"; };
+		04E02E712F611884009A4D3A /* GolfDFSData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GolfDFSData.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		048067D02FBF878A00861A1E /* Exceptions for "DuelFantasy" folder in "DuelFantasy" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 04E02CDE2F578B80009A4D3A /* DuelFantasy */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		04E02CE12F578B80009A4D3A /* GameOn */ = {
+		04E02CE12F578B80009A4D3A /* DuelFantasy */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = GameOn;
+			exceptions = (
+				048067D02FBF878A00861A1E /* Exceptions for "DuelFantasy" folder in "DuelFantasy" target */,
+			);
+			path = DuelFantasy;
 			sourceTree = "<group>";
 		};
 		04E02CF42F578B82009A4D3A /* GameOnTests */ = {
@@ -75,19 +141,44 @@
 		04E02CD62F578B80009A4D3A = {
 			isa = PBXGroup;
 			children = (
-				04E02CE12F578B80009A4D3A /* GameOn */,
+				04E02CE12F578B80009A4D3A /* DuelFantasy */,
 				04E02CF42F578B82009A4D3A /* GameOnTests */,
 				04E02CFE2F578B82009A4D3A /* GameOnUITests */,
 				04E02CE02F578B80009A4D3A /* Products */,
+				04E02D0E2F579009009A4D3A /* SportsData.swift */,
+				04E02D102F579627009A4D3A /* DFSData.swift */,
+				04E02D162F588486009A4D3A /* SupabaseService.swift */,
+				04E02D182F58849B009A4D3A /* AuthViewModel.swift */,
+				04E02D1A2F58849C009A4D3A /* AuthView.swift */,
+				04E02D1C2F5885F6009A4D3A /* supabase_schema.sql */,
+				04E02DC22F5BD7A9009A4D3A /* BestBallData.swift */,
+				04E02E712F611884009A4D3A /* GolfDFSData.swift */,
+				042F01692F69DCC30087BDC2 /* GolfPlayerDetailView.swift */,
+				042F016B2F6C99910087BDC2 /* FullHistoryView.swift */,
+				0469ADCD2F7E61E60035C895 /* AnalyticsView.swift */,
+				0469AF202F8CC1E00035C895 /* PlayoffTiersData.swift */,
+				04747F302FA5CAB9009F757D /* TennisBracketData.swift */,
+				04A32BE62FB1B48500EFB19C /* SoccerDFSData.swift */,
+				048067CB2FBF863A00861A1E /* Lobster-Regular.ttf */,
+				04A32C912FB4777800EFB19C /* GolfTiersData.swift */,
+				04A32C932FB478EC00EFB19C /* GolfTiersViewModel.swift */,
+				04A32C952FB479DC00EFB19C /* GolfTiersLobbyView.swift */,
+				04A32C972FB479DD00EFB19C /* GolfTiersLiveView.swift */,
+				04A32C992FB479DF00EFB19C /* GolfTiersGroupDetailView.swift */,
+				048067D12FC1411000861A1E /* SoccerTiersData.swift */,
+				048067DB2FC1785400861A1E /* UFCDFSData.swift */,
+				048067DD2FC184B400861A1E /* NFLDFSData.swift */,
+				048067DF2FC18B3300861A1E /* NCAAFBDFSData.swift */,
+				048067E12FC1B14300861A1E /* GolfTiersSettledDetailView.swift */,
 			);
 			sourceTree = "<group>";
 		};
 		04E02CE02F578B80009A4D3A /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				04E02CDF2F578B80009A4D3A /* GameOn.app */,
-				04E02CF12F578B82009A4D3A /* GameOnTests.xctest */,
-				04E02CFB2F578B82009A4D3A /* GameOnUITests.xctest */,
+				04E02CDF2F578B80009A4D3A /* DuelFantasy.app */,
+				04E02CF12F578B82009A4D3A /* DuelFantasyTests.xctest */,
+				04E02CFB2F578B82009A4D3A /* DuelFantasyUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -95,9 +186,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		04E02CDE2F578B80009A4D3A /* GameOn */ = {
+		04E02CDE2F578B80009A4D3A /* DuelFantasy */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 04E02D052F578B82009A4D3A /* Build configuration list for PBXNativeTarget "GameOn" */;
+			buildConfigurationList = 04E02D052F578B82009A4D3A /* Build configuration list for PBXNativeTarget "DuelFantasy" */;
 			buildPhases = (
 				04E02CDB2F578B80009A4D3A /* Sources */,
 				04E02CDC2F578B80009A4D3A /* Frameworks */,
@@ -108,18 +199,18 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				04E02CE12F578B80009A4D3A /* GameOn */,
+				04E02CE12F578B80009A4D3A /* DuelFantasy */,
 			);
-			name = GameOn;
+			name = DuelFantasy;
 			packageProductDependencies = (
 			);
 			productName = GameOn;
-			productReference = 04E02CDF2F578B80009A4D3A /* GameOn.app */;
+			productReference = 04E02CDF2F578B80009A4D3A /* DuelFantasy.app */;
 			productType = "com.apple.product-type.application";
 		};
-		04E02CF02F578B82009A4D3A /* GameOnTests */ = {
+		04E02CF02F578B82009A4D3A /* DuelFantasyTests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 04E02D082F578B82009A4D3A /* Build configuration list for PBXNativeTarget "GameOnTests" */;
+			buildConfigurationList = 04E02D082F578B82009A4D3A /* Build configuration list for PBXNativeTarget "DuelFantasyTests" */;
 			buildPhases = (
 				04E02CED2F578B82009A4D3A /* Sources */,
 				04E02CEE2F578B82009A4D3A /* Frameworks */,
@@ -133,16 +224,16 @@
 			fileSystemSynchronizedGroups = (
 				04E02CF42F578B82009A4D3A /* GameOnTests */,
 			);
-			name = GameOnTests;
+			name = DuelFantasyTests;
 			packageProductDependencies = (
 			);
 			productName = GameOnTests;
-			productReference = 04E02CF12F578B82009A4D3A /* GameOnTests.xctest */;
+			productReference = 04E02CF12F578B82009A4D3A /* DuelFantasyTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
-		04E02CFA2F578B82009A4D3A /* GameOnUITests */ = {
+		04E02CFA2F578B82009A4D3A /* DuelFantasyUITests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 04E02D0B2F578B82009A4D3A /* Build configuration list for PBXNativeTarget "GameOnUITests" */;
+			buildConfigurationList = 04E02D0B2F578B82009A4D3A /* Build configuration list for PBXNativeTarget "DuelFantasyUITests" */;
 			buildPhases = (
 				04E02CF72F578B82009A4D3A /* Sources */,
 				04E02CF82F578B82009A4D3A /* Frameworks */,
@@ -156,11 +247,11 @@
 			fileSystemSynchronizedGroups = (
 				04E02CFE2F578B82009A4D3A /* GameOnUITests */,
 			);
-			name = GameOnUITests;
+			name = DuelFantasyUITests;
 			packageProductDependencies = (
 			);
 			productName = GameOnUITests;
-			productReference = 04E02CFB2F578B82009A4D3A /* GameOnUITests.xctest */;
+			productReference = 04E02CFB2F578B82009A4D3A /* DuelFantasyUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 /* End PBXNativeTarget section */
@@ -186,7 +277,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 04E02CDA2F578B80009A4D3A /* Build configuration list for PBXProject "GameOn" */;
+			buildConfigurationList = 04E02CDA2F578B80009A4D3A /* Build configuration list for PBXProject "DuelFantasy" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -200,9 +291,9 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				04E02CDE2F578B80009A4D3A /* GameOn */,
-				04E02CF02F578B82009A4D3A /* GameOnTests */,
-				04E02CFA2F578B82009A4D3A /* GameOnUITests */,
+				04E02CDE2F578B80009A4D3A /* DuelFantasy */,
+				04E02CF02F578B82009A4D3A /* DuelFantasyTests */,
+				04E02CFA2F578B82009A4D3A /* DuelFantasyUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -212,6 +303,8 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				048067CC2FBF863A00861A1E /* Lobster-Regular.ttf in Resources */,
+				04E02D1D2F5885F6009A4D3A /* supabase_schema.sql in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -236,6 +329,29 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				04E02DC32F5BD7A9009A4D3A /* BestBallData.swift in Sources */,
+				04E02D172F588486009A4D3A /* SupabaseService.swift in Sources */,
+				04A32C962FB479DC00EFB19C /* GolfTiersLobbyView.swift in Sources */,
+				04A32C982FB479DD00EFB19C /* GolfTiersLiveView.swift in Sources */,
+				04A32BE72FB1B48500EFB19C /* SoccerDFSData.swift in Sources */,
+				04A32C922FB4777800EFB19C /* GolfTiersData.swift in Sources */,
+				04A32C9A2FB479DF00EFB19C /* GolfTiersGroupDetailView.swift in Sources */,
+				04E02D192F58849B009A4D3A /* AuthViewModel.swift in Sources */,
+				04E02D112F579627009A4D3A /* DFSData.swift in Sources */,
+				04E02D0F2F579009009A4D3A /* SportsData.swift in Sources */,
+				04E02E722F611884009A4D3A /* GolfDFSData.swift in Sources */,
+				0469AF212F8CC1E00035C895 /* PlayoffTiersData.swift in Sources */,
+				048067DC2FC1785400861A1E /* UFCDFSData.swift in Sources */,
+				0469ADCE2F7E61E60035C895 /* AnalyticsView.swift in Sources */,
+				042F016A2F69DCC30087BDC2 /* GolfPlayerDetailView.swift in Sources */,
+				04747F312FA5CAB9009F757D /* TennisBracketData.swift in Sources */,
+				042F016C2F6C99910087BDC2 /* FullHistoryView.swift in Sources */,
+				04A32C942FB478EC00EFB19C /* GolfTiersViewModel.swift in Sources */,
+				048067DE2FC184B400861A1E /* NFLDFSData.swift in Sources */,
+				04E02D1B2F58849C009A4D3A /* AuthView.swift in Sources */,
+				048067E02FC18B3300861A1E /* NCAAFBDFSData.swift in Sources */,
+				048067E22FC1B14300861A1E /* GolfTiersSettledDetailView.swift in Sources */,
+				048067D22FC1411000861A1E /* SoccerTiersData.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -258,12 +374,12 @@
 /* Begin PBXTargetDependency section */
 		04E02CF32F578B82009A4D3A /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 04E02CDE2F578B80009A4D3A /* GameOn */;
+			target = 04E02CDE2F578B80009A4D3A /* DuelFantasy */;
 			targetProxy = 04E02CF22F578B82009A4D3A /* PBXContainerItemProxy */;
 		};
 		04E02CFD2F578B82009A4D3A /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 04E02CDE2F578B80009A4D3A /* GameOn */;
+			target = 04E02CDE2F578B80009A4D3A /* DuelFantasy */;
 			targetProxy = 04E02CFC2F578B82009A4D3A /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
@@ -392,12 +508,15 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = P9HMSY7R39;
+				DEVELOPMENT_TEAM = D9WFQ2TQD9;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = DuelFantasy/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = DuelFantasy;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.sports-games";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -413,7 +532,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = GameOn.GameOn;
+				PRODUCT_BUNDLE_IDENTIFIER = GameOn.GameOn7;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
@@ -436,12 +555,15 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = P9HMSY7R39;
+				DEVELOPMENT_TEAM = D9WFQ2TQD9;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = DuelFantasy/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = DuelFantasy;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.sports-games";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -457,7 +579,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = GameOn.GameOn;
+				PRODUCT_BUNDLE_IDENTIFIER = GameOn.GameOn7;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
@@ -494,7 +616,7 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/GameOn.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/GameOn";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DuelFantasy.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/DuelFantasy";
 				XROS_DEPLOYMENT_TARGET = 26.2;
 			};
 			name = Debug;
@@ -520,7 +642,7 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/GameOn.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/GameOn";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DuelFantasy.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/DuelFantasy";
 				XROS_DEPLOYMENT_TARGET = 26.2;
 			};
 			name = Release;
@@ -578,7 +700,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		04E02CDA2F578B80009A4D3A /* Build configuration list for PBXProject "GameOn" */ = {
+		04E02CDA2F578B80009A4D3A /* Build configuration list for PBXProject "DuelFantasy" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				04E02D032F578B82009A4D3A /* Debug */,
@@ -587,7 +709,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		04E02D052F578B82009A4D3A /* Build configuration list for PBXNativeTarget "GameOn" */ = {
+		04E02D052F578B82009A4D3A /* Build configuration list for PBXNativeTarget "DuelFantasy" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				04E02D062F578B82009A4D3A /* Debug */,
@@ -596,7 +718,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		04E02D082F578B82009A4D3A /* Build configuration list for PBXNativeTarget "GameOnTests" */ = {
+		04E02D082F578B82009A4D3A /* Build configuration list for PBXNativeTarget "DuelFantasyTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				04E02D092F578B82009A4D3A /* Debug */,
@@ -605,7 +727,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		04E02D0B2F578B82009A4D3A /* Build configuration list for PBXNativeTarget "GameOnUITests" */ = {
+		04E02D0B2F578B82009A4D3A /* Build configuration list for PBXNativeTarget "DuelFantasyUITests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				04E02D0C2F578B82009A4D3A /* Debug */,
