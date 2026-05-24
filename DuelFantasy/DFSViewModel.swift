@@ -1858,8 +1858,10 @@ final class DFSViewModel {
                     if effectiveSport == "NHL" && p.position == "G" {
                         if p.isStartingGoalie {
                             // Single-game: massive boost — there are only 2 goalies and
-                            // the confirmed starter should be in ~60-80% of lineups.
-                            w *= isSingleGame ? 50.0 : 10.0
+                            // the confirmed starter should appear in 30-50%+ of lineups.
+                            // 150x overcomes the random variance (0.3-1.0) and MVP sqrt
+                            // flattening to consistently land goalies in bot rosters.
+                            w *= isSingleGame ? 150.0 : 10.0
                         } else if p.isConfirmedActive && (p.gamesPlayed ?? 0) >= 10 && p.playedRecently {
                             // Fallback: confirmed active + reasonable GP + recently played.
                             // Lowered GP threshold from 30→10 so young starters (e.g. Dobes)
@@ -2294,8 +2296,9 @@ final class DFSViewModel {
                     print("[DFS-\(sport)] Tournament locked — not padding bot field (have \(totalNonUser), target \(targetBots))")
                 }
                 print("[DFS-\(sport)] Loaded \(fieldEntries.count) entries from server (\(realEntries.count) real + \(fieldEntries.count - realEntries.count) bots), first bot playerIDs count: \(fieldEntries.first(where: { !$0.isCurrentUser })?.playerIDs.count ?? -1)")
-            } else if fieldEntries.isEmpty && !activePlayers.isEmpty {
+            } else if fieldEntries.isEmpty && !activePlayers.isEmpty && !tournamentIsLocked {
                 // No saved bots and no entries — generate a simulated field
+                // Only generate before lock. After lock, bot lineups are frozen.
                 let count = max(0, tournament.entryCount)
                 var emptyCount = 0
                 fieldEntries = (0..<count).map { index in
@@ -2311,8 +2314,13 @@ final class DFSViewModel {
                     )
                 }
                 print("[DFS-\(sport)] Generated \(count) bots from scratch, \(emptyCount) have empty lineups, players=\(activePlayers.count), rosterSlots=\(tournament.rosterSlots?.description ?? "nil")")
-            } else if fieldEntries.count < tournament.entryCount && !activePlayers.isEmpty {
+            } else if fieldEntries.isEmpty && tournamentIsLocked {
+                // Tournament is locked but no saved bots on server — skip bot generation.
+                // Generating fresh bots after lock would produce different lineups every session.
+                print("[DFS-\(sport)] Tournament locked with no saved bots — skipping bot generation to preserve consistency")
+            } else if fieldEntries.count < tournament.entryCount && !activePlayers.isEmpty && !tournamentIsLocked {
                 // Pad the field with simulated bots to reach expected entry count.
+                // Only pad before lock — after lock, use whatever we have.
                 let existingRealEntries = fieldEntries.filter { $0.isCurrentUser || $0.isRealUser }
                 let botsNeeded = max(0, tournament.entryCount - existingRealEntries.count)
                 var botEntries: [DFSFieldEntry] = []
@@ -2333,6 +2341,8 @@ final class DFSViewModel {
                 }
                 fieldEntries = existingRealEntries + botEntries
                 print("[DFS-\(sport)] Padded field with \(botsNeeded) bots, \(emptyCount) have empty lineups, players=\(activePlayers.count), rosterSlots=\(tournament.rosterSlots?.description ?? "nil")")
+            } else if fieldEntries.count < tournament.entryCount && tournamentIsLocked {
+                print("[DFS-\(sport)] Tournament locked — not padding bot field from scratch (have \(fieldEntries.count), target \(tournament.entryCount))")
             } else {
                 print("[DFS-\(sport)] No bots generated: fieldEntries=\(fieldEntries.count), tournament.entryCount=\(tournament.entryCount), players=\(activePlayers.count)")
             }
@@ -2868,9 +2878,16 @@ final class DFSViewModel {
                                "UnderdogKing","BoxScoreBoss","PrimePicks","FastBreak","ZoneDefense",
                                "SplashZone","LineupLab","FourthQuarter","RimRunner","PaintPoints"]
 
+            let isLocked = isTournamentLocked(tObj)
+
             if !savedBots.isEmpty {
                 let trimmed = Array(savedBots.prefix(botsNeeded))
                 field += trimmed.map { DFSFieldEntry(id: UUID(), name: $0.name, playerIDs: $0.playerIDs, isCurrentUser: false) }
+            } else if isLocked {
+                // Tournament is locked but no saved bots on server — skip bot generation.
+                // Generating fresh bots after lock would produce different lineups every session,
+                // causing results to change each time the user views standings.
+                print("[DFS-\(sport)] Pre-cache: tournament \(tid) is locked with no saved bots — skipping bot generation to preserve consistency")
             } else {
                 // Use the correct player pool for this tournament (may differ from activePlayers
                 // which is bound to the currently-selected tournament).

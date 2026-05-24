@@ -15,6 +15,7 @@ final class TennisBracketViewModel {
     var error: String?
     var hasSubmitted: Bool = false
     var isSubmitting: Bool = false
+    var submitError: String?
     var drawAvailable: Bool = false
 
     // MARK: - Selection
@@ -228,6 +229,18 @@ final class TennisBracketViewModel {
         error = nil
         drawAvailable = false
 
+        // Reset per-tournament state so ATP picks don't bleed into WTA and vice versa
+        hasSubmitted = false
+        userPicks = [:]
+        results = [:]
+        drawPlayers = []
+        leaderboardEntries = []
+        fieldEntries = []
+        fieldGenerated = false
+        myGroups = []
+        currentGroup = nil
+        currentGroupMembers = []
+
         let tournamentID = Self.currentTournamentID(grandSlam: selectedGrandSlam, drawType: selectedDrawType)
 
         // Create a local tournament object so we always have one even if Supabase fails
@@ -404,6 +417,7 @@ final class TennisBracketViewModel {
         guard let tournament else { return }
 
         isSubmitting = true
+        submitError = nil
         do {
             try await SupabaseService.shared.submitTennisBracketEntry(
                 tournamentID: tournament.id,
@@ -416,6 +430,7 @@ final class TennisBracketViewModel {
             clearPickProgress()
             print("[TennisBracket] Picks submitted (\(userPicks.count) picks)")
         } catch {
+            submitError = "Failed to save bracket. Please check your connection and try again."
             print("[TennisBracket] Failed to submit: \(error)")
         }
         isSubmitting = false

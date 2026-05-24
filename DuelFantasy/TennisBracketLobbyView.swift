@@ -426,13 +426,39 @@ struct TennisBracketLobbyView: View {
     }
 
     private func candidateRow(name: String, slot: String, isSelected: Bool) -> some View {
-        Button {
+        let player = viewModel.drawPlayers.first(where: { $0.name == name })
+        return Button {
             viewModel.pickWinner(slot: slot, playerName: name)
         } label: {
-            HStack {
-                Text(name)
-                    .font(.subheadline.weight(isSelected ? .bold : .regular))
-                    .foregroundStyle(isSelected ? brandPurple : .primary)
+            HStack(spacing: 10) {
+                // Seed badge (same style as Round 1)
+                if let seed = player?.seed {
+                    Text("\(seed)")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 24, height: 24)
+                        .background(brandPurple.opacity(0.8))
+                        .clipShape(Circle())
+                } else if let dp = player?.drawPosition {
+                    Text("\(dp)")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 24, height: 24)
+                        .background(Color.gray.opacity(0.1))
+                        .clipShape(Circle())
+                }
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(name)
+                        .font(.subheadline.weight(isSelected ? .bold : .regular))
+                        .foregroundStyle(isSelected ? brandPurple : .primary)
+                    if let p = player {
+                        Text("\(p.country) · #\(p.rank)")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Spacer()
                 if isSelected {
                     Image(systemName: "checkmark.circle.fill")
@@ -460,25 +486,33 @@ struct TennisBracketLobbyView: View {
     // MARK: - Submit Button
 
     private var submitButton: some View {
-        Button {
-            Task { await viewModel.submitPicks() }
-        } label: {
-            HStack {
-                if viewModel.isSubmitting {
-                    ProgressView()
-                        .tint(.white)
-                } else {
-                    Text(viewModel.hasSubmitted ? "Update Picks" : "Submit Bracket")
-                        .font(.headline.weight(.bold))
-                }
+        VStack(spacing: 8) {
+            if let submitError = viewModel.submitError {
+                Text(submitError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.center)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 16)
-            .background(viewModel.allPicksMade ? brandPurple : Color.gray.opacity(0.3))
-            .foregroundStyle(.white)
-            .clipShape(RoundedRectangle(cornerRadius: 14))
+            Button {
+                Task { await viewModel.submitPicks() }
+            } label: {
+                HStack {
+                    if viewModel.isSubmitting {
+                        ProgressView()
+                            .tint(.white)
+                    } else {
+                        Text(viewModel.hasSubmitted ? "Update Picks" : "Submit Bracket")
+                            .font(.headline.weight(.bold))
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 16)
+                .background(viewModel.allPicksMade ? brandPurple : Color.gray.opacity(0.3))
+                .foregroundStyle(.white)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+            }
+            .disabled(!viewModel.allPicksMade || viewModel.isSubmitting)
         }
-        .disabled(!viewModel.allPicksMade || viewModel.isSubmitting)
     }
 
     // MARK: - Groups Section

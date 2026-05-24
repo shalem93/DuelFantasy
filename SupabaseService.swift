@@ -3592,12 +3592,14 @@ final class SupabaseService {
         components?.queryItems = [URLQueryItem(name: "on_conflict", value: "tournament_id,user_id")]
         guard let url = components?.url else { throw URLError(.badURL) }
 
-        // Build raw JSON since picks is [String: String] and nested in a payload
-        guard JSONSerialization.isValidJSONObject(picks) else { throw URLError(.badURL) }
-        let picksData = try JSONSerialization.data(withJSONObject: picks)
-        let picksJSON = String(data: picksData, encoding: .utf8) ?? "{}"
-        let bodyString = "[{\"tournament_id\":\"\(tournamentID)\",\"user_id\":\"\(userID)\",\"entry_name\":\"\(entryName)\",\"picks\":\(picksJSON)}]"
-        guard let bodyData = bodyString.data(using: .utf8) else { throw URLError(.badURL) }
+        // Build JSON payload using JSONSerialization to properly escape all values
+        let payload: [[String: Any]] = [[
+            "tournament_id": tournamentID,
+            "user_id": userID,
+            "entry_name": entryName,
+            "picks": picks
+        ]]
+        let bodyData = try JSONSerialization.data(withJSONObject: payload)
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
