@@ -7,6 +7,7 @@ import SwiftUI
         case pga = "PGA"
         case epl = "EPL"
         case ucl = "UCL"
+        case wc = "WC"
         case ufc = "UFC"
         case nfl = "NFL"
         case cfb = "CFB"
@@ -19,6 +20,7 @@ struct DFSContestView: View {
     @Bindable var pgaViewModel: DFSViewModel
     @Bindable var eplViewModel: DFSViewModel
     @Bindable var uclViewModel: DFSViewModel
+    @Bindable var wcViewModel: DFSViewModel
     @Bindable var ufcViewModel: DFSViewModel
     @Bindable var nflViewModel: DFSViewModel
     @Bindable var cfbViewModel: DFSViewModel
@@ -107,6 +109,8 @@ struct DFSContestView: View {
                         soccerTodayContent(viewModel: eplViewModel, sport: "EPL")
                     } else if selectedSport == .ucl {
                         soccerTodayContent(viewModel: uclViewModel, sport: "UCL")
+                    } else if selectedSport == .wc {
+                        soccerTodayContent(viewModel: wcViewModel, sport: "WC")
                     } else if selectedSport == .ufc {
                         ufcTodayContent
                     } else if selectedSport == .nfl {
@@ -145,6 +149,9 @@ struct DFSContestView: View {
                             case .ucl:
                                 await uclViewModel.loadSlate(force: true)
                                 await uclViewModel.refreshLive()
+                            case .wc:
+                                await wcViewModel.loadSlate(force: true)
+                                await wcViewModel.refreshLive()
                             case .ufc:
                                 await ufcViewModel.loadSlate(force: true)
                                 await ufcViewModel.refreshLive()
@@ -167,78 +174,39 @@ struct DFSContestView: View {
         }
         .task {
             await refreshAuthAndSync()
-            // NBA
+
+            // Restore each sport's cached private-contest list synchronously
+            // so the Active Contests view renders the right number of cards
+            // (in shimmer) on the very first frame, instead of going 2 → 3
+            // when the network fetch eventually returns the private contest.
+            for vm in [viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
+                       eplViewModel, uclViewModel, wcViewModel,
+                       ufcViewModel, nflViewModel, cfbViewModel] {
+                vm.loadCachedPrivateContests()
+            }
+
+            // Sync history once and propagate to all sport viewmodels — the
+            // history payload is the same regardless of which sport calls it,
+            // so doing it 9 times sequentially is wasted time.
             await viewModel.syncHistoryFromServer()
             propagateHistory(from: viewModel)
-            await viewModel.loadSlateIfNeeded()
-            await viewModel.fetchEntriesIfNeeded()
-            await viewModel.checkAndSettleUnsettledTournaments()
-            await viewModel.refreshLive()
-            await viewModel.preCacheAllEnteredTournaments()
-            // NHL
-            await nhlViewModel.syncHistoryFromServer()
-            propagateHistory(from: nhlViewModel)
-            await nhlViewModel.loadSlateIfNeeded()
-            await nhlViewModel.fetchEntriesIfNeeded()
-            await nhlViewModel.checkAndSettleUnsettledTournaments()
-            await nhlViewModel.refreshLive()
-            await nhlViewModel.preCacheAllEnteredTournaments()
-            // MLB
-            await mlbViewModel.syncHistoryFromServer()
-            propagateHistory(from: mlbViewModel)
-            await mlbViewModel.loadSlateIfNeeded()
-            await mlbViewModel.fetchEntriesIfNeeded()
-            await mlbViewModel.checkAndSettleUnsettledTournaments()
-            await mlbViewModel.refreshLive()
-            await mlbViewModel.preCacheAllEnteredTournaments()
-            // PGA
-            await pgaViewModel.syncHistoryFromServer()
-            propagateHistory(from: pgaViewModel)
-            await pgaViewModel.loadSlateIfNeeded()
-            await pgaViewModel.fetchEntriesIfNeeded()
-            await pgaViewModel.checkAndSettleUnsettledTournaments()
-            await pgaViewModel.refreshLive()
-            await pgaViewModel.preCacheAllEnteredTournaments()
-            // EPL
-            await eplViewModel.syncHistoryFromServer()
-            propagateHistory(from: eplViewModel)
-            await eplViewModel.loadSlateIfNeeded()
-            await eplViewModel.fetchEntriesIfNeeded()
-            await eplViewModel.checkAndSettleUnsettledTournaments()
-            await eplViewModel.refreshLive()
-            await eplViewModel.preCacheAllEnteredTournaments()
-            // UCL
-            await uclViewModel.syncHistoryFromServer()
-            propagateHistory(from: uclViewModel)
-            await uclViewModel.loadSlateIfNeeded()
-            await uclViewModel.fetchEntriesIfNeeded()
-            await uclViewModel.checkAndSettleUnsettledTournaments()
-            await uclViewModel.refreshLive()
-            await uclViewModel.preCacheAllEnteredTournaments()
-            // UFC
-            await ufcViewModel.syncHistoryFromServer()
-            propagateHistory(from: ufcViewModel)
-            await ufcViewModel.loadSlateIfNeeded()
-            await ufcViewModel.fetchEntriesIfNeeded()
-            await ufcViewModel.checkAndSettleUnsettledTournaments()
-            await ufcViewModel.refreshLive()
-            await ufcViewModel.preCacheAllEnteredTournaments()
-            // NFL
-            await nflViewModel.syncHistoryFromServer()
-            propagateHistory(from: nflViewModel)
-            await nflViewModel.loadSlateIfNeeded()
-            await nflViewModel.fetchEntriesIfNeeded()
-            await nflViewModel.checkAndSettleUnsettledTournaments()
-            await nflViewModel.refreshLive()
-            await nflViewModel.preCacheAllEnteredTournaments()
-            // CFB
-            await cfbViewModel.syncHistoryFromServer()
-            propagateHistory(from: cfbViewModel)
-            await cfbViewModel.loadSlateIfNeeded()
-            await cfbViewModel.fetchEntriesIfNeeded()
-            await cfbViewModel.checkAndSettleUnsettledTournaments()
-            await cfbViewModel.refreshLive()
-            await cfbViewModel.preCacheAllEnteredTournaments()
+
+            // Per-sport init pipelines run in PARALLEL. Previously these were
+            // sequential, so MLB / PGA / later sports stayed empty for 10+
+            // seconds after launch — long enough for a user to tap into an
+            // MLB SG contest and see raw IDs + an empty leaderboard.
+            async let nba: Void  = initSportPipeline(viewModel)
+            async let nhl: Void  = initSportPipeline(nhlViewModel)
+            async let mlb: Void  = initSportPipeline(mlbViewModel)
+            async let pga: Void  = initSportPipeline(pgaViewModel)
+            async let epl: Void  = initSportPipeline(eplViewModel)
+            async let ucl: Void  = initSportPipeline(uclViewModel)
+            async let wc: Void   = initSportPipeline(wcViewModel)
+            async let ufc: Void  = initSportPipeline(ufcViewModel)
+            async let nfl: Void  = initSportPipeline(nflViewModel)
+            async let cfb: Void  = initSportPipeline(cfbViewModel)
+            _ = await (nba, nhl, mlb, pga, epl, ucl, wc, ufc, nfl, cfb)
+
             // Load previous in-progress entries for My Contests
             await loadPreviousInProgressEntries()
         }
@@ -283,6 +251,13 @@ struct DFSContestView: View {
                 try? await Task.sleep(nanoseconds: 35_000_000_000)
                 await refreshAuthAndSync()
                 await uclViewModel.refreshLive()
+            }
+        }
+        .task(id: "wc-polling") {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 35_000_000_000)
+                await refreshAuthAndSync()
+                await wcViewModel.refreshLive()
             }
         }
         .task(id: "ufc-polling") {
@@ -1274,47 +1249,165 @@ struct DFSContestView: View {
     /// When the slate is locked, show a list of entered tournament cards.
     /// Tapping a card sets the active tournament and navigates to the live view.
     private func lockedContestList(viewModel vm: DFSViewModel) -> some View {
-        // Build a flat list of (tournament, lineupNumber) for each entry
-        // Exclude settled tournaments — those games are over
+        // Build a flat list of (tournament, lineupNumber) for each entry.
+        // Iterate `enteredTournamentIDs` directly — NOT `vm.tournaments.filter`
+        // — because `loadSlate(force: true)` (the refresh button) replaces
+        // `tournaments` and may not include yesterday's / in-progress SG IDs.
+        // If a tournament isn't in the slate anymore, synthesize a stub from
+        // the entry's metadata so the card still appears.
         let settledIDs = vm.settledTournaments
-        let enteredTournaments = vm.tournaments.filter {
-            vm.enteredTournamentIDs.contains($0.id) && !settledIDs.contains($0.id)
-        }
+        let tournamentByID = Dictionary(uniqueKeysWithValues: vm.tournaments.map { ($0.id, $0) })
+        // Any tournament IDs the user references as the parent of a private
+        // contest are NOT public contests they joined — they're slates used
+        // as the basis for a private contest's player pool. Hide those from
+        // the public Active Contests list to prevent ghost "H2H" cards from
+        // showing up when the underlying `dfs_tournaments` row was created
+        // solely as a private contest's parent reference.
+        // Only hide private-contest parents that the user hasn't actually
+        // entered as a public contest. If they DID submit a public entry,
+        // it should appear in Active Contests even when the same slate is
+        // referenced as a private contest's parent.
+        let unenteredPrivateParents: Set<String> = {
+            var set = Set<String>()
+            for contest in vm.myPrivateContests {
+                let pid = contest.parentTournamentID
+                let hasPublicEntry = (vm.userEntryRecords[pid]?.isEmpty == false)
+                if !hasPublicEntry { set.insert(pid) }
+            }
+            return set
+        }()
+        let enteredTournaments: [DFSTournament] = vm.enteredTournamentIDs
+            .filter { !settledIDs.contains($0) && !unenteredPrivateParents.contains($0) }
+            .compactMap { tid -> DFSTournament? in
+                if let existing = tournamentByID[tid] { return existing }
+                // Synthesize from entry data (best-effort — preserves the card
+                // through slate refreshes even when the SG ID rotates out).
+                guard let entry = vm.userEntryRecords[tid]?.first else { return nil }
+                let entryCount = DFSViewModel.entryCountFromTournamentID(tid)
+                let lineupSize = entry.lineupPlayerIDs.count
+                let isSG = tid.contains("-sg-")
+                return DFSTournament(
+                    id: tid,
+                    title: "\(vm.sport) Contest",
+                    league: vm.sport,
+                    entryCount: entryCount,
+                    lineupSize: lineupSize,
+                    salaryCap: 50000,
+                    isSingleGame: isSG,
+                    tournamentType: DFSTournamentType.from(tournamentID: tid)
+                )
+            }
         struct EntryItem: Identifiable {
             let id: String  // unique key for ForEach
             let tournament: DFSTournament
             let lineupNumber: Int
         }
-        let allEntries: [EntryItem] = enteredTournaments.flatMap { tournament -> [EntryItem] in
+        var rawEntries: [(tournament: DFSTournament, entry: DFSEntryRecord)] = []
+        for tournament in enteredTournaments {
             let entries = vm.userEntryRecords[tournament.id] ?? []
-            if entries.isEmpty {
-                return [EntryItem(id: "\(tournament.id)-1", tournament: tournament, lineupNumber: 1)]
+            guard !entries.isEmpty else { continue }
+            // Skip entries whose lineup size doesn't match the tournament's
+            // expected lineup size (catches malformed cross-format submissions).
+            let validEntries = entries.filter { entry in
+                let actual = entry.lineupPlayerIDs.count
+                let expected = tournament.lineupSize
+                return expected == 0 || actual == expected
             }
-            return entries.enumerated().map { idx, entry in
-                let num = entry.lineupNumber ?? (idx + 1)
-                return EntryItem(id: "\(tournament.id)-\(num)", tournament: tournament, lineupNumber: num)
+            for entry in validEntries {
+                rawEntries.append((tournament, entry))
             }
         }
+
+        // Deduplicate cross-size shadow entries. The user has been seeing
+        // "phantom" small contests (H2H, 3-Man, etc.) auto-created alongside
+        // intended large contest submissions. To prevent these from cluttering
+        // the active list, group entries by (slate, slate-type, lineupNumber)
+        // — i.e. all entries for the same slate identity with the same lineup
+        // number — and keep only the LARGEST entry count.
+        //
+        // Slate identity = tournament ID with the trailing "-<entryCount>" stripped
+        // (e.g. "mlb-20260528-sg-401815525-2000" → "mlb-20260528-sg-401815525").
+        // This groups H2H + 3-Man + 2000-Entry for the same slate together.
+        func slateIdentity(_ tid: String) -> String {
+            var id = tid
+            if let range = id.range(of: #"-i\d+$"#, options: .regularExpression) {
+                id.removeSubrange(range)
+            }
+            let parts = id.components(separatedBy: "-")
+            if let last = parts.last, let n = Int(last),
+               [2, 3, 5, 10, 100, 500, 1000, 2000].contains(n) {
+                return parts.dropLast().joined(separator: "-")
+            }
+            return id
+        }
+        let dedupedByLineup: [(tournament: DFSTournament, entry: DFSEntryRecord)] = {
+            let grouped = Dictionary(grouping: rawEntries, by: { row -> String in
+                let slate = slateIdentity(row.tournament.id)
+                let ln = row.entry.lineupNumber ?? 1
+                return "\(slate)#\(ln)"
+            })
+            var kept: [(tournament: DFSTournament, entry: DFSEntryRecord)] = []
+            for (_, rows) in grouped {
+                // If all rows have the same entry count, keep them all.
+                let counts = Set(rows.map { $0.tournament.entryCount })
+                if counts.count == 1 {
+                    kept.append(contentsOf: rows)
+                    continue
+                }
+                // Multiple sizes for the same slate+lineup → keep only the largest.
+                let maxCount = counts.max() ?? 0
+                kept.append(contentsOf: rows.filter { $0.tournament.entryCount == maxCount })
+            }
+            return kept
+        }()
+
+        // Sort by (tournament.id, lineupNumber) for a stable order so the
+        // Active Contests list doesn't visibly reshuffle on every return
+        // from a navigation (root cause: enteredTournamentIDs is a Set).
+        let sortedEntries = dedupedByLineup.sorted { lhs, rhs in
+            if lhs.tournament.id != rhs.tournament.id {
+                return lhs.tournament.id < rhs.tournament.id
+            }
+            return (lhs.entry.lineupNumber ?? 1) < (rhs.entry.lineupNumber ?? 1)
+        }
+        let allEntries: [EntryItem] = sortedEntries.enumerated().map { idx, row in
+            let num = row.entry.lineupNumber ?? (idx + 1)
+            return EntryItem(id: "\(row.tournament.id)-\(num)", tournament: row.tournament, lineupNumber: num)
+        }
+
+        // Private contests for the current sport. Show anything that
+        // hasn't been settled AND isn't more than 6 hours past its parent
+        // slate's lock time. The 6-hour cutoff mirrors the past-section
+        // filter (`allPastPrivateContests`) so a single contest never shows
+        // in both sections. Dropping the strict same-day check unblocks
+        // cases where the slate provider rotated (e.g. UFC card finishes
+        // and the provider returns tomorrow's upcoming card — today's
+        // contest would otherwise vanish from Active Contests).
+        let sportPrefix = vm.sport.lowercased() + "-"
+        let activePrivateContests: [DFSPrivateContest] = vm.myPrivateContests.filter { contest in
+            guard contest.parentTournamentID.hasPrefix(sportPrefix) else { return false }
+            guard !settledIDs.contains(contest.parentTournamentID) else { return false }
+            if let parent = vm.tournaments.first(where: { $0.id == contest.parentTournamentID }) {
+                let lockTime = vm.lockTimeForTournament(parent)
+                if Date().timeIntervalSince(lockTime) > 6 * 3600 { return false }
+            }
+            return true
+        }
+
+        let totalItems = allEntries.count + activePrivateContests.count
+        // Per-card readiness: each card flips out of shimmer as soon as its
+        // own data is loaded. The previous all-or-nothing gate made every
+        // card wait for the slowest one (typically a non-active contest
+        // stuck in background bot generation), so the user's active contest
+        // — which was already populated by refreshLive — was held behind
+        // shimmer for the full pre-cache cycle.
         return Group {
-            if allEntries.isEmpty && vm.sport == "PGA" {
-                // PGA: show live spectator view so users can follow the tournament
-                // even without entering. Select the largest field tournament.
-                let spectatorTournament = vm.tournaments
-                    .sorted(by: { $0.entryCount > $1.entryCount })
-                    .first
-                DFSLiveContestView(viewModel: vm)
-                    .task {
-                        if let t = spectatorTournament {
-                            vm.selectTournament(t.id, lineupNumber: 1)
-                        }
-                        if vm.leaderboardEntries.isEmpty {
-                            await vm.refreshLive()
-                        }
-                    }
-            } else if allEntries.isEmpty {
+            if totalItems == 0 {
                 noEntriesTodayView(viewModel: vm)
-            } else if allEntries.count == 1 {
-                DFSLiveContestView(viewModel: vm)
+            } else if allEntries.count == 1 && activePrivateContests.isEmpty {
+                DFSLiveContestView(viewModel: vm,
+                                   expectedTournamentID: allEntries[0].tournament.id,
+                                   expectedLineupNumber: allEntries[0].lineupNumber)
                     .task {
                         let item = allEntries[0]
                         vm.selectTournament(item.tournament.id, lineupNumber: item.lineupNumber)
@@ -1333,7 +1426,9 @@ struct DFSContestView: View {
 
                         ForEach(allEntries) { item in
                             NavigationLink {
-                                DFSLiveContestView(viewModel: vm)
+                                DFSLiveContestView(viewModel: vm,
+                                                   expectedTournamentID: item.tournament.id,
+                                                   expectedLineupNumber: item.lineupNumber)
                                     .task {
                                         vm.selectTournament(item.tournament.id, lineupNumber: item.lineupNumber)
                                         if vm.leaderboardEntries.isEmpty {
@@ -1341,7 +1436,28 @@ struct DFSContestView: View {
                                         }
                                     }
                             } label: {
-                                lockedContestCard(tournament: item.tournament, lineupNumber: item.lineupNumber, viewModel: vm)
+                                Group {
+                                    if vm.isTournamentReady(item.tournament.id) {
+                                        lockedContestCard(tournament: item.tournament, lineupNumber: item.lineupNumber, viewModel: vm)
+                                    } else {
+                                        activeContestShimmer
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        ForEach(activePrivateContests) { contest in
+                            NavigationLink {
+                                DFSPrivateContestDetailView(viewModel: vm, contest: contest)
+                            } label: {
+                                Group {
+                                    if vm.isPrivateContestReady(contest.id) {
+                                        activePrivateContestCard(contest: contest, viewModel: vm)
+                                    } else {
+                                        activeContestShimmer
+                                    }
+                                }
                             }
                             .buttonStyle(.plain)
                         }
@@ -1421,20 +1537,88 @@ struct DFSContestView: View {
             let tournament: DFSTournament
             let lineupNumber: Int
         }
-        let lockedEntryItems: [LockedEntryItem] = enteredLocked.flatMap { tournament -> [LockedEntryItem] in
+
+        // Collect raw (tournament, entry) pairs first so we can dedup phantom
+        // small contests (H2H, 3-Man, 5-Man) that occasionally get auto-created
+        // alongside the user's real large-contest submission. Without this,
+        // the same lineup shows up as multiple rows (H2H + 2000-Entry).
+        var rawPairs: [(tournament: DFSTournament, entry: DFSEntryRecord?, lineupNumber: Int)] = []
+        for tournament in enteredLocked {
             let entries = vm.userEntryRecords[tournament.id] ?? []
             if entries.isEmpty {
-                return [LockedEntryItem(id: "\(tournament.id)-1", tournament: tournament, lineupNumber: 1)]
-            }
-            return entries.enumerated().map { idx, entry in
-                let num = entry.lineupNumber ?? (idx + 1)
-                return LockedEntryItem(id: "\(tournament.id)-\(num)", tournament: tournament, lineupNumber: num)
+                rawPairs.append((tournament, nil, 1))
+            } else {
+                for (idx, entry) in entries.enumerated() {
+                    rawPairs.append((tournament, entry, entry.lineupNumber ?? (idx + 1)))
+                }
             }
         }
+
+        // Strip trailing entry-count + instance suffix so contests like
+        // "mlb-20260529-2" (H2H) and "mlb-20260529-2000" (Grand Tourn.) on the
+        // same slate + same lineup number get grouped together.
+        func slateIdentity(_ tid: String) -> String {
+            var id = tid
+            if let range = id.range(of: #"-i\d+$"#, options: .regularExpression) {
+                id.removeSubrange(range)
+            }
+            let parts = id.components(separatedBy: "-")
+            if let last = parts.last, let n = Int(last),
+               [2, 3, 5, 10, 100, 500, 1000, 2000].contains(n) {
+                return parts.dropLast().joined(separator: "-")
+            }
+            return id
+        }
+        let grouped = Dictionary(grouping: rawPairs) { row in
+            "\(slateIdentity(row.tournament.id))#\(row.lineupNumber)"
+        }
+        var deduped: [(tournament: DFSTournament, lineupNumber: Int)] = []
+        for (_, rows) in grouped {
+            let counts = Set(rows.map { $0.tournament.entryCount })
+            // Keep only the largest entry-count contest for each
+            // (slate, lineup number) pair — drops the phantom small ones.
+            let maxCount = counts.max() ?? 0
+            for row in rows where row.tournament.entryCount == maxCount {
+                deduped.append((row.tournament, row.lineupNumber))
+            }
+        }
+        let lockedEntryItems: [LockedEntryItem] = deduped
+            // Sort by (tournament.id, lineupNumber) for a stable order — without
+            // this, `enteredTournamentIDs` (a Set) yields a different iteration
+            // order on every render and the cards visibly reshuffle each time
+            // the user returns from a navigation.
+            .sorted { lhs, rhs in
+                if lhs.tournament.id != rhs.tournament.id {
+                    return lhs.tournament.id < rhs.tournament.id
+                }
+                return lhs.lineupNumber < rhs.lineupNumber
+            }
+            .map { row in
+                LockedEntryItem(id: "\(row.tournament.id)-\(row.lineupNumber)",
+                                tournament: row.tournament, lineupNumber: row.lineupNumber)
+            }
+
+        // Private contests for the current sport — same filter as
+        // `lockedContestList` so contests appear consistently regardless of
+        // whether the slate is fully locked or only partially locked. Without
+        // this, MLB users sitting in the mid-afternoon partial-lock state
+        // (some games started, others haven't) couldn't see any of their
+        // private contests until the entire slate locked.
+        let sportPrefixForPartial = vm.sport.lowercased() + "-"
+        let partialActivePrivateContests: [DFSPrivateContest] = vm.myPrivateContests.filter { contest in
+            guard contest.parentTournamentID.hasPrefix(sportPrefixForPartial) else { return false }
+            guard !settledIDs.contains(contest.parentTournamentID) else { return false }
+            if let parent = vm.tournaments.first(where: { $0.id == contest.parentTournamentID }) {
+                let lockTime = vm.lockTimeForTournament(parent)
+                if Date().timeIntervalSince(lockTime) > 6 * 3600 { return false }
+            }
+            return true
+        }
+
         return ScrollView {
             VStack(spacing: 16) {
                 // MARK: Live contests section (entered tournaments that have locked)
-                if !lockedEntryItems.isEmpty {
+                if !lockedEntryItems.isEmpty || !partialActivePrivateContests.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack(spacing: 6) {
                             Circle()
@@ -1450,7 +1634,9 @@ struct DFSContestView: View {
 
                         ForEach(lockedEntryItems) { item in
                             NavigationLink {
-                                DFSLiveContestView(viewModel: vm)
+                                DFSLiveContestView(viewModel: vm,
+                                                   expectedTournamentID: item.tournament.id,
+                                                   expectedLineupNumber: item.lineupNumber)
                                     .task {
                                         vm.selectTournament(item.tournament.id, lineupNumber: item.lineupNumber)
                                         if vm.leaderboardEntries.isEmpty {
@@ -1459,6 +1645,19 @@ struct DFSContestView: View {
                                     }
                             } label: {
                                 lockedContestCard(tournament: item.tournament, lineupNumber: item.lineupNumber, viewModel: vm)
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        ForEach(partialActivePrivateContests) { contest in
+                            NavigationLink {
+                                DFSPrivateContestDetailView(viewModel: vm, contest: contest)
+                            } label: {
+                                if vm.isPrivateContestReady(contest.id) {
+                                    activePrivateContestCard(contest: contest, viewModel: vm)
+                                } else {
+                                    activeContestShimmer
+                                }
                             }
                             .buttonStyle(.plain)
                         }
@@ -1493,6 +1692,116 @@ struct DFSContestView: View {
             )
             .ignoresSafeArea()
         )
+    }
+
+    /// Skeleton placeholder for an active-contest card while the tournament's
+    /// data is still loading. Matches the layout of `lockedContestCard` so the
+    /// row doesn't jump when the real data lands.
+    private var activeContestShimmer: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    shimmerBox(width: 60, height: 18)
+                    shimmerBox(width: 30, height: 14)
+                }
+                shimmerBox(width: 140, height: 16)
+                shimmerBox(width: 100, height: 12)
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 6) {
+                shimmerBox(width: 50, height: 18)
+                shimmerBox(width: 36, height: 14)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(.white)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .shadow(color: .black.opacity(0.05), radius: 4, y: 2)
+        .padding(.horizontal, 16)
+    }
+
+    private func shimmerBox(width: CGFloat, height: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 4)
+            .fill(Color(.systemGray5))
+            .frame(width: width, height: height)
+            .shimmering()
+    }
+
+    /// Active-contest card for a private contest. Mirrors `lockedContestCard`'s
+    /// layout so both card types sit comfortably in the same list.
+    private func activePrivateContestCard(contest: DFSPrivateContest, viewModel vm: DFSViewModel) -> some View {
+        let memberCount = vm.privateContestMembers[contest.id]?.count ?? 0
+        let parentTitle = vm.tournaments.first(where: { $0.id == contest.parentTournamentID })?.title ?? "Private Contest"
+
+        // Compute live FPTS directly from the user's submitted entry + current
+        // live points — don't rely on `privateContestLeaderboards`, which only
+        // uses live points when the active tournament IS this contest's parent.
+        let isSG = vm.tournaments.first(where: { $0.id == contest.parentTournamentID })?.isSingleGame
+            ?? contest.parentTournamentID.contains("-sg-")
+        let myUUID = vm.userID.flatMap(UUID.init(uuidString:))
+        let myEntry: DFSPrivateContestEntry? = {
+            guard let me = myUUID else { return nil }
+            return (vm.privateContestEntries[contest.id] ?? []).first(where: { $0.userID == me })
+        }()
+        let myScore: Double = {
+            guard let entry = myEntry else { return 0 }
+            var total = 0.0
+            for (i, pid) in entry.lineupPlayerIDs.enumerated() {
+                let pts = vm.livePlayerPoints[pid] ?? 0
+                total += (isSG && i == 0) ? pts * 1.5 : pts
+            }
+            return total
+        }()
+        let myRank: Int? = (vm.privateContestLeaderboards[contest.id] ?? []).first(where: { $0.isCurrentUser })?.rank
+
+        return HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text("PRIVATE")
+                        .font(.caption.weight(.bold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(brandPurple)
+                        .foregroundStyle(.white)
+                        .clipShape(Capsule())
+                    Text(contest.name)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                }
+                HStack(spacing: 8) {
+                    Text(parentTitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Text("· \(memberCount) member\(memberCount == 1 ? "" : "s")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 2) {
+                if let rank = myRank {
+                    Text("#\(rank)")
+                        .font(.caption.weight(.bold).monospacedDigit())
+                        .foregroundStyle(brandPurple)
+                }
+                Text(String(format: "%.1f", myScore))
+                    .font(.subheadline.weight(.bold).monospacedDigit())
+                    .foregroundStyle(.primary)
+                Text("FPTS")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            Image(systemName: "chevron.right")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(14)
+        .background(Color(.systemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .shadow(color: .black.opacity(0.06), radius: 6, y: 3)
+        .padding(.horizontal, 16)
     }
 
     private func lockedContestCard(tournament: DFSTournament, lineupNumber: Int = 1, viewModel vm: DFSViewModel) -> some View {
@@ -1534,6 +1843,14 @@ struct DFSContestView: View {
             // If this tournament's leaderboard is loaded, compute rank from live scores
             if vm.activeTournamentID == tournament.id, !vm.leaderboardEntries.isEmpty {
                 let higherCount = vm.leaderboardEntries.filter { $0.points > lineupScore }.count
+                return higherCount + 1
+            }
+            // Fall back to the per-tournament cache (built by pre-cache or by a
+            // previous live-view session). Lets the card show a rank for any
+            // entered contest whose field has been generated, not just the
+            // currently-selected one.
+            if let cachedLB = vm.cachedLeaderboard(for: tournament.id), !cachedLB.isEmpty {
+                let higherCount = cachedLB.filter { $0.points > lineupScore }.count
                 return higherCount + 1
             }
             // Fall back to saved history result for this specific lineup
@@ -1615,18 +1932,135 @@ struct DFSContestView: View {
     private var pgaActiveEntries: [DFSEntryRecord] { activeEntries(for: pgaViewModel) }
     private var eplActiveEntries: [DFSEntryRecord] { activeEntries(for: eplViewModel) }
     private var uclActiveEntries: [DFSEntryRecord] { activeEntries(for: uclViewModel) }
+    private var wcActiveEntries: [DFSEntryRecord] { activeEntries(for: wcViewModel) }
 
     /// All active DFS entries across all sports (one per entered tournament, excluding settled).
     private var allActiveEntries: [DFSEntryRecord] {
-        nbaActiveEntries + nhlActiveEntries + mlbActiveEntries + pgaActiveEntries + eplActiveEntries + uclActiveEntries
+        nbaActiveEntries + nhlActiveEntries + mlbActiveEntries + pgaActiveEntries + eplActiveEntries + uclActiveEntries + wcActiveEntries
     }
 
     private var hasAnyActiveEntry: Bool {
         !allActiveEntries.isEmpty || !previousInProgressEntries.isEmpty
     }
 
+    /// Tuple pairing a private contest with its owning sport view model so
+    /// the row knows which VM to pass to the detail view (different sports
+    /// hold their private contests in different DFSViewModel instances).
+    private struct PrivatePastEntry: Identifiable {
+        let id: UUID
+        let viewModel: DFSViewModel
+        let contest: DFSPrivateContest
+    }
+
+    /// One row in the unified Past Results list — either a public DFS result
+    /// or a private contest entry. Sorted by date alongside each other.
+    private enum MergedPastRow: Identifiable {
+        case `public`(DFSResult)
+        case privateContest(PrivatePastEntry)
+
+        var id: String {
+            switch self {
+            case .public(let r): return "pub-\(r.id.uuidString)"
+            case .privateContest(let p): return "priv-\(p.id.uuidString)"
+            }
+        }
+    }
+
+    private func rowDate(_ row: MergedPastRow) -> Date {
+        switch row {
+        case .public(let r): return r.loggedAt
+        case .privateContest(let p): return parsedDate(for: p.contest)
+        }
+    }
+
+    /// Returns the sport view model whose `sport` matches the prefix of the
+    /// given parent tournament ID (e.g. "mlb-..." → mlbViewModel). All VMs
+    /// hold the same `myPrivateContests` payload (the fetch is per user, not
+    /// per sport), but the detail view's `parentTournament` lookup is per-VM
+    /// — so we route each contest to the VM that's most likely to have it.
+    private func viewModelForContest(_ contest: DFSPrivateContest) -> DFSViewModel {
+        let id = contest.parentTournamentID.lowercased()
+        if id.hasPrefix("nhl-") { return nhlViewModel }
+        if id.hasPrefix("mlb-") { return mlbViewModel }
+        if id.hasPrefix("pga-") { return pgaViewModel }
+        if id.hasPrefix("epl-") { return eplViewModel }
+        if id.hasPrefix("ucl-") { return uclViewModel }
+        if id.hasPrefix("wc-") { return wcViewModel }
+        if id.hasPrefix("ufc-") { return ufcViewModel }
+        if id.hasPrefix("nfl-") { return nflViewModel }
+        if id.hasPrefix("cfb-") { return cfbViewModel }
+        return viewModel  // NBA / NCAAM default
+    }
+
+    /// Past private contests, deduped by contest ID and sorted newest first
+    /// by the date embedded in the parent tournament ID. We pull from a
+    /// single VM because `fetchMyDFSPrivateContests` is keyed by userID
+    /// (not sport), so every VM holds the same list — iterating all 9 VMs
+    /// would produce 9× duplicates.
+    private var allPastPrivateContests: [PrivatePastEntry] {
+        var entries: [PrivatePastEntry] = []
+        var seen: Set<UUID> = []
+        for contest in viewModel.myPrivateContests {
+            guard !seen.contains(contest.id) else { continue }
+            seen.insert(contest.id)
+            let owningVM = viewModelForContest(contest)
+            // A contest counts as "past" if EITHER its parent slate isn't
+            // the currently-displayed one (different date), OR its parent
+            // locked more than 6 hours ago (games of any sport are done by
+            // then) — without the second clause, a contest entered earlier
+            // today would stay pinned in "Active Contests" indefinitely
+            // and never surface in Past Results.
+            let isPastBySlate = !owningVM.privateContestBelongsToCurrentSlate(contest)
+            let isPastByTime: Bool = {
+                guard let parent = owningVM.tournaments.first(where: { $0.id == contest.parentTournamentID }) else {
+                    return false
+                }
+                let lockTime = owningVM.lockTimeForTournament(parent)
+                return Date().timeIntervalSince(lockTime) > 6 * 3600
+            }()
+            guard isPastBySlate || isPastByTime else { continue }
+            entries.append(PrivatePastEntry(id: contest.id, viewModel: owningVM, contest: contest))
+        }
+        return entries.sorted { dateString(for: $0.contest) > dateString(for: $1.contest) }
+    }
+
+    private func dateString(for contest: DFSPrivateContest) -> String {
+        let parts = contest.parentTournamentID.split(separator: "-")
+        return parts.first(where: { $0.count == 8 && Int($0) != nil }).map(String.init) ?? ""
+    }
+
+    /// Converts a private contest's parent-ID date string to a Date for
+    /// merge-sorting with public results' `loggedAt`.
+    private func parsedDate(for contest: DFSPrivateContest) -> Date {
+        let str = dateString(for: contest)
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyyMMdd"
+        return fmt.date(from: str) ?? .distantPast
+    }
+
     private var unifiedMyContestsContent: some View {
-        let allHistory = viewModel.dfsHistory.sorted {
+        // Aggregate dfsHistory across every sport view model. `propagateHistory`
+        // runs once at launch but each VM's own settlement (UFC, NHL, etc.)
+        // writes only to its own `dfsHistory` afterwards — without merging
+        // here, a UFC result settled mid-session would only appear in the
+        // UFC lobby's Recent Results, never in the unified Past Results.
+        // Dedupe on `id` since settlement on multiple VMs can produce
+        // identical entries.
+        let mergedHistory: [DFSResult] = {
+            let sources: [DFSViewModel] = [
+                viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
+                eplViewModel, uclViewModel, wcViewModel,
+                ufcViewModel, nflViewModel, cfbViewModel
+            ]
+            var byID: [UUID: DFSResult] = [:]
+            for vm in sources {
+                for result in vm.dfsHistory {
+                    if byID[result.id] == nil { byID[result.id] = result }
+                }
+            }
+            return Array(byID.values)
+        }()
+        let allHistory = mergedHistory.sorted {
             if $0.loggedAt != $1.loggedAt { return $0.loggedAt > $1.loggedAt }
             return $0.id.uuidString < $1.id.uuidString
         }
@@ -1634,6 +2068,12 @@ struct DFSContestView: View {
             guard statsSportFilter != "All" else { return allHistory }
             let prefix = statsSportFilter.lowercased() + "-"
             return allHistory.filter { $0.tournamentId?.hasPrefix(prefix) == true }
+        }()
+        let allPrivates = allPastPrivateContests
+        let filteredPrivates: [PrivatePastEntry] = {
+            guard statsSportFilter != "All" else { return allPrivates }
+            let prefix = statsSportFilter.lowercased() + "-"
+            return allPrivates.filter { $0.contest.parentTournamentID.hasPrefix(prefix) }
         }()
         let availableSports: [String] = {
             var sports = Set<String>()
@@ -1644,7 +2084,7 @@ struct DFSContestView: View {
         }()
         return ZStack {
             nbaGradientBackground
-            if allHistory.isEmpty && !hasAnyActiveEntry {
+            if allHistory.isEmpty && allPrivates.isEmpty && !hasAnyActiveEntry {
                 VStack(spacing: 14) {
                     Image(systemName: "trophy")
                         .font(.system(size: 44))
@@ -1713,17 +2153,37 @@ struct DFSContestView: View {
                             unifiedContestStatsCard(filteredHistory)
                         }
 
-                        // All past results (filtered by sport)
-                        if !filteredHistory.isEmpty {
+                        // Merge public and private rows into one date-sorted
+                        // list — yesterday's private contest belongs right
+                        // next to yesterday's public results, not pinned at
+                        // the bottom of the section.
+                        let mergedRows: [MergedPastRow] = {
+                            var rows: [MergedPastRow] = filteredHistory.map { .public($0) }
+                            rows.append(contentsOf: filteredPrivates.map { .privateContest($0) })
+                            rows.sort { rowDate($0) > rowDate($1) }
+                            return rows
+                        }()
+
+                        if !mergedRows.isEmpty {
                             VStack(alignment: .leading, spacing: 10) {
                                 Text("Past Results")
                                     .font(.headline)
 
-                                ForEach(filteredHistory) { result in
-                                    NavigationLink(value: result) {
-                                        resultRowWithSport(result)
+                                ForEach(mergedRows) { row in
+                                    switch row {
+                                    case .public(let result):
+                                        NavigationLink(value: result) {
+                                            resultRowWithSport(result)
+                                        }
+                                        .buttonStyle(.plain)
+                                    case .privateContest(let entry):
+                                        NavigationLink {
+                                            DFSPrivateContestDetailView(viewModel: entry.viewModel, contest: entry.contest)
+                                        } label: {
+                                            pastPrivateRow(entry: entry)
+                                        }
+                                        .buttonStyle(.plain)
                                     }
-                                    .buttonStyle(.plain)
                                 }
                             }
                             .padding(16)
@@ -1738,6 +2198,17 @@ struct DFSContestView: View {
                 }
             }
         }
+        .task {
+            // Compute the user's final FPTS for each past private contest by
+            // pulling the parent slate's box scores. Each VM's pool gets its
+            // own scores; we kick all of them off in parallel.
+            await withTaskGroup(of: Void.self) { group in
+                for vm in [viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
+                           eplViewModel, uclViewModel, ufcViewModel, nflViewModel, cfbViewModel] {
+                    group.addTask { await vm.loadAllPrivateContestFinalScores() }
+                }
+            }
+        }
     }
 
     private func sportLabel(for result: DFSResult) -> String {
@@ -1748,6 +2219,10 @@ struct DFSContestView: View {
         if tid.hasPrefix("pga-") { return "PGA" }
         if tid.hasPrefix("epl-") { return "EPL" }
         if tid.hasPrefix("ucl-") { return "UCL" }
+        if tid.hasPrefix("wc-") { return "WC" }
+        if tid.hasPrefix("ufc-") { return "UFC" }
+        if tid.hasPrefix("nfl-") { return "NFL" }
+        if tid.hasPrefix("cfb-") { return "CFB" }
         return "NBA"
     }
 
@@ -1759,6 +2234,10 @@ struct DFSContestView: View {
         if tid.hasPrefix("pga-") { return Color(red: 0.0, green: 0.5, blue: 0.2) }
         if tid.hasPrefix("epl-") { return Color(red: 0.3, green: 0.0, blue: 0.5) }
         if tid.hasPrefix("ucl-") { return Color(red: 0.0, green: 0.1, blue: 0.4) }
+        if tid.hasPrefix("wc-") { return Color(red: 0.85, green: 0.55, blue: 0.05) }
+        if tid.hasPrefix("ufc-") { return Color(red: 0.6, green: 0.1, blue: 0.1) }
+        if tid.hasPrefix("nfl-") { return Color(red: 0.0, green: 0.2, blue: 0.5) }
+        if tid.hasPrefix("cfb-") { return Color(red: 0.55, green: 0.10, blue: 0.10) }
         return brandPurple
     }
 
@@ -1818,7 +2297,120 @@ struct DFSContestView: View {
             let rr = recalculatedRR(result)
             Text("\(rr >= 0 ? "+" : "")\(rr)")
                 .font(.subheadline.weight(.bold).monospacedDigit())
-                .foregroundStyle(rr >= 0 ? brandPurple : .red)
+                .foregroundStyle(rr >= 0 ? Color.green : .red)
+
+            Image(systemName: "chevron.right")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 6)
+    }
+
+    /// Row for a past private contest in the unified Past Results list.
+    /// Mirrors `resultRowWithSport` layout (rank badge + title + meta + score)
+    /// but reads rank/score from the private contest's own entries instead of
+    /// the public `dfsHistory` payload.
+    private func pastPrivateRow(entry: PrivatePastEntry) -> some View {
+        let vm = entry.viewModel
+        let contest = entry.contest
+        let myUUID: UUID? = vm.userID.flatMap(UUID.init(uuidString:))
+        let entries = vm.privateContestEntries[contest.id] ?? []
+        let myEntry: DFSPrivateContestEntry? = {
+            guard let me = myUUID else { return nil }
+            return entries.first(where: { $0.userID == me })
+        }()
+        // Prefer the live leaderboard score (in-progress contests where games
+        // are still playing — `lineupTotalPoints` is 0 until settlement) → then
+        // the box-score-derived final FPTS for settled contests → then the
+        // stored value at submission time as a last resort.
+        let myLiveRow = (vm.privateContestLeaderboards[contest.id] ?? []).first(where: { $0.isCurrentUser })
+        let myFinalScore: Double? = vm.privateContestFinalScores[contest.id]
+        let myRank: Int? = {
+            if let live = myLiveRow, live.hasSubmitted { return live.rank }
+            guard let me = myUUID,
+                  let myPts = entries.first(where: { $0.userID == me })?.lineupTotalPoints else { return nil }
+            let higher = entries.filter { $0.lineupTotalPoints > myPts }.count
+            return higher + 1
+        }()
+        let totalMembers = vm.privateContestMembers[contest.id]?.count ?? entries.count
+        let dateLabel: String = {
+            let parts = contest.parentTournamentID.split(separator: "-")
+            guard let str = parts.first(where: { $0.count == 8 && Int($0) != nil }) else { return "" }
+            let fmt = DateFormatter()
+            fmt.dateFormat = "yyyyMMdd"
+            guard let date = fmt.date(from: String(str)) else { return "" }
+            return date.formatted(date: .abbreviated, time: .omitted)
+        }()
+        let sportLabel: String = {
+            let prefix = contest.parentTournamentID.split(separator: "-").first.map(String.init) ?? ""
+            return prefix.uppercased()
+        }()
+        return HStack(spacing: 12) {
+            VStack(spacing: 1) {
+                if let rank = myRank {
+                    Text("#\(rank)")
+                        .font(.subheadline.weight(.bold).monospacedDigit())
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                    if totalMembers > 0 {
+                        Text("of \(totalMembers)")
+                            .font(.system(size: 8, weight: .medium).monospacedDigit())
+                            .foregroundStyle(.white.opacity(0.7))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                } else {
+                    Text("—")
+                        .font(.subheadline.weight(.bold).monospacedDigit())
+                        .foregroundStyle(.white)
+                }
+            }
+            .frame(minWidth: 44, minHeight: 40)
+            .padding(.horizontal, 4)
+            .background((myRank ?? 99) <= 3 ? Color(red: 0.95, green: 0.78, blue: 0.20) : Color(.systemGray4))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(contest.name)
+                        .font(.subheadline.weight(.medium))
+                        .lineLimit(1)
+                    Text("PRIVATE")
+                        .font(.system(size: 9, weight: .bold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(brandPurple)
+                        .foregroundStyle(.white)
+                        .clipShape(Capsule())
+                    if !sportLabel.isEmpty {
+                        Text(sportLabel)
+                            .font(.system(size: 9, weight: .bold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color(.systemGray2))
+                            .foregroundStyle(.white)
+                            .clipShape(Capsule())
+                    }
+                }
+                if myEntry != nil {
+                    let displayScore = myLiveRow?.points ?? myFinalScore ?? myEntry?.lineupTotalPoints ?? 0
+                    Text("\(totalMembers) members • \(String(format: "%.1f", displayScore)) pts")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("\(totalMembers) members")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if !dateLabel.isEmpty {
+                    Text(dateLabel)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
+            Spacer()
 
             Image(systemName: "chevron.right")
                 .font(.caption2.weight(.bold))
@@ -2117,7 +2709,7 @@ struct DFSContestView: View {
             let rr = recalculatedRR(result)
             Text("\(rr >= 0 ? "+" : "")\(rr)")
                 .font(.subheadline.weight(.bold).monospacedDigit())
-                .foregroundStyle(rr >= 0 ? brandPurple : .red)
+                .foregroundStyle(rr >= 0 ? Color.green : .red)
 
             Image(systemName: "chevron.right")
                 .font(.caption2.weight(.bold))
@@ -2135,6 +2727,7 @@ struct DFSContestView: View {
             if tid.hasPrefix("pga-") { return pgaViewModel }
             if tid.hasPrefix("epl-") { return eplViewModel }
             if tid.hasPrefix("ucl-") { return uclViewModel }
+            if tid.hasPrefix("wc-") { return wcViewModel }
             if tid.hasPrefix("ufc-") { return ufcViewModel }
             if tid.hasPrefix("nfl-") { return nflViewModel }
             if tid.hasPrefix("cfb-") { return cfbViewModel }
@@ -2162,6 +2755,9 @@ struct DFSContestView: View {
         uclViewModel.accessToken = auth.accessToken
         uclViewModel.userID = auth.userID
         uclViewModel.userEmail = auth.userEmail
+        wcViewModel.accessToken = auth.accessToken
+        wcViewModel.userID = auth.userID
+        wcViewModel.userEmail = auth.userEmail
         ufcViewModel.accessToken = auth.accessToken
         ufcViewModel.userID = auth.userID
         ufcViewModel.userEmail = auth.userEmail
@@ -2188,6 +2784,7 @@ struct DFSContestView: View {
                 .union(pgaViewModel.enteredTournamentIDs)
                 .union(eplViewModel.enteredTournamentIDs)
                 .union(uclViewModel.enteredTournamentIDs)
+                .union(wcViewModel.enteredTournamentIDs)
                 .union(ufcViewModel.enteredTournamentIDs)
                 .union(nflViewModel.enteredTournamentIDs)
                 .union(cfbViewModel.enteredTournamentIDs)
@@ -2219,6 +2816,7 @@ struct DFSContestView: View {
         if tournamentID.hasPrefix("pga-") { return "PGA" }
         if tournamentID.hasPrefix("epl-") { return "EPL" }
         if tournamentID.hasPrefix("ucl-") { return "UCL" }
+        if tournamentID.hasPrefix("wc-") { return "WC" }
         if tournamentID.hasPrefix("ufc-") { return "UFC" }
         if tournamentID.hasPrefix("nfl-") { return "NFL" }
         if tournamentID.hasPrefix("cfb-") { return "CFB" }
@@ -2232,6 +2830,7 @@ struct DFSContestView: View {
         if tournamentID.hasPrefix("pga-") { return Color(red: 0.0, green: 0.5, blue: 0.2) }
         if tournamentID.hasPrefix("epl-") { return Color(red: 0.3, green: 0.0, blue: 0.5) }
         if tournamentID.hasPrefix("ucl-") { return Color(red: 0.0, green: 0.1, blue: 0.4) }
+        if tournamentID.hasPrefix("wc-") { return Color(red: 0.85, green: 0.55, blue: 0.05) }
         if tournamentID.hasPrefix("ufc-") { return Color(red: 0.6, green: 0.1, blue: 0.1) }
         if tournamentID.hasPrefix("nfl-") { return Color(red: 0.0, green: 0.2, blue: 0.5) }
         if tournamentID.hasPrefix("cfb-") { return Color(red: 0.3, green: 0.1, blue: 0.5) }
@@ -2272,6 +2871,12 @@ struct DFSContestView: View {
         if tournamentID.hasPrefix("ucl-") {
             return LinearGradient(
                 colors: [Color(red: 0.0, green: 0.05, blue: 0.25), Color(red: 0.05, green: 0.10, blue: 0.40)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            )
+        }
+        if tournamentID.hasPrefix("wc-") {
+            return LinearGradient(
+                colors: [Color(red: 0.55, green: 0.30, blue: 0.0), Color(red: 0.85, green: 0.55, blue: 0.05)],
                 startPoint: .topLeading, endPoint: .bottomTrailing
             )
         }
@@ -2357,6 +2962,7 @@ struct DFSContestView: View {
         if tournamentID.hasPrefix("pga-") { return pgaViewModel }
         if tournamentID.hasPrefix("epl-") { return eplViewModel }
         if tournamentID.hasPrefix("ucl-") { return uclViewModel }
+        if tournamentID.hasPrefix("wc-") { return wcViewModel }
         if tournamentID.hasPrefix("ufc-") { return ufcViewModel }
         if tournamentID.hasPrefix("nfl-") { return nflViewModel }
         if tournamentID.hasPrefix("cfb-") { return cfbViewModel }
@@ -2593,6 +3199,39 @@ struct DFSContestView: View {
 
     /// After a DFSViewModel syncs history, copy its updated dfsHistoryData to all other VMs
     /// so the next sync sees the combined entries.
+    /// Per-sport init pipeline — loads the slate, the user's entries, settles
+    /// anything pending, refreshes live scoring, and pre-caches entered tournaments.
+    /// History sync is intentionally NOT included here because it's already
+    /// done once globally before this helper is called for each sport (the
+    /// payload is shared, so syncing 9 times sequentially was wasted work).
+    private func initSportPipeline(_ vm: DFSViewModel) async {
+        // Kick off the private-contests fetch in parallel — it's a single quick
+        // query and doesn't depend on the slate. Without this, private contests
+        // only load when the user scrolls to the lobby's Private Contests
+        // section, so they never appear in Active Contests on first launch.
+        async let privates: () = vm.loadMyPrivateContests()
+        await vm.loadSlateIfNeeded()
+        await vm.fetchEntriesIfNeeded()
+        // Settlement iterates past tournaments doing network calls (can be
+        // 10–30s with many entered tournaments). It writes to history/settled
+        // tables, none of which are needed to paint the active contest card,
+        // so it runs in the background.
+        Task.detached { [vm] in
+            await vm.checkAndSettleUnsettledTournaments()
+        }
+        await vm.refreshLive()
+        // Pre-cache OTHER entered tournaments runs in the background — it can
+        // take 30–60s on a slow refresh cycle (2000-bot regeneration per
+        // contest), and blocking on it kept the shimmer up far longer than
+        // needed. The user-visible active contest is already populated by
+        // refreshLive above; other cards' real data trickles in as pre-cache
+        // finishes each one.
+        Task.detached { [vm] in
+            await vm.preCacheAllEnteredTournaments()
+        }
+        _ = await privates
+    }
+
     private func propagateHistory(from source: DFSViewModel) {
         let data = source.dfsHistoryData
         viewModel.dfsHistoryData = data
@@ -2604,5 +3243,48 @@ struct DFSContestView: View {
         ufcViewModel.dfsHistoryData = data
         nflViewModel.dfsHistoryData = data
         cfbViewModel.dfsHistoryData = data
+    }
+}
+
+// MARK: - Shimmer
+
+private struct ShimmerModifier: ViewModifier {
+    // Shared cycle duration — every shimmer in the app derives its phase from
+    // the same wall clock, so cards that appear at different times still
+    // animate in lockstep instead of starting their own cycle on mount.
+    private static let cycle: Double = 1.4
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(
+                GeometryReader { geo in
+                    TimelineView(.animation) { context in
+                        let t = context.date.timeIntervalSinceReferenceDate
+                        let progress = (t.truncatingRemainder(dividingBy: Self.cycle)) / Self.cycle
+                        let phase = CGFloat(progress * 2.5 - 1.0) // -1.0 → 1.5
+
+                        // Gray-on-gray shimmer: stays in the gray family so the
+                        // effect reads as a subtle highlight, not a white flash.
+                        LinearGradient(
+                            gradient: Gradient(stops: [
+                                .init(color: Color(white: 0.85).opacity(0.0), location: 0.0),
+                                .init(color: Color(white: 0.78).opacity(0.9), location: 0.5),
+                                .init(color: Color(white: 0.85).opacity(0.0), location: 1.0)
+                            ]),
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                        .frame(width: geo.size.width * 2, height: geo.size.height)
+                        .offset(x: geo.size.width * phase)
+                    }
+                }
+            )
+            .clipped()
+    }
+}
+
+extension View {
+    func shimmering() -> some View {
+        modifier(ShimmerModifier())
     }
 }

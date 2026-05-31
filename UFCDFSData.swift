@@ -497,11 +497,42 @@ struct ESPNUFCDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
                 allGamesFinal = false
             }
 
+            // Build display string. For finished fights we want the method
+            // (e.g. "U Dec", "TKO R1 4:30", "Sub R3 2:32") instead of just
+            // "Final" — the scoreboard endpoint's result field is empty for
+            // UFC, so fetch the dedicated status endpoint from the core API.
+            let finishLabel: String = await {
+                guard state == "post", let eventID = eventIDForComp[game.id] else {
+                    return clock.isEmpty ? "" : "R\(period) \(clock)"
+                }
+                return await fetchUFCFinishLabel(
+                    eventID: eventID, competitionID: game.id,
+                    period: period, clock: clock
+                )
+            }()
+
+            // Encode the winner via awayScore/homeScore. UFC has no team
+            // score, so we repurpose these unused ints as "1 = this side
+            // won". The live view reads them to draw a checkmark next to
+            // the winning fighter — avoids widening DFSGameLiveInfo just
+            // for one sport.
+            var awayWon = 0
+            var homeWon = 0
+            if state == "post" {
+                for c in comp.competitors {
+                    let isWin = c.winner ?? false
+                    guard isWin else { continue }
+                    let short = c.athlete.shortName ?? c.athlete.displayName ?? ""
+                    if short == game.awayTeam { awayWon = 1 }
+                    else if short == game.homeTeam { homeWon = 1 }
+                }
+            }
+
             // Build game info
             gameLiveInfo[game.id] = DFSGameLiveInfo(
                 id: game.id, awayTeam: game.awayTeam, homeTeam: game.homeTeam,
-                awayScore: 0, homeScore: 0,
-                clock: clock.isEmpty ? "" : "R\(period) \(clock)",
+                awayScore: awayWon, homeScore: homeWon,
+                clock: finishLabel,
                 period: period, state: state, sportType: "ufc"
             )
 
@@ -545,6 +576,11 @@ struct ESPNUFCDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
                     let advBack = stats["advanceToBack"] ?? 0
                     pts += (advMount + advBack) * 5.0
 
+                    // Control time (seconds) — not scored but exposed in the
+                    // live stats panel so users see why takedown-heavy
+                    // wrestlers don't always lead in strikes.
+                    let controlTimeSec = stats["timeInControl"] ?? 0
+
                     // Win bonus (only for completed fights)
                     if state == "post" && isWinner {
                         pts += 30.0  // Base win bonus
@@ -582,7 +618,10 @@ struct ESPNUFCDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
                         rebounds: Int(takedowns),
                         assists: Int(knockdowns),
                         steals: Int(subAttempts),
-                        blocks: Int(reversals),
+                        // Live view's CTRL column reads `blocks` and converts
+                        // it as seconds — store control time here. Reversals
+                        // are still scored via `pts += reversals * 3.0` above.
+                        blocks: Int(controlTimeSec),
                         turnovers: Int(advMount + advBack),
                         minutes: statLine,
                         fgm: 0, fga: 0,
@@ -602,6 +641,44 @@ struct ESPNUFCDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
             gameLiveInfo: gameLiveInfo,
             allGamesFinal: allGamesFinal
         )
+    }
+
+    /// Fetches the rich finish-method label from ESPN's core-API status
+    /// endpoint and combines it with round/time. The standard scoreboard
+    /// endpoint returns an empty `result` object for UFC, so we have to hit
+    /// `/competitions/{id}/status` to get the actual finish method
+    /// ("decision---unanimous", "kotko", "submission", etc.).
+    ///
+    /// Output examples:
+    ///   - Decisions (always end of round 3 or 5): "U Dec" / "Split Dec"
+    ///   - Stoppages: "TKO R1 4:30" / "Sub R3 2:32"
+    private func fetchUFCFinishLabel(
+        eventID: String,
+        competitionID: String,
+        period: Int,
+        clock: String
+    ) async -> String {
+        let urlString = "https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc/events/\(eventID)/competitions/\(competitionID)/status"
+        guard let url = URL(string: urlString) else { return "" }
+        guard let (data, response) = try? await session.data(from: url),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return ""
+        }
+        let result = json["result"] as? [String: Any]
+        let shortName = (result?["shortDisplayName"] as? String) ?? ""
+        let resultName = (result?["name"] as? String)?.lowercased() ?? ""
+        // Decisions don't need a round/time — they always go the distance.
+        // Anything else (KO/TKO/Sub/DQ/NC) only makes sense with a clock.
+        let isDecision = resultName.contains("decision")
+        if shortName.isEmpty {
+            return clock.isEmpty ? "" : "R\(period) \(clock)"
+        }
+        if isDecision { return shortName }
+        if period > 0, !clock.isEmpty {
+            return "\(shortName) R\(period) \(clock)"
+        }
+        return shortName
     }
 
     /// Fetch detailed fight statistics for a specific fighter from the ESPN core API

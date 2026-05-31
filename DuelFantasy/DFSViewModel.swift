@@ -26,6 +26,10 @@ final class DFSViewModel {
     /// Cached entry records for all of the user's entries today (keyed by tournament ID).
     /// Each tournament can have multiple lineups, stored as an array.
     var userEntryRecords: [String: [DFSEntryRecord]] = [:]
+    /// Canonical slate-wide player salaries captured at contest creation time, keyed by
+    /// tournament ID. Used to render every lineup (yours + every bot's) with the exact
+    /// prices that were offered during lineup building, regardless of later slate refreshes.
+    var tournamentPlayerSalaries: [String: [String: Int]] = [:]
     /// Maximum number of lineups per tournament
     let maxLineupsPerTournament: Int = 5
     /// Maximum number of lineups per sport per day
@@ -147,8 +151,97 @@ final class DFSViewModel {
     var showInviteFriends: Bool = false
     var inviteTournamentID: String? = nil
 
+    // MARK: - Private Contests
+    var myPrivateContests: [DFSPrivateContest] = []
+    var privateContestMembers: [UUID: [DFSPrivateContestMember]] = [:]
+    var privateContestEntries: [UUID: [DFSPrivateContestEntry]] = [:]
+    var privateContestLeaderboards: [UUID: [DFSPrivateContestLeaderboardRow]] = [:]
+    var privateContestError: String?
+    var isCreatingPrivateContest: Bool = false
+    var isJoiningPrivateContest: Bool = false
+    /// When set, the lineup builder is submitting to this private contest
+    /// instead of the public dfs_entries flow. Cleared on submit/exit.
+    var activePrivateContest: DFSPrivateContest?
+
     /// Cached player metadata from roster preload: playerID → (name, team abbreviation, gameID, position)
     private var preloadedPlayerInfo: [String: (name: String, team: String, gameID: String, position: String?)] = [:]
+
+    /// Public accessor for the cached player name by ID. Used by views to
+    /// resolve names for IDs that aren't in the current active pool (e.g.,
+    /// DNP'd players whose past-contest lineups still reference them).
+    func cachedPlayerName(for playerID: String) -> String? {
+        if let info = preloadedPlayerInfo[playerID], !info.name.isEmpty { return info.name }
+        return nil
+    }
+
+    /// Public read-only accessor for a tournament's cached leaderboard. Used
+    /// by the lobby's active-contest card to show ranks for non-selected
+    /// tournaments without needing the full cachedLiveRanks key.
+    func cachedLeaderboard(for tournamentID: String) -> [DFSLeaderboardEntry]? {
+        liveContestCache[tournamentID]?.leaderboard
+    }
+
+    /// Single source of truth for "is this tournament ready to render."
+    /// Returns true only when:
+    ///   1. The tournament exists in the slate.
+    ///   2. The player pool for the slate is loaded (so names resolve).
+    ///   3. The field is populated to the expected threshold.
+    ///   4. The user's lineup is represented in the field (or no entry exists).
+    /// The live view should render its real content ONLY when this is true —
+    /// otherwise show a shimmer placeholder. Prevents the "raw IDs / 1 entry /
+    /// locked in placeholder" intermediate states.
+    func isTournamentReady(_ tid: String) -> Bool {
+        guard let t = tournaments.first(where: { $0.id == tid }) else { return false }
+
+        // 1. Player pool loaded
+        let hasPool: Bool = {
+            if t.isSingleGame, let gid = t.gameID {
+                if let sgPool = singleGamePlayers[gid] { return !sgPool.isEmpty }
+                // Fallback: check main pool for game players (activePlayers builds SG on demand)
+                return players.contains(where: { $0.gameID == gid })
+            }
+            return !players.isEmpty
+        }()
+        guard hasPool else { return false }
+
+        // 2. Field populated to a SHOWABLE threshold. We only need enough to
+        // render a meaningful leaderboard — the rest can stream in via the
+        // background polling cycle. Previously we required entryCount/2 which
+        // for 2000-person contests means waiting for 1000 bot generations
+        // (10+ seconds on device). Now we accept anything that lets us render
+        // a real leaderboard, even if it's partial.
+        let expected = t.entryCount
+        let threshold: Int
+        if expected <= 10 {
+            threshold = expected             // small contests: must be full
+        } else if expected <= 100 {
+            threshold = 10                   // medium: 10 entries
+        } else {
+            threshold = 25                   // large: ~25 entries (one screenful)
+        }
+        let fieldCount: Int = {
+            if activeTournamentID == tid {
+                return fieldEntries.count
+            }
+            return liveContestCache[tid]?.fieldEntries.count ?? 0
+        }()
+        guard fieldCount >= threshold else { return false }
+
+        // 3. If user has an entry for this tournament, ensure it's in the field
+        if let entry = entryRecord(for: tid, lineupNumber: activeLineupNumber) {
+            let fieldList: [DFSFieldEntry]
+            if activeTournamentID == tid {
+                fieldList = fieldEntries
+            } else {
+                fieldList = liveContestCache[tid]?.fieldEntries ?? []
+            }
+            let hasUserEntry = fieldList.contains(where: { $0.isCurrentUser || $0.realUserID == userID })
+            guard hasUserEntry else { return false }
+            _ = entry
+        }
+
+        return true
+    }
 
     // MARK: - Persisted History (synced from AppStorage in ContentView)
     var dfsHistoryData: Data = Data()
@@ -267,6 +360,11 @@ final class DFSViewModel {
     /// For single-game tournaments, returns the game-specific adjusted-salary pool.
     /// For main-slate tournaments, returns the full player pool.
     var activePlayers: [DFSPlayer] {
+        let basePool = computeActivePool()
+        return applyCanonicalSalaries(to: basePool)
+    }
+
+    private func computeActivePool() -> [DFSPlayer] {
         guard let t = tournament else { return players }
         if t.isSingleGame, let gameID = t.gameID {
             if let sgPool = singleGamePlayers[gameID] {
@@ -303,25 +401,74 @@ final class DFSViewModel {
         return players
     }
 
+    /// Apply the contest's frozen salary snapshot to a player pool. This keeps
+    /// the picker, the chip, the cap math, and the stored entry all on the
+    /// same price source — without this, raw activePlayers can drift, making
+    /// a "$50K/$50K" build save as ~$53K because the canonical snapshot
+    /// (used at submit time and in the lobby) differs from the live pool.
+    private func applyCanonicalSalaries(to pool: [DFSPlayer]) -> [DFSPlayer] {
+        guard let tid = activeTournamentID else { return pool }
+        let canonical: [String: Int]
+        if let slate = tournamentPlayerSalaries[tid], !slate.isEmpty {
+            canonical = slate
+        } else if let entry = self.entryRecord(for: tid, lineupNumber: activeLineupNumber),
+                  let saved = entry.lineupPlayerSalaries, !saved.isEmpty {
+            canonical = saved
+        } else {
+            return pool
+        }
+        return pool.map { p in
+            guard let drafted = canonical[p.id], drafted > 0, drafted != p.salary else { return p }
+            var fixed = DFSPlayer(
+                id: p.id, name: p.name, team: p.team, position: p.position,
+                salary: drafted, projectedPoints: p.projectedPoints,
+                gameID: p.gameID, injuryStatus: p.injuryStatus,
+                battingOrder: p.battingOrder
+            )
+            fixed.gamesPlayed = p.gamesPlayed
+            fixed.playedRecently = p.playedRecently
+            fixed.isConfirmedActive = p.isConfirmedActive
+            fixed.isStartingGoalie = p.isStartingGoalie
+            return fixed
+        }
+    }
+
     /// Players from evening games only (6pm ET+), cached after slate load.
     var eveningPlayers: [DFSPlayer] = []
 
     /// Switch the active tournament and reset lineup state for the new tournament.
     func selectTournament(_ tournamentID: String, lineupNumber: Int = 1) {
+        // Clear any private-contest mode by default; callers entering the
+        // private flow set this back after calling selectTournament.
+        activePrivateContest = nil
+
         let changed = activeTournamentID != tournamentID || activeLineupNumber != lineupNumber
         guard changed else { return }
 
         let previousTID = activeTournamentID
 
-        // Save current state to cache before switching
+        // Immediately blank the leaderboard so the next view that renders
+        // doesn't briefly show the PREVIOUS tournament's standings while
+        // the cache restore (further down) is still in flight. The cached
+        // leaderboard for the NEW tournament will populate this within the
+        // same function call, but SwiftUI may evaluate body() in between.
+        leaderboardEntries = []
+
+        // Save current state to cache before switching, but ONLY if the
+        // current bots actually match the previous tournament's slate
+        // (right lineup size AND right player IDs).
         if let prevID = previousTID, fieldGenerated, !fieldEntries.isEmpty {
-            liveContestCache[prevID] = LiveContestCache(
-                fieldEntries: fieldEntries,
-                leaderboard: leaderboardEntries,
-                remoteEntries: remoteEntries,
-                profileNames: remoteProfileNames,
-                fieldGenerated: true
-            )
+            if botsMatchTournament(fieldEntries, tournamentID: prevID) {
+                liveContestCache[prevID] = LiveContestCache(
+                    fieldEntries: fieldEntries,
+                    leaderboard: leaderboardEntries,
+                    remoteEntries: remoteEntries,
+                    profileNames: remoteProfileNames,
+                    fieldGenerated: true
+                )
+            } else {
+                print("[DFS-\(sport)] Refusing to cache \(prevID) — current fieldEntries don't match its tournament")
+            }
         }
 
         activeTournamentID = tournamentID
@@ -342,15 +489,45 @@ final class DFSViewModel {
             } else {
                 syntheticTitle = "\(sport) Contest"
             }
+            // Detect single-game from the tournament ID so MVP 1.5x scoring
+            // still applies when the slate rotated this tournament out and we
+            // had to synthesize a stub. Without this, the leaderboard for a
+            // resumed SG contest would compute every bot's MVP at 1.0x and
+            // the total ends up 1.5× too low compared to per-row points.
+            let isSGFromID = tournamentID.contains("-sg-")
+            let synthGameID: String? = {
+                guard isSGFromID else { return nil }
+                // Format: "<sport>-<YYYYMMDD>-sg-<gameID>-<entryCount>"
+                let parts = tournamentID.split(separator: "-")
+                guard let sgIdx = parts.firstIndex(of: "sg"), sgIdx + 1 < parts.count else { return nil }
+                return String(parts[sgIdx + 1])
+            }()
+            let synthLineupSize: Int = {
+                if sport == "PGA" { return 6 }
+                if isSGFromID { return 6 } // MVP + 5 FLEX
+                return 7
+            }()
             let syntheticTournament = DFSTournament(
                 id: tournamentID,
                 title: syntheticTitle,
                 league: sport,
                 entryCount: entryCount,
-                lineupSize: sport == "PGA" ? 6 : 7,
-                salaryCap: 50000
+                lineupSize: synthLineupSize,
+                salaryCap: 50000,
+                rosterSlots: isSGFromID ? ["MVP", "FLEX", "FLEX", "FLEX", "FLEX", "FLEX"] : nil,
+                isSingleGame: isSGFromID,
+                tournamentType: isSGFromID ? .singleGame : .main,
+                gameID: synthGameID
             )
             tournaments.append(syntheticTournament)
+        }
+
+        // Validate cache before restoring — same matching check applied on write.
+        if let cached = liveContestCache[tournamentID],
+           !botsMatchTournament(cached.fieldEntries, tournamentID: tournamentID) {
+            print("[DFS-\(sport)] Discarding contaminated cache for \(tournamentID) — bots don't match this tournament's shape")
+            discardContaminatedCache(tournamentID)
+            _ = cached
         }
 
         // Try to restore from cache (instant switch)
@@ -491,14 +668,23 @@ final class DFSViewModel {
                 }
             }
         }
-        // Override salaries with draft-time values from the entry record.
-        // ESPN can update salaries after the user submits their lineup, but the
-        // live view should always show what the user originally drafted at.
-        if let tid = activeTournamentID,
-           let entry = self.entryRecord(for: tid, lineupNumber: activeLineupNumber),
-           let savedSalaries = entry.lineupPlayerSalaries, !savedSalaries.isEmpty {
+        // Override salaries with draft-time values. Prefer the slate-wide tournament
+        // snapshot (captured at contest creation, covers every player) so the user's
+        // lineup matches every bot lineup. Falls back to the per-entry saved salaries.
+        let canonicalSalaries: [String: Int] = {
+            guard let tid = activeTournamentID else { return [:] }
+            if let slate = tournamentPlayerSalaries[tid], !slate.isEmpty {
+                return slate
+            }
+            if let entry = self.entryRecord(for: tid, lineupNumber: activeLineupNumber),
+               let saved = entry.lineupPlayerSalaries {
+                return saved
+            }
+            return [:]
+        }()
+        if !canonicalSalaries.isEmpty {
             pool = pool.map { p in
-                guard let draftSalary = savedSalaries[p.id] else { return p }
+                guard let draftSalary = canonicalSalaries[p.id] else { return p }
                 guard draftSalary != p.salary else { return p }
                 var fixed = DFSPlayer(
                     id: p.id, name: p.name, team: p.team, position: p.position,
@@ -585,8 +771,11 @@ final class DFSViewModel {
                         break
                     }
                 }
-                // Use preloaded info name, then entry record name, then raw ID as fallback
-                let name = preloadedPlayerInfo[pid]?.name ?? entryNamesByID[pid] ?? pid
+                // Use preloaded info name, then entry record name, then live stats name, then raw ID.
+                let name = preloadedPlayerInfo[pid]?.name
+                    ?? entryNamesByID[pid]
+                    ?? livePlayerStats[pid]?.name
+                    ?? pid
                 let team = preloadedPlayerInfo[pid]?.team ?? "—"
                 let sal = entrySalariesByID[pid] ?? 0
                 pool.append(DFSPlayer(id: pid, name: name, team: team, position: assignedPosition, salary: sal, projectedPoints: 0))
@@ -737,6 +926,11 @@ final class DFSViewModel {
     /// Total salary including MVP 1.5x premium for single-game slates.
     /// In single-game mode, the first selected player is the MVP and costs 1.5x.
     var selectedSalary: Int {
+        // Use selectedPlayers salaries (which applies the canonical/snapshot
+        // override) so the builder's cap math matches what gets stored on
+        // submit and displayed in the lobby. Raw activePlayers can drift after
+        // contest creation, causing a "$50K/$50K" build to actually save as
+        // ~$53K — over the cap.
         guard tournament?.isSingleGame == true, !selectedPlayers.isEmpty else {
             return selectedPlayers.reduce(0) { $0 + $1.salary }
         }
@@ -749,7 +943,7 @@ final class DFSViewModel {
     /// The MVP premium amount (the extra 0.5x cost) for display purposes.
     var mvpSalaryPremium: Int {
         guard tournament?.isSingleGame == true, !selectedPlayers.isEmpty else { return 0 }
-        return selectedPlayers[0].salary / 2  // 0.5x of base salary
+        return selectedPlayers[0].salary / 2  // 0.5x of canonical base salary
     }
 
     var salaryCap: Int {
@@ -1301,8 +1495,11 @@ final class DFSViewModel {
                 )
             }
             if previousID != tournament?.id {
-                // Save outgoing tournament to cache
-                if let prevID = previousID, fieldGenerated, !fieldEntries.isEmpty {
+                // Save outgoing tournament to cache — only if its bots actually
+                // match the outgoing tournament's shape, to prevent cross-
+                // tournament contamination.
+                if let prevID = previousID, fieldGenerated, !fieldEntries.isEmpty,
+                   botsMatchTournament(fieldEntries, tournamentID: prevID) {
                     liveContestCache[prevID] = LiveContestCache(
                         fieldEntries: fieldEntries,
                         leaderboard: leaderboardEntries,
@@ -1315,6 +1512,14 @@ final class DFSViewModel {
                 latestResult = nil
                 livePlayerStats = [:]
                 liveGameInfo = [:]
+                // Discard contaminated cache up front so the restore path
+                // can't pull bots from a different tournament.
+                if let tid = tournament?.id,
+                   let cached = liveContestCache[tid],
+                   !botsMatchTournament(cached.fieldEntries, tournamentID: tid) {
+                    discardContaminatedCache(tid)
+                    _ = cached
+                }
                 // Restore from cache if available
                 if let tid = tournament?.id, let cached = liveContestCache[tid] {
                     fieldEntries = cached.fieldEntries
@@ -1451,15 +1656,34 @@ final class DFSViewModel {
         } else {
             projFloor = 1.0
         }
+        // For NHL we have a `playedRecently` flag derived from recent boxscores. If any
+        // skaters on a team are flagged active, we use that signal to exclude DNPs that
+        // are technically still rostered (retired, healthy scratches, AHL assignments).
+        let nhlHasRecencyData = effectiveSport == "NHL" && players.contains { $0.playedRecently }
+
         let eligible = players.filter { p in
             let status = p.injuryStatus ?? ""
             var isOut = status == "O" || status == "D" || status.hasPrefix("IL")
             // NHL: GTD players frequently don't dress — exclude from bot pool
             if effectiveSport == "NHL" && status == "GTD" { isOut = true }
-            // NHL: require minimum games played to filter AHL call-ups and reserves.
-            // Single-game uses a lower threshold (5) so young starters aren't excluded.
-            let minGP = isSingleGame ? 5 : 20
+            // NHL: require minimum games played to filter AHL call-ups, healthy
+            // scratches, and part-time players. Bumped from 5 → 20 for single-game
+            // because SG is high-variance and DNP risk is concentrated in low-GP
+            // players. Young starters with <20 GP are typically uncertain anyway.
+            let minGP = isSingleGame ? 20 : 20
             if effectiveSport == "NHL", let gp = p.gamesPlayed, gp < minGP { isOut = true }
+            // NHL: when recency data is available, require skaters to have played recently.
+            // This catches DNPs that pass the GP threshold (retired mid-season, prolonged
+            // healthy scratch, etc.) — goalies are exempt since they cycle starts.
+            if nhlHasRecencyData, p.position != "G", !p.playedRecently { isOut = true }
+            // NHL SG: also require isConfirmedActive (player appeared in tonight's
+            // DK salary feed). Combined with playedRecently this gives a 2-signal
+            // confirmation — the player both played their last game AND is in
+            // tonight's DK pool. Skips the rare DNP that slips through with just
+            // GP+recency (e.g. confirmed last-minute healthy scratch).
+            if effectiveSport == "NHL" && isSingleGame && p.position != "G" && !p.isConfirmedActive {
+                isOut = true
+            }
             // NHL single-game: confirmed starting goalies are NEVER excluded regardless of GP
             if effectiveSport == "NHL" && p.position == "G" && p.isStartingGoalie { isOut = false }
             // NHL goalies use a lower projection floor — they naturally score fewer
@@ -1493,6 +1717,18 @@ final class DFSViewModel {
             // Start with confirmed active players if available (matched by real salary data)
             let basePool = useConfirmedPool ? confirmed : eligible
 
+            // Soccer: `isConfirmedActive` is set when ESPN publishes the
+            // starting XI (~1h before kickoff). Use confirmed players
+            // exclusively when they cover all positions — bench/squad
+            // players have meaningful projections (squad rotation, late
+            // subs) and would otherwise slip into bot lineups through the
+            // "likelyStarters" projection path below. Mirrors the MLB
+            // `battingOrder` lock.
+            let isSoccerLeague = effectiveSport == "EPL" || effectiveSport == "UCL" || effectiveSport == "WC"
+            if isSoccerLeague && useConfirmedPool && coversAllSlots(confirmed) {
+                botPool = confirmed
+            } else {
+
             let confirmedStarters = basePool.filter { $0.battingOrder != nil || $0.position == "SP" }
             if effectiveSport == "MLB" && !confirmedStarters.isEmpty {
                 mlbHasBattingOrders = true
@@ -1515,6 +1751,8 @@ final class DFSViewModel {
                     botPool = useConfirmedPool && coversAllSlots(confirmed) ? confirmed : eligible
                 }
             }
+
+            }  // close soccer-confirmed-XI else wrapper
         } else {
             // NHL, NBA, NCAAM — use confirmed active pool when available
             if useConfirmedPool {
@@ -1636,16 +1874,17 @@ final class DFSViewModel {
         // with tight spending requirements cause all bots to converge on the same players.
         let minSpendPct: Double
         if isSingleGame {
-            // Single-game: variable spend floor creates realistic salary diversity.
-            // MLB single-game has only ~18 eligible batters for 6 slots — too tight
-            // to force 95% spend without convergence. Other sports also benefit.
+            // Single-game: bump spend floor toward cap so bots actually use ~$50K,
+            // not the ~$38K we were seeing. Small pools still get variance from
+            // bot styles and weighted picking; the floor just ensures the lineup
+            // ISN'T under-spent.
             switch effectiveSport {
             case "MLB":
-                minSpendPct = Double.random(in: 0.85...0.96) // $42.5K-$48K of $50K
+                minSpendPct = Double.random(in: 0.92...0.99) // $46K-$49.5K of $50K
             case "NHL", "NBA", "NCAAM":
-                minSpendPct = Double.random(in: 0.88...0.96) // $44K-$48K of $50K
+                minSpendPct = Double.random(in: 0.94...0.99) // $47K-$49.5K of $50K
             default:
-                minSpendPct = Double.random(in: 0.86...0.95) // Soccer/other
+                minSpendPct = Double.random(in: 0.90...0.98)
             }
         } else if effectiveSport == "NHL" || effectiveSport == "NBA" || effectiveSport == "NCAAM" {
             minSpendPct = 0.95
@@ -1660,12 +1899,16 @@ final class DFSViewModel {
         // Bot personality — 5 styles for more variety
         let botStyle = Int.random(in: 0..<5)
 
+        // NHL single-game (Showdown): 20% of bots skip goalies entirely so ownership
+        // settles around ~80% instead of 100% (real DK ownership is rarely that lopsided).
+        let nhlSkipGoalie = effectiveSport == "NHL" && isSingleGame && Double.random(in: 0...1) < 0.20
+
         // Try up to 50 times to build a valid lineup (more retries needed for tight 95% floors)
         for _ in 0..<50 {
             var selectedBySlot: [Int: DFSPlayer] = [:]
             var budgetLeft = salaryCap
             var usedIDs = Set<String>()
-            var pool = scrambled
+            var pool = nhlSkipGoalie ? scrambled.filter { $0.position != "G" } : scrambled
 
             for (draftStep, slotIndex) in pickOrder.enumerated() {
                 let slotsLeft = lineupSize - draftStep
@@ -2023,7 +2266,7 @@ final class DFSViewModel {
         var fallback: [DFSPlayer] = []
         var fb_budget = salaryCap
         var fb_usedIDs = Set<String>()
-        var fb_pool = scrambled.shuffled()
+        var fb_pool = (nhlSkipGoalie ? scrambled.filter { $0.position != "G" } : scrambled).shuffled()
         for pickIndex in 0..<lineupSize {
             let slotsLeft = lineupSize - fallback.count
             let slotsAfter = slotsLeft - 1
@@ -2031,6 +2274,18 @@ final class DFSViewModel {
             var affordable = fb_pool.filter { $0.salary <= fb_budget - reserveRest }
             if let requiredPos = slots[pickIndex] {
                 affordable = affordable.filter { playerMatchesSlot($0, slot: requiredPos) }
+            }
+            // If the reserve math leaves no affordable option, relax it: any unused player
+            // that fits the remaining budget for this single pick is acceptable. Better to
+            // produce a complete lineup that underspends than a short lineup.
+            if affordable.isEmpty {
+                let mvpFactor = (isSingleGame && pickIndex == 0) ? 1.5 : 1.0
+                var relaxed = fb_pool.filter { Int(Double($0.salary) * mvpFactor) <= fb_budget }
+                if let requiredPos = slots[pickIndex] {
+                    let positional = relaxed.filter { playerMatchesSlot($0, slot: requiredPos) }
+                    if !positional.isEmpty { relaxed = positional }
+                }
+                affordable = relaxed
             }
             guard !affordable.isEmpty else { break }
             // MLB: prefer confirmed starters in fallback to avoid bench players scoring 0
@@ -2059,35 +2314,58 @@ final class DFSViewModel {
             return lineup.reduce(0) { $0 + $1.salary }
         }
 
-        // Run upgrade pass on fallback to push spending toward cap — repeat until stable
+        // Run upgrade pass on fallback to push spending toward cap. Use up to 10
+        // iterations and prefer the MOST expensive affordable upgrade so a starting
+        // total of ~75% of cap can climb to 95% even when individual swaps are small.
         if fallback.count == lineupSize {
-            for _ in 0..<3 {  // Up to 3 passes to maximize spending
+            for _ in 0..<10 {
                 let currentTotal = fbEffectiveSalary(fallback)
                 if currentTotal >= salaryCap - 500 { break }
                 let sortedByPrice = fallback.enumerated().sorted { $0.element.salary < $1.element.salary }
+                var didUpgrade = false
                 for (idx, cheapPlayer) in sortedByPrice {
                     let currentSpent = fbEffectiveSalary(fallback)
                     if currentSpent >= salaryCap - 500 { break }
                     let slack = salaryCap - currentSpent
                     let requiredPos = slots[idx]
+                    // For MVP slot (idx 0 in single-game), the effective cost increase is
+                    // 1.5x the salary delta, so the max usable salary uplift is slack/1.5.
+                    let isMVPSlot = isSingleGame && idx == 0
+                    let maxRawSalaryIncrease = isMVPSlot ? Int(Double(slack) / 1.5) : slack
                     let upgradeCandidates = upgradePool.filter { candidate in
                         !fb_usedIDs.contains(candidate.id)
                         && candidate.salary > cheapPlayer.salary
-                        && candidate.salary <= cheapPlayer.salary + slack
+                        && candidate.salary <= cheapPlayer.salary + maxRawSalaryIncrease
                         && (requiredPos == nil || self.playerMatchesSlot(candidate, slot: requiredPos!))
                     }
-                    if !upgradeCandidates.isEmpty {
-                        let sorted = upgradeCandidates.sorted {
-                            let fit1 = abs(salaryCap - (currentSpent - cheapPlayer.salary + $0.salary))
-                            let fit2 = abs(salaryCap - (currentSpent - cheapPlayer.salary + $1.salary))
-                            return fit1 < fit2
-                        }
-                        let topN = Array(sorted.prefix(5))
-                        let upgrade = topN.randomElement()!
+                    if let upgrade = upgradeCandidates.max(by: { $0.salary < $1.salary }) {
                         fb_usedIDs.remove(cheapPlayer.id)
                         fb_usedIDs.insert(upgrade.id)
                         fallback[idx] = upgrade
+                        didUpgrade = true
                     }
+                }
+                if !didUpgrade { break }
+            }
+        }
+
+        // Pad with the cheapest unused eligible players if we still came up short.
+        // A complete lineup that underspends is strictly better than the saved-bot
+        // validation rejecting this entry and looping on regeneration.
+        if fallback.count < lineupSize {
+            let usedIDs = Set(fallback.map(\.id))
+            let pad = eligible
+                .filter { !usedIDs.contains($0.id) }
+                .sorted { $0.salary < $1.salary }
+            for player in pad {
+                if fallback.count >= lineupSize { break }
+                fallback.append(player)
+            }
+            if fallback.count < lineupSize {
+                let stillUsed = Set(fallback.map(\.id))
+                for player in players where !stillUsed.contains(player.id) {
+                    if fallback.count >= lineupSize { break }
+                    fallback.append(player)
                 }
             }
         }
@@ -2101,6 +2379,25 @@ final class DFSViewModel {
 
     func refreshLive() async {
         guard let tournament else { return }
+
+        // Defensive: detect when fieldEntries don't actually belong to the
+        // current tournament before any other logic runs. Symptom: user
+        // toggles between an MLB main-slate contest (10-player bots) and an
+        // MLB single-game contest (6-player bots) several times and the SG
+        // view ends up displaying 10-player bots. Multiple validation gates
+        // upstream already exist, but state can still drift across rapid
+        // navigations (cache write races, partial restores). Catching it
+        // here resets fieldGenerated → the bot-rebuild path below regenerates
+        // from the correct slate pool for `tournament.id`, then re-saves
+        // both the cache and the server. Drops only the BOT entries — real
+        // user/remote entries are preserved.
+        if fieldGenerated && !fieldEntries.isEmpty
+            && !botsMatchTournament(fieldEntries, tournamentID: tournament.id) {
+            print("[DFS-\(sport)] refreshLive: fieldEntries don't match \(tournament.id) (lineup size or pool) — discarding bots and forcing regen")
+            fieldEntries = fieldEntries.filter { $0.isCurrentUser || $0.isRealUser }
+            fieldGenerated = false
+            discardContaminatedCache(tournament.id)
+        }
 
         // Always refresh remote entries to pick up the user's lineup.
         // The function handles both first-load (builds field) and subsequent loads
@@ -2144,14 +2441,80 @@ final class DFSViewModel {
                 let serverTournament = try? await SupabaseService.shared.fetchTournament(
                     tournamentID: tournament.id, accessToken: token
                 )
+                if let sals = serverTournament?.playerSalaries, !sals.isEmpty {
+                    tournamentPlayerSalaries[tournament.id] = sals
+                }
                 if let bots = serverTournament?.botField, !bots.isEmpty {
                     if tournamentIsLocked {
-                        // Tournament is locked — ALWAYS use saved bots, no validation.
-                        // Bot lineups are frozen at lock time. Even if game coverage
-                        // doesn't match (games added/removed from slate), we must use
-                        // the original lineups to prevent mid-game lineup changes.
-                        savedBots = bots
-                        print("[DFS] Tournament locked — using \(bots.count) saved bots as-is for \(tournament.id) (lineups frozen at lock time)")
+                        // Tournament is locked — normally we accept saved bots
+                        // as-is (lineups freeze at lock time). EXCEPTION: if
+                        // this is a multi-game main slate but the saved bots
+                        // only cover a tiny fraction of the slate's games
+                        // (e.g. all 500 bots' players come from one SG match),
+                        // the field is clearly cross-contaminated from another
+                        // contest. Reject and force regeneration in that case.
+                        // Only check coverage on the FIRST cycle per session.
+                        // Once we've regenerated, accept whatever's saved going
+                        // forward — the freshly-saved field won't have echoed
+                        // back to GET yet, so re-checking would loop endlessly.
+                        let alreadyRegenerated = botFieldRegeneratedThisSession.contains(tournament.id)
+                        // Cross-sport detection: if a non-trivial chunk of the
+                        // saved bots reference player IDs that don't exist in
+                        // this slate at all, the bot_field has been clobbered
+                        // by another sport's contest. Always reject in that
+                        // case, regardless of single-game vs main slate.
+                        let slateIDSet = Set(players.map(\.id))
+                        let crossSportRate: Double = {
+                            guard !slateIDSet.isEmpty else { return 0.0 }
+                            var foreign = 0
+                            for bot in bots.prefix(50) {
+                                if !bot.playerIDs.allSatisfy({ slateIDSet.contains($0) }) {
+                                    foreign += 1
+                                }
+                            }
+                            return Double(foreign) / Double(min(50, bots.count))
+                        }()
+                        if !alreadyRegenerated && crossSportRate > 0.3 {
+                            print("[DFS] Tournament locked but \(Int(crossSportRate * 100))% of saved bots reference foreign player IDs — discarding cross-sport-contaminated bot field")
+                            savedBots = nil
+                            needsResave = true
+                            botFieldRegeneratedThisSession.insert(tournament.id)
+                        } else {
+                        let isMultiGameSlate = !tournament.isSingleGame && slateGames.count > 2
+                        if isMultiGameSlate && !alreadyRegenerated {
+                            let playerGameMap = Dictionary(uniqueKeysWithValues: players.compactMap { p -> (String, String)? in
+                                guard let gid = p.gameID else { return nil }
+                                return (p.id, gid)
+                            })
+                            let currentGameIDs = Set(slateGames.map { $0.id })
+                            var botGameIDs = Set<String>()
+                            for bot in bots.prefix(50) {
+                                for pid in bot.playerIDs {
+                                    if let gid = playerGameMap[pid] {
+                                        botGameIDs.insert(gid)
+                                    }
+                                }
+                            }
+                            let coverage = currentGameIDs.isEmpty
+                                ? 1.0
+                                : Double(botGameIDs.intersection(currentGameIDs).count) / Double(currentGameIDs.count)
+                            // Guard against false positives when the slate
+                            // itself isn't loaded yet (no players → no game
+                            // map → no coverage). Don't discard in that case.
+                            if !players.isEmpty && coverage < 0.4 {
+                                print("[DFS] Tournament locked but saved bots only cover \(botGameIDs.count)/\(currentGameIDs.count) games (\(Int(coverage * 100))%) — discarding cross-contaminated bot field (one-shot)")
+                                savedBots = nil
+                                needsResave = true
+                                botFieldRegeneratedThisSession.insert(tournament.id)
+                            } else {
+                                savedBots = bots
+                                print("[DFS] Tournament locked — using \(bots.count) saved bots as-is for \(tournament.id) (lineups frozen, \(botGameIDs.count)/\(currentGameIDs.count) games covered)")
+                            }
+                        } else {
+                            savedBots = bots
+                            print("[DFS] Tournament locked — using \(bots.count) saved bots as-is for \(tournament.id) (lineups frozen at lock time)")
+                        }
+                        }  // close the cross-sport-detection else wrapper
                     } else {
                         // Tournament not yet locked — validate bots match current slate
                         // Verify bot diversity — if >50% share the same lineup, data is corrupted
@@ -2181,8 +2544,36 @@ final class DFSViewModel {
 
                             let missingGames = currentGameIDs.subtracting(botGameIDs)
                             if missingGames.isEmpty {
-                                savedBots = bots
-                                print("[DFS] Loaded \(bots.count) saved bot lineups from server for \(tournament.id) (\(uniqueLineups.count) unique, covers \(botGameIDs.count)/\(currentGameIDs.count) games)")
+                                // Soccer self-heal: if confirmed XIs are now
+                                // published (≥18 confirmed players, i.e.
+                                // both teams' lineups are out) but saved
+                                // bots were generated before lineups dropped
+                                // and stuffed bench players into lineups,
+                                // discard and regen once. Bench players post
+                                // first-XI release would tank the bot field.
+                                let isSoccerLeague = sport == "EPL" || sport == "UCL" || sport == "WC"
+                                let confirmedIDs = Set(players.filter { $0.isConfirmedActive }.map(\.id))
+                                let confirmedAvailable = confirmedIDs.count >= 18
+                                let alreadyRegenerated = botFieldRegeneratedThisSession.contains(tournament.id)
+                                if isSoccerLeague && confirmedAvailable && !alreadyRegenerated {
+                                    var nonConfirmedCount = 0
+                                    for bot in bots.prefix(50) {
+                                        let nonConf = bot.playerIDs.filter { !confirmedIDs.contains($0) }.count
+                                        if nonConf > 0 { nonConfirmedCount += 1 }
+                                    }
+                                    let staleRate = Double(nonConfirmedCount) / Double(min(50, bots.count))
+                                    if staleRate > 0.40 {
+                                        print("[DFS-\(sport)] Confirmed XI now available (\(confirmedIDs.count) players) but \(Int(staleRate * 100))% of saved bots have non-confirmed picks — discarding to regen with starting XIs (one-shot)")
+                                        botFieldRegeneratedThisSession.insert(tournament.id)
+                                        // Drop through without setting savedBots → triggers fresh generation below
+                                    } else {
+                                        savedBots = bots
+                                        print("[DFS] Loaded \(bots.count) saved bot lineups from server for \(tournament.id) (\(uniqueLineups.count) unique, covers \(botGameIDs.count)/\(currentGameIDs.count) games)")
+                                    }
+                                } else {
+                                    savedBots = bots
+                                    print("[DFS] Loaded \(bots.count) saved bot lineups from server for \(tournament.id) (\(uniqueLineups.count) unique, covers \(botGameIDs.count)/\(currentGameIDs.count) games)")
+                                }
                             } else {
                                 print("[DFS] Server bots for \(tournament.id) only cover \(botGameIDs.count)/\(currentGameIDs.count) games (missing: \(missingGames)) — regenerating")
                             }
@@ -2216,19 +2607,34 @@ final class DFSViewModel {
                     // Fallback: use main player pool filtered by gameID
                     return Set(players.filter { $0.gameID == gameID }.map(\.id))
                 }()
+                // Slate-wide player ID set — catches cross-sport contamination
+                // (e.g. NHL player IDs sneaking into an MLB main slate's bot
+                // field) and stale bots whose player IDs no longer exist in
+                // today's slate. Empty when the slate isn't loaded yet, in
+                // which case we skip this check to avoid false rejections.
+                let slatePlayerIDs: Set<String> = Set(players.map(\.id))
                 // Check for incomplete lineups, over-cap lineups, and wrong-game players
                 let validBots = trimmedBots.filter { bot in
                     guard bot.playerIDs.count == tournament.lineupSize else { return false }
+                    // All player IDs must exist in today's slate. Catches
+                    // catastrophic cross-contamination where one sport's
+                    // bots end up in another sport's bot_field.
+                    if !slatePlayerIDs.isEmpty {
+                        guard bot.playerIDs.allSatisfy({ slatePlayerIDs.contains($0) }) else { return false }
+                    }
                     // For single-game, verify all players belong to the correct game
                     if let validIDs = sgValidIDs {
                         guard bot.playerIDs.allSatisfy({ validIDs.contains($0) }) else { return false }
                     }
-                    // For single-game, verify salary total (MVP at 1.5x) doesn't exceed cap
-                    if isSG && !salaryLookup.isEmpty {
+                    // Salary cap check applies to both classic and single-game
+                    // (MVP at 1.5x for single-game). Without this, NHL bots
+                    // with drifted prices end up spending $60K against a $50K
+                    // cap and the leaderboard shows phantom over-budget lineups.
+                    if !salaryLookup.isEmpty {
                         var total = 0
                         for (i, pid) in bot.playerIDs.enumerated() {
                             let sal = salaryLookup[pid] ?? 0
-                            total += (i == 0) ? Int(Double(sal) * 1.5) : sal
+                            total += (isSG && i == 0) ? Int(Double(sal) * 1.5) : sal
                         }
                         if total > cap { return false }
                     }
@@ -2243,9 +2649,59 @@ final class DFSViewModel {
                     let overCapCount = invalidBots.count - wrongSizeCount - wrongGameCount
                     print("[DFS-\(sport)] WARNING: \(invalidBots.count) saved bots invalid (\(wrongSizeCount) wrong size, \(wrongGameCount) wrong game, \(overCapCount) over $\(cap) cap) out of \(trimmedBots.count) total")
                 }
-                if !invalidBots.isEmpty && !activePlayers.isEmpty && !tournamentIsLocked {
-                    // Some saved bots are invalid (incomplete or over cap) — regenerate them
-                    // ONLY regenerate before tournament locks. After lock, keep originals.
+                // Split invalid bots into "wrong-size" (structurally corrupt —
+                // 10-player bots in a 6-player SG contest, etc.) and "merely
+                // over-cap" (still the right shape, just borderline salary).
+                // Wrong-size bots are always regenerated, locked or not — the
+                // freeze policy only makes sense for valid lineups; keeping
+                // corrupt ones causes user-visible weirdness like "10 live"
+                // on a single-game contest.
+                let wrongShapeBots = invalidBots.filter { bot in
+                    if bot.playerIDs.count != tournament.lineupSize { return true }
+                    if !slatePlayerIDs.isEmpty && !bot.playerIDs.allSatisfy({ slatePlayerIDs.contains($0) }) { return true }
+                    if let validIDs = sgValidIDs, !bot.playerIDs.allSatisfy({ validIDs.contains($0) }) { return true }
+                    return false
+                }
+                let canRegenerate = !activePlayers.isEmpty
+
+                // Mass-corruption escape hatch: if MORE than half of the saved
+                // bots are wrong-shape, treat the entire saved field as
+                // tainted (cross-contaminated from another contest type) and
+                // ignore it. This recovers contests whose bot_field on the
+                // server is stuffed with SG bots in a main-slate contest, or
+                // vice versa — partial replacement alone leaves the remaining
+                // "valid" bots looking nothing like a real lineup.
+                let majorityCorrupt = !trimmedBots.isEmpty
+                    && wrongShapeBots.count > trimmedBots.count / 2
+                // The latch protects against repeated regeneration cycles
+                // (each one is expensive), BUT when literally every saved bot
+                // is structurally invalid, the user is staring at a broken
+                // leaderboard — bypass the latch in that case. A second regen
+                // here is a small price to recover from a totally trashed
+                // bot field that the previous attempt didn't fix.
+                let totallyCorrupt = !trimmedBots.isEmpty && validBots.isEmpty
+                let canFullRegen = canRegenerate
+                    && (totallyCorrupt || !botFieldRegeneratedThisSession.contains(tournament.id))
+                if majorityCorrupt && canFullRegen {
+                    print("[DFS-\(sport)] \(wrongShapeBots.count)/\(trimmedBots.count) saved bots are wrong-shape — discarding entire bot field and regenerating fresh (one-shot)")
+                    let botsToGenerate = max(0, tournament.entryCount - realEntries.count)
+                    var freshBots: [DFSFieldEntry] = []
+                    let chunkSize = 50
+                    for index in 0..<botsToGenerate {
+                        let newIDs = generateBotLineup(from: activePlayers, salaryCap: tournament.salaryCap, lineupSize: tournament.lineupSize, rosterSlots: tournament.rosterSlots, isSingleGame: tournament.isSingleGame)
+                        let baseName = sampleNames[index % sampleNames.count]
+                        let uniqueName = "\(baseName) #\(index + 1)"
+                        freshBots.append(DFSFieldEntry(id: UUID(), name: uniqueName, playerIDs: newIDs, isCurrentUser: false))
+                        if (index + 1) % chunkSize == 0 && (index + 1) < botsToGenerate {
+                            fieldEntries = realEntries + freshBots
+                            await Task.yield()
+                        }
+                    }
+                    fieldEntries = realEntries + freshBots
+                    needsResave = true
+                    botFieldRegeneratedThisSession.insert(tournament.id)
+                } else if !invalidBots.isEmpty && canRegenerate && !tournamentIsLocked {
+                    // Pre-lock: regenerate everything that's invalid.
                     print("[DFS-\(sport)] Regenerating \(invalidBots.count) invalid bots (pre-lock)")
                     var botFieldEntries = validBots.map { bot in
                         DFSFieldEntry(id: UUID(), name: bot.name, playerIDs: bot.playerIDs, isCurrentUser: false)
@@ -2255,16 +2711,45 @@ final class DFSViewModel {
                         botFieldEntries.append(DFSFieldEntry(id: UUID(), name: bot.name, playerIDs: newIDs, isCurrentUser: false))
                     }
                     fieldEntries = realEntries + botFieldEntries
-                    // Re-save the fixed bot field
+                    needsResave = true
+                } else if !wrongShapeBots.isEmpty && canRegenerate && tournamentIsLocked {
+                    // Post-lock but bots are STRUCTURALLY broken (wrong
+                    // lineup size or wrong-game player IDs). Keeping these
+                    // shows nonsense like "10 live" on a 6-player contest.
+                    // Regenerate just the broken ones; preserve everything
+                    // valid as-is to honor the freeze rule.
+                    print("[DFS-\(sport)] Tournament locked but \(wrongShapeBots.count) bots are structurally corrupt — regenerating those")
+                    let wrongShapeIDs = Set(wrongShapeBots.map { "\($0.name)|\($0.playerIDs.joined(separator: ","))" })
+                    var botFieldEntries: [DFSFieldEntry] = []
+                    for bot in trimmedBots {
+                        let key = "\(bot.name)|\(bot.playerIDs.joined(separator: ","))"
+                        if wrongShapeIDs.contains(key) {
+                            let newIDs = generateBotLineup(from: activePlayers, salaryCap: tournament.salaryCap, lineupSize: tournament.lineupSize, rosterSlots: tournament.rosterSlots, isSingleGame: tournament.isSingleGame)
+                            botFieldEntries.append(DFSFieldEntry(id: UUID(), name: bot.name, playerIDs: newIDs, isCurrentUser: false))
+                        } else {
+                            botFieldEntries.append(DFSFieldEntry(id: UUID(), name: bot.name, playerIDs: bot.playerIDs, isCurrentUser: false))
+                        }
+                    }
+                    fieldEntries = realEntries + botFieldEntries
                     needsResave = true
                 } else if !invalidBots.isEmpty && tournamentIsLocked {
-                    // Tournament is locked — keep ALL saved bots (even "invalid" ones)
-                    // to preserve original lineups. Bot lineups are frozen at lock time.
-                    print("[DFS-\(sport)] Tournament locked — keeping \(invalidBots.count) 'invalid' bots as-is (lineups frozen)")
-                    let allBotEntries = trimmedBots.map { bot in
-                        DFSFieldEntry(id: UUID(), name: bot.name, playerIDs: bot.playerIDs, isCurrentUser: false)
+                    if validBots.isEmpty {
+                        // Every saved bot is invalid AND we couldn't regen
+                        // (slate not loaded yet). Show only real entries; bot
+                        // field will be re-validated and regenerated on the
+                        // next refresh once the slate finishes loading.
+                        print("[DFS-\(sport)] Tournament locked — all \(invalidBots.count) bots invalid and regen unavailable; showing only real entries until slate loads")
+                        fieldEntries = realEntries
+                    } else {
+                        // Post-lock with merely over-cap bots — those still have
+                        // the right shape and game coverage, so the freeze rule
+                        // wins. Keep them as-is.
+                        print("[DFS-\(sport)] Tournament locked — keeping \(invalidBots.count) borderline bots as-is (lineups frozen)")
+                        let allBotEntries = trimmedBots.map { bot in
+                            DFSFieldEntry(id: UUID(), name: bot.name, playerIDs: bot.playerIDs, isCurrentUser: false)
+                        }
+                        fieldEntries = realEntries + allBotEntries
                     }
-                    fieldEntries = realEntries + allBotEntries
                 } else {
                     let botFieldEntries = trimmedBots.map { bot in
                         DFSFieldEntry(
@@ -2285,64 +2770,97 @@ final class DFSViewModel {
                     let botsNeeded = targetBots - totalNonUser
                     print("[DFS-\(sport)] Padding saved bot field with \(botsNeeded) additional bots (had \(totalNonUser), need \(targetBots))")
                     let startIndex = totalNonUser
+                    let chunkSize = 50
                     for i in 0..<botsNeeded {
                         let botPlayerIDs = generateBotLineup(from: activePlayers, salaryCap: tournament.salaryCap, lineupSize: tournament.lineupSize, rosterSlots: tournament.rosterSlots, isSingleGame: tournament.isSingleGame)
                         let baseName = sampleNames[(startIndex + i) % sampleNames.count]
                         let uniqueName = "\(baseName) #\(startIndex + i + 1)"
                         fieldEntries.append(DFSFieldEntry(id: UUID(), name: uniqueName, playerIDs: botPlayerIDs, isCurrentUser: false))
+                        if (i + 1) % chunkSize == 0 && (i + 1) < botsNeeded {
+                            await Task.yield()
+                        }
                     }
                     needsResave = true
                 } else if totalNonUser < targetBots && tournamentIsLocked {
                     print("[DFS-\(sport)] Tournament locked — not padding bot field (have \(totalNonUser), target \(targetBots))")
                 }
                 print("[DFS-\(sport)] Loaded \(fieldEntries.count) entries from server (\(realEntries.count) real + \(fieldEntries.count - realEntries.count) bots), first bot playerIDs count: \(fieldEntries.first(where: { !$0.isCurrentUser })?.playerIDs.count ?? -1)")
-            } else if fieldEntries.isEmpty && !activePlayers.isEmpty && !tournamentIsLocked {
-                // No saved bots and no entries — generate a simulated field
-                // Only generate before lock. After lock, bot lineups are frozen.
+            } else if fieldEntries.isEmpty && !activePlayers.isEmpty {
+                // No saved bots and no entries — generate a simulated field. We also
+                // allow this after lock when zero bots exist (e.g., user joined right at
+                // lock or the initial generation never ran). In that case `needsResave`
+                // is set so the freshly generated lineups get persisted as the frozen
+                // source of truth from this point forward.
                 let count = max(0, tournament.entryCount)
                 var emptyCount = 0
-                fieldEntries = (0..<count).map { index in
+                // Generate in chunks so the leaderboard unlocks at the first
+                // 25-bot threshold rather than blocking the main actor for
+                // every bot before any UI update — matters mostly for
+                // 2000-entry contests where the synchronous map() previously
+                // froze the view for minutes.
+                var accumulated: [DFSFieldEntry] = []
+                accumulated.reserveCapacity(count)
+                let chunkSize = 50
+                for index in 0..<count {
                     let botPlayerIDs = generateBotLineup(from: activePlayers, salaryCap: tournament.salaryCap, lineupSize: tournament.lineupSize, rosterSlots: tournament.rosterSlots, isSingleGame: tournament.isSingleGame)
                     if botPlayerIDs.isEmpty { emptyCount += 1 }
                     let baseName = sampleNames[index % sampleNames.count]
                     let uniqueName = "\(baseName) #\(index + 1)"
-                    return DFSFieldEntry(
-                        id: UUID(),
-                        name: uniqueName,
-                        playerIDs: botPlayerIDs,
-                        isCurrentUser: false
-                    )
+                    accumulated.append(DFSFieldEntry(
+                        id: UUID(), name: uniqueName,
+                        playerIDs: botPlayerIDs, isCurrentUser: false
+                    ))
+                    if (index + 1) % chunkSize == 0 && (index + 1) < count {
+                        fieldEntries = accumulated
+                        await Task.yield()
+                    }
                 }
-                print("[DFS-\(sport)] Generated \(count) bots from scratch, \(emptyCount) have empty lineups, players=\(activePlayers.count), rosterSlots=\(tournament.rosterSlots?.description ?? "nil")")
-            } else if fieldEntries.isEmpty && tournamentIsLocked {
-                // Tournament is locked but no saved bots on server — skip bot generation.
-                // Generating fresh bots after lock would produce different lineups every session.
-                print("[DFS-\(sport)] Tournament locked with no saved bots — skipping bot generation to preserve consistency")
-            } else if fieldEntries.count < tournament.entryCount && !activePlayers.isEmpty && !tournamentIsLocked {
+                fieldEntries = accumulated
+                if tournamentIsLocked { needsResave = true }
+                print("[DFS-\(sport)] Generated \(count) bots from scratch (locked=\(tournamentIsLocked)), \(emptyCount) have empty lineups, players=\(activePlayers.count), rosterSlots=\(tournament.rosterSlots?.description ?? "nil")")
+            } else if fieldEntries.count < tournament.entryCount && !activePlayers.isEmpty {
                 // Pad the field with simulated bots to reach expected entry count.
-                // Only pad before lock — after lock, use whatever we have.
+                // We also allow post-lock padding when the field is currently real
+                // users only (no saved bots ever existed) — otherwise a contest joined
+                // right at lock would show a 1-entry leaderboard forever.
                 let existingRealEntries = fieldEntries.filter { $0.isCurrentUser || $0.isRealUser }
-                let botsNeeded = max(0, tournament.entryCount - existingRealEntries.count)
-                var botEntries: [DFSFieldEntry] = []
-                var emptyCount = 0
-                for index in 0..<botsNeeded {
-                    let botPlayerIDs = generateBotLineup(from: activePlayers, salaryCap: tournament.salaryCap, lineupSize: tournament.lineupSize, rosterSlots: tournament.rosterSlots, isSingleGame: tournament.isSingleGame)
-                    if botPlayerIDs.isEmpty { emptyCount += 1 }
-                    let baseName = sampleNames[index % sampleNames.count]
-                    let uniqueName = "\(baseName) #\(index + 1)"
-                    botEntries.append(
-                        DFSFieldEntry(
-                            id: UUID(),
-                            name: uniqueName,
-                            playerIDs: botPlayerIDs,
-                            isCurrentUser: false
+                let hasAnyBots = fieldEntries.contains { !$0.isCurrentUser && !$0.isRealUser }
+                let allowPostLockPad = tournamentIsLocked && !hasAnyBots && (savedBots?.isEmpty ?? true)
+                if tournamentIsLocked && !allowPostLockPad {
+                    print("[DFS-\(sport)] Tournament locked — not padding bot field from scratch (have \(fieldEntries.count), target \(tournament.entryCount))")
+                } else {
+                    let botsNeeded = max(0, tournament.entryCount - existingRealEntries.count)
+                    // Generate in chunks so the view's `isTournamentReady`
+                    // (which only needs ~25 bots) flips out of shimmer as
+                    // soon as the first chunk lands, instead of waiting for
+                    // all 2000 bots on a UFC main slate. Each chunk publishes
+                    // fieldEntries then yields the main actor so SwiftUI gets
+                    // a chance to render.
+                    var botEntries: [DFSFieldEntry] = []
+                    var emptyCount = 0
+                    let chunkSize = 50
+                    for index in 0..<botsNeeded {
+                        let botPlayerIDs = generateBotLineup(from: activePlayers, salaryCap: tournament.salaryCap, lineupSize: tournament.lineupSize, rosterSlots: tournament.rosterSlots, isSingleGame: tournament.isSingleGame)
+                        if botPlayerIDs.isEmpty { emptyCount += 1 }
+                        let baseName = sampleNames[index % sampleNames.count]
+                        let uniqueName = "\(baseName) #\(index + 1)"
+                        botEntries.append(
+                            DFSFieldEntry(
+                                id: UUID(),
+                                name: uniqueName,
+                                playerIDs: botPlayerIDs,
+                                isCurrentUser: false
+                            )
                         )
-                    )
+                        if (index + 1) % chunkSize == 0 && (index + 1) < botsNeeded {
+                            fieldEntries = existingRealEntries + botEntries
+                            await Task.yield()
+                        }
+                    }
+                    fieldEntries = existingRealEntries + botEntries
+                    if allowPostLockPad { needsResave = true }
+                    print("[DFS-\(sport)] Padded field with \(botsNeeded) bots (locked=\(tournamentIsLocked), firstTimePostLock=\(allowPostLockPad)), \(emptyCount) have empty lineups, players=\(activePlayers.count), rosterSlots=\(tournament.rosterSlots?.description ?? "nil")")
                 }
-                fieldEntries = existingRealEntries + botEntries
-                print("[DFS-\(sport)] Padded field with \(botsNeeded) bots, \(emptyCount) have empty lineups, players=\(activePlayers.count), rosterSlots=\(tournament.rosterSlots?.description ?? "nil")")
-            } else if fieldEntries.count < tournament.entryCount && tournamentIsLocked {
-                print("[DFS-\(sport)] Tournament locked — not padding bot field from scratch (have \(fieldEntries.count), target \(tournament.entryCount))")
             } else {
                 print("[DFS-\(sport)] No bots generated: fieldEntries=\(fieldEntries.count), tournament.entryCount=\(tournament.entryCount), players=\(activePlayers.count)")
             }
@@ -2376,13 +2894,27 @@ final class DFSViewModel {
 
             fieldGenerated = true
 
-            // Persist bot lineups to server so post-match settlement can reuse them
-            // (only if we generated new ones, not if we loaded from server)
-            // NEVER overwrite saved bots after tournament locks — lineups are frozen.
-            if (savedBots == nil || needsResave) && !tournamentIsLocked, let token = accessToken {
+            // Persist bot lineups to server so post-match settlement can reuse them.
+            // Pre-lock: save whenever we generated/regenerated to keep server canonical.
+            // Post-lock: save ONLY when this was a first-time generation from scratch
+            // (savedBots was nil/empty) — otherwise we'd overwrite frozen lineups.
+            let allowPostLockFirstSave = tournamentIsLocked && (savedBots?.isEmpty ?? true) && needsResave
+            if (savedBots == nil || needsResave) && (!tournamentIsLocked || allowPostLockFirstSave), let token = accessToken {
                 let tid = tournament.id
-                let botEntriesToSave = fieldEntries.filter { !$0.isCurrentUser && !$0.isRealUser }.map {
-                    BotFieldEntry(name: $0.name, playerIDs: $0.playerIDs)
+                let salaryLookup = Dictionary(uniqueKeysWithValues: activePlayers.map { ($0.id, $0.salary) })
+                let botEntriesToSave = fieldEntries.filter { !$0.isCurrentUser && !$0.isRealUser }.map { entry -> BotFieldEntry in
+                    // Capture each bot's lineup salaries from the live slate so the
+                    // settled view displays the same total as live (no salary drift
+                    // when players drop off the snapshot post-game).
+                    let psals: [String: Int] = Dictionary(uniqueKeysWithValues: entry.playerIDs.compactMap { pid -> (String, Int)? in
+                        guard let sal = salaryLookup[pid], sal > 0 else { return nil }
+                        return (pid, sal)
+                    })
+                    return BotFieldEntry(
+                        name: entry.name,
+                        playerIDs: entry.playerIDs,
+                        playerSalaries: psals.isEmpty ? nil : psals
+                    )
                 }
                 if !botEntriesToSave.isEmpty {
                     Task {
@@ -2486,57 +3018,110 @@ final class DFSViewModel {
         }
 
         // Also update cached ranks for OTHER entered tournaments using fresh livePlayerPoints.
-        // This ensures all contest cards on the locked list stay current with each polling cycle.
+        // CRITICAL: livePlayerPoints only contains points for the active
+        // tournament's slate (e.g. SG = 2 teams worth of points). Computing
+        // another tournament's leaderboard against that data scores most
+        // players at 0 → wrong ranks get cached → Active Contests cards
+        // display nonsense ranks. So we only update OTHER tournaments whose
+        // user lineup players are mostly covered by the current livePlayerPoints.
         for tid in enteredTournamentIDs {
             guard tid != tournament.id else { continue }
             guard let cache = liveContestCache[tid] else { continue }
             guard let tObj = tournaments.first(where: { $0.id == tid }) else { continue }
-            if let userRecords = userEntryRecords[tid] {
-                // Recompute leaderboard with updated livePlayerPoints
-                let poolForT: [DFSPlayer] = {
-                    if tObj.isSingleGame, let gid = tObj.gameID, let sgPool = singleGamePlayers[gid] {
-                        return sgPool
-                    }
-                    return players
-                }()
-                let pByID = Dictionary(uniqueKeysWithValues: poolForT.map { ($0.id, $0) })
-                let snap = DFSScoreSnapshot(
-                    playerFantasyPoints: livePlayerPoints,
-                    playerLiveStats: [:], gameLiveInfo: [:], allGamesFinal: false
-                )
-                let lb = DFSEngine.computeLeaderboard(
-                    fieldEntries: cache.fieldEntries, playersByID: pByID,
-                    scoreSnapshot: snap, isSingleGame: tObj.isSingleGame
-                )
-                // Update cache with fresh leaderboard
-                liveContestCache[tid] = LiveContestCache(
-                    fieldEntries: cache.fieldEntries, leaderboard: lb,
-                    remoteEntries: cache.remoteEntries, profileNames: cache.profileNames,
-                    fieldGenerated: true
-                )
-                for rec in userRecords {
-                    let ln = rec.lineupNumber ?? 1
-                    var total = 0.0
-                    for (i, pid) in rec.lineupPlayerIDs.enumerated() {
-                        let pts = livePlayerPoints[pid] ?? 0
-                        total += (tObj.isSingleGame && i == 0) ? pts * 1.5 : pts
-                    }
-                    let rank = min(tObj.entryCount, lb.filter({ $0.points > total }).count + 1)
-                    cachedLiveRanks["\(tid)-\(ln)"] = rank
+            guard let userRecords = userEntryRecords[tid] else { continue }
+            // CRITICAL: also verify the cached field actually belongs to this
+            // tournament. If liveContestCache[SG_tid] somehow holds main-slate
+            // bots (10-player, high scores), recomputing its leaderboard with
+            // those bots would rank the user's 6-player SG entry against
+            // main-slate-sized scores → user shows as last place at 24 FPTS
+            // because main-slate bots are at 100+. Discard such caches and
+            // skip the update entirely.
+            if !botsMatchTournament(cache.fieldEntries, tournamentID: tid) {
+                print("[DFS-\(sport)] Cross-tournament rank update: cache for \(tid) is contaminated — discarding")
+                discardContaminatedCache(tid)
+                continue
+            }
+            // Coverage check: at least 70% of the user's lineup IDs must
+            // appear in livePlayerPoints. Otherwise we'd score a main-slate
+            // lineup against SG-only data and produce a phantom rank.
+            let allLineupIDs = userRecords.flatMap { $0.lineupPlayerIDs }
+            guard !allLineupIDs.isEmpty else { continue }
+            let coveredCount = allLineupIDs.filter { livePlayerPoints[$0] != nil }.count
+            let coverage = Double(coveredCount) / Double(allLineupIDs.count)
+            guard coverage >= 0.7 else {
+                // Skip silently — the active tournament's livePlayerPoints
+                // doesn't cover this tournament's players. The card on the
+                // Active Contests screen will fall back to its own cached
+                // rank (which was computed when this tournament was active).
+                continue
+            }
+            let poolForT: [DFSPlayer] = {
+                if tObj.isSingleGame, let gid = tObj.gameID, let sgPool = singleGamePlayers[gid] {
+                    return sgPool
                 }
+                return players
+            }()
+            let pByID = Dictionary(uniqueKeysWithValues: poolForT.map { ($0.id, $0) })
+            let snap = DFSScoreSnapshot(
+                playerFantasyPoints: livePlayerPoints,
+                playerLiveStats: [:], gameLiveInfo: [:], allGamesFinal: false
+            )
+            let lb = DFSEngine.computeLeaderboard(
+                fieldEntries: cache.fieldEntries, playersByID: pByID,
+                scoreSnapshot: snap, isSingleGame: tObj.isSingleGame
+            )
+            // Update cache with fresh leaderboard
+            liveContestCache[tid] = LiveContestCache(
+                fieldEntries: cache.fieldEntries, leaderboard: lb,
+                remoteEntries: cache.remoteEntries, profileNames: cache.profileNames,
+                fieldGenerated: true
+            )
+            for rec in userRecords {
+                let ln = rec.lineupNumber ?? 1
+                var total = 0.0
+                for (i, pid) in rec.lineupPlayerIDs.enumerated() {
+                    let pts = livePlayerPoints[pid] ?? 0
+                    total += (tObj.isSingleGame && i == 0) ? pts * 1.5 : pts
+                }
+                let rank = min(tObj.entryCount, lb.filter({ $0.points > total }).count + 1)
+                cachedLiveRanks["\(tid)-\(ln)"] = rank
             }
         }
 
-        // Update live contest cache so re-entering or switching lineups is instant
-        liveContestCache[tournament.id] = LiveContestCache(
-            fieldEntries: fieldEntries,
-            leaderboard: leaderboard,
-            remoteEntries: remoteEntries,
-            profileNames: remoteProfileNames,
-            fieldGenerated: true
-        )
+        // Update live contest cache so re-entering or switching lineups is
+        // instant. Final validation gate: only persist when the bots in
+        // memory actually belong to this tournament. Without this, a brief
+        // state drift (e.g. during a rapid main↔SG toggle) could write
+        // 10-player main-slate bots into the SG cache key, which would then
+        // be restored as-is on the next switch.
+        if botsMatchTournament(fieldEntries, tournamentID: tournament.id) {
+            liveContestCache[tournament.id] = LiveContestCache(
+                fieldEntries: fieldEntries,
+                leaderboard: leaderboard,
+                remoteEntries: remoteEntries,
+                profileNames: remoteProfileNames,
+                fieldGenerated: true
+            )
+        } else {
+            print("[DFS-\(sport)] Refusing to cache \(tournament.id) — fieldEntries don't match tournament shape")
+        }
 
         guard let userEntry = leaderboard.first(where: { $0.isCurrentUser }) else { return }
+
+        // Avoid "Rank #1 flash": with all-zeros the user is tied for first and
+        // would render as Rank #1 before real data lands. BUT we still want to
+        // publish a real rank pre-game once the field is built — otherwise the
+        // header is stuck on "Your lineup is locked in" for 15+ minutes until
+        // first pitch.
+        // Publish when EITHER scoring has started OR the field is fully built
+        // (so we're confident the leaderboard's rank ordering is final, even
+        // if it's based on projections/zeros). The "field fully built" check
+        // requires the field to be at least half the expected entry count.
+        let hasAnyScoring = leaderboard.contains(where: { $0.points > 0 })
+        let expectedEntries = max(2, tournament.entryCount)
+        let fieldFullyBuilt = leaderboard.count >= expectedEntries / 2
+        guard hasAnyScoring || fieldFullyBuilt else { return }
+
         let currentRR = latestResult?.rrDelta ?? 0
         latestResult = DFSResult(
             id: latestResult?.id ?? UUID(),
@@ -2832,22 +3417,59 @@ final class DFSViewModel {
 
     /// Pre-builds fields and leaderboards for all entered tournaments that aren't cached yet,
     /// so the user sees results instantly when tapping any Active Contests card.
+    ///
+    /// Per-tournament work runs concurrently via TaskGroup so the network awaits
+    /// (fetchEntries / fetchProfiles / fetchTournament — 3 round-trips each)
+    /// interleave instead of serializing. The CPU-bound bot generation still
+    /// runs on the main actor between awaits, but with N tournaments we now
+    /// pay ~1× network latency instead of ~N×.
     func preCacheAllEnteredTournaments() async {
         guard let token = accessToken, let userID else { return }
-        // Only pre-cache if the current tournament's field is already built
-        guard fieldGenerated, !fieldEntries.isEmpty else { return }
+        // Need the slate's player pool to be loaded before we can generate bot
+        // lineups. The old guard required `fieldGenerated && !fieldEntries.isEmpty`,
+        // which is only true after the user has opened a specific tournament —
+        // so if the user has multiple entered contests for the same sport but
+        // only opens one, the others never get their bot fields populated and
+        // render as "1 entries" on tap.
+        guard !players.isEmpty || !singleGamePlayers.isEmpty else { return }
         let currentTID = activeTournamentID
 
-        for tid in enteredTournamentIDs {
-            guard tid != currentTID else { continue }
-            guard liveContestCache[tid] == nil else { continue }
-            guard let tObj = tournaments.first(where: { $0.id == tid }) else { continue }
+        // Snapshot the set so concurrent mutations to enteredTournamentIDs
+        // (from another task or refresh cycle) don't change the loop's view
+        // partway through.
+        let tidsToCache = enteredTournamentIDs.filter { $0 != currentTID }
+        await withTaskGroup(of: Void.self) { group in
+            for tid in tidsToCache {
+                group.addTask { [weak self] in
+                    await self?.preCacheSingleTournament(tid: tid, token: token, userID: userID)
+                }
+            }
+        }
+    }
 
-            // Fetch remote entries for this tournament
-            let entries: [DFSEntryRecord]
-            do {
-                entries = try await SupabaseService.shared.fetchEntries(tournamentID: tid, accessToken: token)
-            } catch { continue }
+    /// Body of one tournament's pre-cache pass. Extracted from
+    /// preCacheAllEnteredTournaments so the loop can run as a TaskGroup.
+    /// All `continue` statements in the original loop became `return` here.
+    private func preCacheSingleTournament(tid: String, token: String, userID: String) async {
+        guard let tObj = tournaments.first(where: { $0.id == tid }) else {
+            print("[DFS-\(sport)] Pre-cache SKIP \(tid): tournament not in current `tournaments` array (\(tournaments.count) loaded)")
+            return
+        }
+        // Re-attempt if the previous cache produced suspiciously few entries.
+        // Small contests (H2H, 3-man, 5-man) must be fully populated;
+        // bigger contests (2000-person) just need ~half built.
+        if let cached = liveContestCache[tid] {
+            let expected = tObj.entryCount
+            let threshold = expected <= 10 ? expected : max(2, expected / 2)
+            if cached.fieldEntries.count >= threshold { return }
+            print("[DFS-\(sport)] Pre-cache: cache for \(tid) has only \(cached.fieldEntries.count)/\(expected) entries — regenerating")
+        }
+
+        // Fetch remote entries for this tournament
+        let entries: [DFSEntryRecord]
+        do {
+            entries = try await SupabaseService.shared.fetchEntries(tournamentID: tid, accessToken: token)
+        } catch { return }
 
             let uniqueUserIDs = Array(Set(entries.map { $0.userID }))
             let profiles = (try? await SupabaseService.shared.fetchProfiles(userIDs: uniqueUserIDs, accessToken: token)) ?? []
@@ -2879,27 +3501,54 @@ final class DFSViewModel {
                                "SplashZone","LineupLab","FourthQuarter","RimRunner","PaintPoints"]
 
             let isLocked = isTournamentLocked(tObj)
+            // First-time-post-lock: locked with no saved bots ever. We GENERATE and
+            // SAVE so the lineups freeze on first encounter (matches the live view's
+            // `allowPostLockPad` path). Without this, the leaderboard would show 1
+            // entry until the user manually opens the live view.
+            let firstTimePostLock = isLocked && savedBots.isEmpty
 
-            if !savedBots.isEmpty {
+            // Validate saved bots against the SAME criteria refreshLive uses
+            // (size, slate pool). Otherwise pre-cache happily stuffs broken
+            // (e.g. cross-sport, wrong-shape) bots into liveContestCache and
+            // they survive every navigation back into this contest.
+            let preCacheSlateIDs: Set<String> = {
+                if tObj.isSingleGame, let gid = tObj.gameID {
+                    if let sgPool = singleGamePlayers[gid] { return Set(sgPool.map(\.id)) }
+                    return Set(players.filter { $0.gameID == gid }.map(\.id))
+                }
+                return Set(players.map(\.id))
+            }()
+            let savedBotsAreValid = !savedBots.isEmpty && savedBots.allSatisfy { bot in
+                guard bot.playerIDs.count == tObj.lineupSize else { return false }
+                if !preCacheSlateIDs.isEmpty {
+                    guard bot.playerIDs.allSatisfy({ preCacheSlateIDs.contains($0) }) else { return false }
+                }
+                return true
+            }
+            if !savedBots.isEmpty && !savedBotsAreValid {
+                print("[DFS-\(sport)] Pre-cache: \(savedBots.count) saved bots for \(tid) are invalid (wrong size or foreign players) — regenerating from scratch")
+            }
+
+            if !savedBots.isEmpty && savedBotsAreValid {
                 let trimmed = Array(savedBots.prefix(botsNeeded))
                 field += trimmed.map { DFSFieldEntry(id: UUID(), name: $0.name, playerIDs: $0.playerIDs, isCurrentUser: false) }
-            } else if isLocked {
-                // Tournament is locked but no saved bots on server — skip bot generation.
-                // Generating fresh bots after lock would produce different lineups every session,
-                // causing results to change each time the user views standings.
+            } else if savedBots.isEmpty && isLocked && !firstTimePostLock {
+                // Locked AND we've already generated bots for this tournament before
+                // (this branch never runs in practice because firstTimePostLock above
+                // is true whenever savedBots is empty — kept for clarity).
                 print("[DFS-\(sport)] Pre-cache: tournament \(tid) is locked with no saved bots — skipping bot generation to preserve consistency")
             } else {
                 // Use the correct player pool for this tournament (may differ from activePlayers
                 // which is bound to the currently-selected tournament).
-                let poolForBots: [DFSPlayer]
+                let rawPoolForBots: [DFSPlayer]
                 if tObj.isSingleGame, let gid = tObj.gameID {
                     if let sgPool = singleGamePlayers[gid] {
-                        poolForBots = sgPool
+                        rawPoolForBots = sgPool
                     } else {
                         // Build single-game pool with converted showdown salaries
                         let filtered = players.filter { $0.gameID == gid }
                         let league = tObj.league
-                        poolForBots = filtered.map { p in
+                        let converted = filtered.map { p -> DFSPlayer in
                             var sg = DFSPlayer(
                                 id: p.id, name: p.name, team: p.team, position: p.position,
                                 salary: singleGameSalary(from: p.salary, league: league),
@@ -2913,16 +3562,43 @@ final class DFSViewModel {
                             sg.isStartingGoalie = p.isStartingGoalie
                             return sg
                         }
-                        if !poolForBots.isEmpty {
-                            singleGamePlayers[gid] = poolForBots
+                        if !converted.isEmpty {
+                            singleGamePlayers[gid] = converted
                         }
+                        rawPoolForBots = converted
                     }
                 } else if tObj.tournamentType.isEvening {
-                    poolForBots = eveningPlayers
+                    rawPoolForBots = eveningPlayers
                 } else {
-                    poolForBots = players
+                    rawPoolForBots = players
                 }
-                guard !poolForBots.isEmpty else { continue }
+                // Apply the contest's frozen salary snapshot so bots draft against
+                // the same prices the user will see (and that get stored). Without
+                // this, bots could use raw prices that drift from canonical,
+                // making "$50K spent" mean different things for bots vs the user.
+                let poolForBots: [DFSPlayer] = {
+                    guard let canonical = tournamentPlayerSalaries[tid], !canonical.isEmpty else {
+                        return rawPoolForBots
+                    }
+                    return rawPoolForBots.map { p in
+                        guard let drafted = canonical[p.id], drafted > 0, drafted != p.salary else { return p }
+                        var fixed = DFSPlayer(
+                            id: p.id, name: p.name, team: p.team, position: p.position,
+                            salary: drafted, projectedPoints: p.projectedPoints,
+                            gameID: p.gameID, injuryStatus: p.injuryStatus,
+                            battingOrder: p.battingOrder
+                        )
+                        fixed.gamesPlayed = p.gamesPlayed
+                        fixed.playedRecently = p.playedRecently
+                        fixed.isConfirmedActive = p.isConfirmedActive
+                        fixed.isStartingGoalie = p.isStartingGoalie
+                        return fixed
+                    }
+                }()
+                guard !poolForBots.isEmpty else {
+                    print("[DFS-\(sport)] Pre-cache SKIP \(tid): bot pool empty (isSG=\(tObj.isSingleGame), gameID=\(tObj.gameID ?? "nil"), players=\(players.count), sgPools=\(singleGamePlayers.count))")
+                    return
+                }
                 for i in 0..<botsNeeded {
                     let botIDs = generateBotLineup(from: poolForBots, salaryCap: tObj.salaryCap, lineupSize: tObj.lineupSize, rosterSlots: tObj.rosterSlots, isSingleGame: tObj.isSingleGame)
                     let name = "\(sampleNames[i % sampleNames.count]) #\(i + 1)"
@@ -2930,7 +3606,14 @@ final class DFSViewModel {
                 }
             }
 
-            guard !field.isEmpty, !players.isEmpty else { continue }
+            guard !field.isEmpty else {
+                print("[DFS-\(sport)] Pre-cache SKIP \(tid): field ended up empty after bot generation")
+                return
+            }
+            guard !players.isEmpty else {
+                print("[DFS-\(sport)] Pre-cache SKIP \(tid): main players pool empty")
+                return
+            }
 
             // Build leaderboard using current live player points
             // Use single-game player pool (with adjusted salaries) when applicable
@@ -2950,11 +3633,53 @@ final class DFSViewModel {
                 scoreSnapshot: snapshot, isSingleGame: tObj.isSingleGame
             )
 
+            // Only mark fieldGenerated=true if the field is actually populated
+            // to the expected count. Otherwise refreshLive would see this cache,
+            // think generation is done, and skip its own bot generation — leaving
+            // the contest stuck at 1 entry until the user navigates away/back.
+            let expectedEntries = tObj.entryCount
+            let fieldComplete = expectedEntries <= 10
+                ? field.count >= expectedEntries
+                : field.count >= max(2, expectedEntries / 2)
             liveContestCache[tid] = LiveContestCache(
                 fieldEntries: field, leaderboard: lb,
                 remoteEntries: entries, profileNames: profileMap,
-                fieldGenerated: true
+                fieldGenerated: fieldComplete
             )
+            if !fieldComplete {
+                print("[DFS-\(sport)] Pre-cache: cache for \(tid) partial (\(field.count)/\(expectedEntries)) — refreshLive will retry generation")
+            }
+
+            // Save the freshly generated field back to the server when:
+            //   1. firstTimePostLock — never had bots before; freeze these now, OR
+            //   2. invalid saved bots were detected and replaced — overwrite the
+            //      bad data so subsequent loads don't keep re-fetching it.
+            let shouldResaveBotField = firstTimePostLock || (!savedBots.isEmpty && !savedBotsAreValid)
+            if shouldResaveBotField {
+                let botEntriesToSave = field
+                    .filter { !$0.isCurrentUser && !$0.isRealUser }
+                    .map { entry -> BotFieldEntry in
+                        // Capture each bot's lineup salaries from the same player pool the
+                        // live leaderboard uses, so settled view totals match live exactly.
+                        let psals: [String: Int] = Dictionary(uniqueKeysWithValues: entry.playerIDs.compactMap { pid -> (String, Int)? in
+                            guard let sal = playersByID[pid]?.salary, sal > 0 else { return nil }
+                            return (pid, sal)
+                        })
+                        return BotFieldEntry(
+                            name: entry.name,
+                            playerIDs: entry.playerIDs,
+                            playerSalaries: psals.isEmpty ? nil : psals
+                        )
+                    }
+                if !botEntriesToSave.isEmpty, let saveToken = accessToken {
+                    Task {
+                        try? await SupabaseService.shared.saveBotField(
+                            tournamentID: tid, botField: botEntriesToSave, accessToken: saveToken
+                        )
+                        print("[DFS-\(self.sport)] Pre-cache: saved \(botEntriesToSave.count) first-time-post-lock bots for \(tid)")
+                    }
+                }
+            }
 
             // Cache ranks for all user lineups in this tournament
             if let userRecords = userEntryRecords[tid] {
@@ -2970,7 +3695,6 @@ final class DFSViewModel {
                 }
             }
             print("[DFS-\(sport)] Pre-cached field for \(tid): \(field.count) entries, \(lb.count) leaderboard rows")
-        }
     }
 
     /// Persists the full leaderboard (including bots) to dfs_tournament_results
@@ -2983,16 +3707,56 @@ final class DFSViewModel {
 
         let entryNameMap = Dictionary(uniqueKeysWithValues: fieldEntries.map { ($0.id, $0.name) })
         let fieldByID = Dictionary(uniqueKeysWithValues: fieldEntries.map { ($0.id, $0) })
-        let playersByID = Dictionary(uniqueKeysWithValues: activePlayers.map { ($0.id, $0) })
-        let isSG = tournament?.isSingleGame ?? false
-        let entryCount = tournament?.entryCount ?? 1000
+        // Look up the TARGET tournament (not the currently-active one) — settlement
+        // can run for a tournament that isn't currently selected (background settle
+        // loop, multi-lineup tournaments, etc.) and we MUST use the target's correct
+        // player pool. For SG, that's the showdown-salary pool keyed by gameID;
+        // otherwise the bots get persisted with main-slate salaries that display as
+        // ~$36K total instead of the ~$50K showdown cap.
+        let targetTournament = tournaments.first(where: { $0.id == tournamentID })
+        let poolForLookup: [DFSPlayer]
+        if targetTournament?.isSingleGame == true,
+           let gid = targetTournament?.gameID,
+           let sgPool = singleGamePlayers[gid] {
+            poolForLookup = sgPool
+        } else {
+            poolForLookup = activePlayers
+        }
+        let playersByID = Dictionary(uniqueKeysWithValues: poolForLookup.map { ($0.id, $0) })
+        let isSG = targetTournament?.isSingleGame ?? (tournament?.isSingleGame ?? false)
+        let entryCount = targetTournament?.entryCount ?? tournament?.entryCount ?? 1000
 
         // Deduplicate entry names to avoid upsert conflict errors
         var nameCounter: [String: Int] = [:]
+        // Build a comprehensive name lookup: bots can roster a player who later
+        // DNP'd and was filtered out of `playersByID`, so we need additional
+        // fallbacks to avoid persisting raw IDs (which display as "Unknown").
+        func resolveName(_ pid: String) -> String {
+            if let name = playersByID[pid]?.name, !name.isEmpty { return name }
+            if let info = preloadedPlayerInfo[pid], !info.name.isEmpty { return info.name }
+            if let stats = livePlayerStats[pid], !stats.name.isEmpty, stats.name != pid {
+                return stats.name
+            }
+            // Look across other field entries' lineup names that may already have it resolved
+            for (_, entries) in userEntryRecords {
+                for entry in entries {
+                    if let names = entry.lineupPlayerNames,
+                       let idx = entry.lineupPlayerIDs.firstIndex(of: pid),
+                       idx < names.count {
+                        let n = names[idx]
+                        if !n.isEmpty, n != pid, !["nba-", "pga-", "ncaam-", "mlb-", "nhl-", "epl-", "ucl-", "wc-"]
+                            .contains(where: { n.hasPrefix($0) }) {
+                            return n
+                        }
+                    }
+                }
+            }
+            return pid
+        }
         var resultRecords: [DFSTournamentResultRecord] = leaderboard.map { entry in
             let field = fieldByID[entry.id]
             let playerIDs = field?.playerIDs ?? []
-            let playerNames = playerIDs.map { playersByID[$0]?.name ?? $0 }
+            let playerNames = playerIDs.map { resolveName($0) }
             let perPlayerPoints: [String: Double] = Dictionary(uniqueKeysWithValues:
                 playerIDs.map { pid in
                     (pid, livePlayerPoints[pid] ?? 0)
@@ -3136,6 +3900,25 @@ final class DFSViewModel {
             return
         }
         guard let tournament else { return }
+
+        // Private contest branch: bypass public dfs_entries entirely.
+        // The lineup is stored in dfs_private_contest_entries against the contest.
+        if let contest = activePrivateContest {
+            _ = userID; _ = token  // silence warnings
+            Task {
+                if await submitActivePrivateContestLineup() {
+                    await MainActor.run {
+                        self.showLineupBuilder = false
+                        self.activePrivateContest = nil
+                        self.selectedPlayerIDs = []
+                        self.mvpPlayerID = nil
+                        self.editingLineupNumber = nil
+                    }
+                }
+            }
+            return
+        }
+
         let isEditing = editingLineupNumber != nil
         let lineupNumber: Int
         if let editNum = editingLineupNumber {
@@ -3400,6 +4183,50 @@ final class DFSViewModel {
     var pastTournamentSlateSalaries: [String: Int] = [:]  // tournament-level salary map for fallback
     private var pastTournamentStatsLoaded: String? = nil  // tournament ID for which stats were loaded
     private var settlingInProgress: Set<String> = []  // tournament IDs currently being settled (prevents races)
+    /// Tournaments whose saved bot field has already been judged corrupt and
+    /// regenerated this session. Without this latch, every refreshLive cycle
+    /// re-detects the same low coverage (the freshly regenerated save hasn't
+    /// propagated back yet) and rebuilds 2000 bots again — looping forever
+    /// and stranding the UI on shimmer.
+    private var botFieldRegeneratedThisSession: Set<String> = []
+
+    /// Discards a contaminated cache entry along with every stale entry
+    /// derived from it (rank-by-key cache that the Active Contests cards
+    /// read from). Otherwise a card could keep showing a bad rank from a
+    /// poisoned cache even after the underlying cache itself was nuked.
+    private func discardContaminatedCache(_ tid: String) {
+        liveContestCache[tid] = nil
+        let staleRankKeys = cachedLiveRanks.keys.filter { $0.hasPrefix("\(tid)-") }
+        for key in staleRankKeys { cachedLiveRanks[key] = nil }
+    }
+
+    /// Shared cache-validity check used everywhere we read or write
+    /// `liveContestCache`. Catches contamination where the bots in a cached
+    /// LiveContestCache entry don't actually belong to the tournament whose
+    /// key they're filed under (wrong lineup size or wrong game/slate IDs).
+    /// Returns true when the cache is empty (no bots = nothing to validate)
+    /// or when at least 50% of bots match the tournament's expected shape.
+    private func botsMatchTournament(_ bots: [DFSFieldEntry], tournamentID: String) -> Bool {
+        guard let tObj = tournaments.first(where: { $0.id == tournamentID }) else { return true }
+        let botsOnly = bots.filter { !$0.isCurrentUser && !$0.isRealUser }
+        guard !botsOnly.isEmpty else { return true }
+        let validIDs: Set<String> = {
+            if tObj.isSingleGame, let gid = tObj.gameID {
+                if let sgPool = singleGamePlayers[gid] { return Set(sgPool.map(\.id)) }
+                return Set(players.filter { $0.gameID == gid }.map(\.id))
+            }
+            return Set(players.map(\.id))
+        }()
+        let runPoolCheck = !validIDs.isEmpty
+        let validCount = botsOnly.filter { bot in
+            guard bot.playerIDs.count == tObj.lineupSize else { return false }
+            if runPoolCheck {
+                guard bot.playerIDs.allSatisfy({ validIDs.contains($0) }) else { return false }
+            }
+            return true
+        }.count
+        return Double(validCount) / Double(botsOnly.count) >= 0.5
+    }
 
     /// Cache for live contest field + leaderboard so switching lineups or re-entering is instant.
     private struct LiveContestCache {
@@ -3448,6 +4275,11 @@ final class DFSViewModel {
         } else if tournamentId.hasPrefix("ucl-") {
             sportPrefix = "ucl"
             dateString = String(tournamentId.dropFirst(4).prefix(8))
+        } else if tournamentId.hasPrefix("wc-") {
+            sportPrefix = "wc"
+            // "wc-" is 3 chars (not 4 like other leagues), so the YYYYMMDD
+            // date sits at offset 3.
+            dateString = String(tournamentId.dropFirst(3).prefix(8))
         } else if tournamentId.hasPrefix("pga-") {
             // For golf, fetch the ESPN PGA scoreboard to get round-by-round scores
             // Tournament ID is "pga-{eventID}-{fieldSize}" — extract just the ESPN event ID
@@ -3495,6 +4327,7 @@ final class DFSViewModel {
         case "nhl": espnSport = "hockey/nhl"
         case "epl": espnSport = "soccer/eng.1"
         case "ucl": espnSport = "soccer/uefa.champions"
+        case "wc": espnSport = "soccer/fifa.world"
         case "ufc": espnSport = "mma/ufc"
         case "nfl": espnSport = "football/nfl"
         case "cfb": espnSport = "football/college-football"
@@ -3516,7 +4349,7 @@ final class DFSViewModel {
     /// Fetch individual athlete names from ESPN for unresolved player IDs.
     /// First tries individual athlete endpoints, then falls back to team rosters for any still-unresolved.
     private func resolveUnresolvedPlayerNames(tournamentId: String, sportPrefix: String, espnSport: String) async {
-        let rawPrefixes = ["nba-", "pga-", "ncaam-", "mlb-", "nhl-", "epl-", "ucl-", "ufc-", "nfl-", "cfb-"]
+        let rawPrefixes = ["nba-", "pga-", "ncaam-", "mlb-", "nhl-", "epl-", "ucl-", "wc-", "ufc-", "nfl-", "cfb-"]
         let allRecordPlayerIDs = pastTournamentResultRecords.flatMap { $0.lineupPlayerIDs }
         let unresolvedIDs = Array(Set(allRecordPlayerIDs)).filter { pid in
             guard pid.hasPrefix("\(sportPrefix)-") else { return false }
@@ -3529,7 +4362,7 @@ final class DFSViewModel {
         // Step 1: Try individual athlete endpoints (batched to avoid network storms)
         let capturedSportPrefix = sportPrefix
         let capturedESPNSportResolve = espnSport
-        let isSoccerResolve = sportPrefix == "epl" || sportPrefix == "ucl"
+        let isSoccerResolve = sportPrefix == "epl" || sportPrefix == "ucl" || sportPrefix == "wc"
         let batchedIDs = Array(unresolvedIDs.prefix(200))
         let batchSize = 10
         for batchStart in stride(from: 0, to: batchedIDs.count, by: batchSize) {
@@ -4574,6 +5407,48 @@ final class DFSViewModel {
 
     /// Settles a past tournament that was never settled on the server.
     /// Reconstructs the field from the user's entry, fetches final scores from ESPN,
+    /// Fetches one specific past UFC card by date and returns one slate
+    /// game per fight (using the competition ID — that's what the live
+    /// scoring provider keys against). The standard `fetchSlateGamesForDate`
+    /// helper is unusable for UFC because it assumes one team-vs-team
+    /// competition per event and reads `competitor.team.abbreviation`.
+    private func fetchUFCSlateGamesForDate(_ dateKey: String) async -> [DFSSlateGame] {
+        let urlString = "https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard?dates=\(dateKey)"
+        guard let url = URL(string: urlString) else { return [] }
+        guard let (data, response) = try? await URLSession.shared.data(from: url),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let events = json["events"] as? [[String: Any]] else {
+            return []
+        }
+        var games: [DFSSlateGame] = []
+        for event in events {
+            let comps = event["competitions"] as? [[String: Any]] ?? []
+            for comp in comps {
+                guard let compID = comp["id"] as? String,
+                      let competitors = comp["competitors"] as? [[String: Any]],
+                      competitors.count == 2 else { continue }
+                let c1 = competitors[0]
+                let c2 = competitors[1]
+                let c1Name = (c1["athlete"] as? [String: Any])?["shortName"] as? String
+                    ?? (c1["athlete"] as? [String: Any])?["displayName"] as? String ?? "Fighter 1"
+                let c2Name = (c2["athlete"] as? [String: Any])?["shortName"] as? String
+                    ?? (c2["athlete"] as? [String: Any])?["displayName"] as? String ?? "Fighter 2"
+                let state = ((comp["status"] as? [String: Any])?["type"] as? [String: Any])?["state"] as? String ?? "pre"
+                let dateStr = comp["date"] as? String ?? ""
+                let startTime: Date = {
+                    let fmt = ISO8601DateFormatter()
+                    return fmt.date(from: dateStr) ?? Date()
+                }()
+                games.append(DFSSlateGame(
+                    id: compID, awayTeam: c1Name, homeTeam: c2Name,
+                    startTime: startTime, state: state
+                ))
+            }
+        }
+        return games
+    }
+
     /// builds a full simulated field with real player lineups, and persists everything to server.
     /// Returns the generated result records on success so callers can use them directly
     /// without needing to re-fetch from the server (which may still have stale data if DELETE failed).
@@ -4604,14 +5479,27 @@ final class DFSViewModel {
         case "nhl": espnSport = "hockey/nhl"
         case "epl": espnSport = "soccer/eng.1"
         case "ucl": espnSport = "soccer/uefa.champions"
+        case "wc": espnSport = "soccer/fifa.world"
         case "ufc": espnSport = "mma/ufc"
         case "nfl": espnSport = "football/nfl"
         case "cfb": espnSport = "football/college-football"
         default: espnSport = "basketball/nba"
         }
 
-        // Fetch that day's slate games
-        let allPastSlateGames = await fetchSlateGamesForDate(dateString, espnSport: espnSport)
+        // Fetch that day's slate games. UFC needs special handling: the
+        // generic `fetchSlateGamesForDate` assumes one team-vs-team
+        // competition per event and reads `competitor.team.abbreviation`,
+        // which fails for UFC (athletes, not teams, and many fights per
+        // event). Hit ESPN's UFC scoreboard for the exact date and build
+        // per-fight slate games. The UFC slate provider can't be reused
+        // here because it returns the "best" upcoming/live card — for
+        // settlement we need the specific past card by date.
+        let allPastSlateGames: [DFSSlateGame]
+        if sportPrefix == "ufc" {
+            allPastSlateGames = await fetchUFCSlateGamesForDate(dateString)
+        } else {
+            allPastSlateGames = await fetchSlateGamesForDate(dateString, espnSport: espnSport)
+        }
         guard !allPastSlateGames.isEmpty else { return nil }
 
         // For single-game tournaments, only check the specific game — not all games on the slate.
@@ -4657,6 +5545,8 @@ final class DFSViewModel {
         case "ncaam": settlementScoringProvider = ESPNNCAAMDFSLiveScoringProvider()
         case "epl": settlementScoringProvider = ESPNSoccerDFSLiveScoringProvider(league: .epl)
         case "ucl": settlementScoringProvider = ESPNSoccerDFSLiveScoringProvider(league: .ucl)
+        case "wc": settlementScoringProvider = ESPNSoccerDFSLiveScoringProvider(league: .worldCup)
+        case "ufc": settlementScoringProvider = ESPNUFCDFSLiveScoringProvider()
         case "nfl": settlementScoringProvider = ESPNNFLDFSLiveScoringProvider()
         case "cfb": settlementScoringProvider = ESPNNCAAFBDFSLiveScoringProvider()
         default: settlementScoringProvider = scoringProvider
@@ -4763,11 +5653,10 @@ final class DFSViewModel {
             }
         }
 
-        // Detect single-game mode from the first user entry's lineup size
         let userPlayerIDs = userEntry.lineupPlayerIDs
         let lineupSize = userPlayerIDs.count
-        // Detect single-game mode: classic NBA=7, classic NHL=9, classic MLB=9, single-game=6
-        let isSingleGame = lineupSize == 6 && (sportPrefix == "nba" || sportPrefix == "nhl" || sportPrefix == "mlb")
+        // Tournament ID is authoritative — a lineupSize+sport allowlist previously missed soccer Showdown.
+        let isSingleGame = isSingleGameTournament
 
         // Compute per-entry user stats for the primary entry (used for backward compat)
         var userPerPlayerPoints: [String: Double] = [:]
@@ -4817,7 +5706,7 @@ final class DFSViewModel {
             case "mlb": botLineupSize = 10
             case "ncaam": botLineupSize = 6
             case "nhl": botLineupSize = 9
-            case "epl", "ucl": botLineupSize = 8
+            case "epl", "ucl", "wc": botLineupSize = 8
             case "nfl": botLineupSize = 9
             case "cfb": botLineupSize = 8
             default: botLineupSize = 8  // NBA
@@ -5093,7 +5982,7 @@ final class DFSViewModel {
             switch sportPrefix {
             case "nhl": botRosterSlots = ["C", "C", "W", "W", "D", "D", "UTIL", "UTIL", "G"]
             case "mlb": botRosterSlots = ["P", "P", "UTIL", "UTIL", "UTIL", "UTIL", "UTIL", "UTIL", "UTIL", "UTIL"]
-            case "epl", "ucl": botRosterSlots = ["GK", "DEF", "DEF", "MID", "MID", "FWD", "FWD", "FLEX"]
+            case "epl", "ucl", "wc": botRosterSlots = ["GK", "DEF", "DEF", "MID", "MID", "FWD", "FWD", "FLEX"]
             case "nfl": botRosterSlots = ["QB", "RB", "RB", "WR", "WR", "WR", "TE", "FLEX", "DEF"]
             case "cfb": botRosterSlots = ["QB", "RB", "RB", "WR", "WR", "WR", "TE", "FLEX"]
             case "nba": botRosterSlots = nil
@@ -5136,8 +6025,12 @@ final class DFSViewModel {
                     let raw = snapshot.playerFantasyPoints[pid] ?? 0
                     return (pid, (isSingleGame && i == 0) ? raw * 1.5 : raw)
                 })
-                let psals = Dictionary(uniqueKeysWithValues: bot.playerIDs.enumerated().map { (i, pid) in
-                    let sal = salaryByID[pid] ?? 0
+                // Prefer the salary snapshot saved with the bot at lineup-build time.
+                // Falling back to salaryByID/salaryFloor causes settled view to show
+                // ~38K instead of the ~50K the bot actually spent during live play.
+                let psals = Dictionary(uniqueKeysWithValues: bot.playerIDs.enumerated().map { (i, pid) -> (String, Int) in
+                    let savedSal = bot.playerSalaries?[pid] ?? 0
+                    let sal = savedSal > 0 ? savedSal : (salaryByID[pid] ?? 0)
                     let baseSal = sal > 0 ? sal : salaryFloor
                     return (pid, (isSingleGame && i == 0) ? Int(Double(baseSal) * 1.5) : baseSal)
                 })
@@ -6159,8 +7052,21 @@ final class DFSViewModel {
     private func refreshRemoteEntries() async {
         guard let tournament else { return }
         guard let token = accessToken, let userID else { return }
+        // Capture which tournament we started this refresh for. If the user
+        // navigates to a different contest while the network call is in flight,
+        // the late-arriving result must NOT clobber the new tournament's state
+        // (selectedPlayerIDs, fieldEntries) — otherwise the wrong tournament's
+        // lineup flashes on screen.
+        let startedForTournament = tournament.id
+        let startedForLineupNumber = activeLineupNumber
         do {
-            let entries = try await SupabaseService.shared.fetchEntries(tournamentID: tournament.id, accessToken: token)
+            let entries = try await SupabaseService.shared.fetchEntries(tournamentID: startedForTournament, accessToken: token)
+            // Bail if the user switched tournaments while we were waiting.
+            guard activeTournamentID == startedForTournament,
+                  activeLineupNumber == startedForLineupNumber else {
+                print("[DFS-\(sport)] refreshRemoteEntries: stale result for \(startedForTournament) (active now \(activeTournamentID ?? "nil")) — discarding")
+                return
+            }
             remoteEntries = entries
 
             let uniqueUserIDs = Array(Set(entries.map { $0.userID }))
@@ -6596,7 +7502,7 @@ final class DFSViewModel {
         if pid.hasPrefix("mlb-") { minSalary = isTwoWaySP ? 6000 : 2000 }
         else if pid.hasPrefix("nhl-") { minSalary = 3000 }
         else if pid.hasPrefix("ncaam-") { minSalary = 3500 }
-        else if pid.hasPrefix("epl-") || pid.hasPrefix("ucl-") { minSalary = 3500 }
+        else if pid.hasPrefix("epl-") || pid.hasPrefix("ucl-") || pid.hasPrefix("wc-") { minSalary = 3500 }
         else if pid.hasPrefix("pga-") { minSalary = 6000 }
         else { minSalary = 3500 } // NBA
         let salary = max(salary, minSalary)
@@ -7020,5 +7926,456 @@ final class DFSViewModel {
             if validSizes.contains(size) { return size }
         }
         return 1000 // default for legacy IDs
+    }
+
+    // MARK: - Private Contests
+
+    /// Generate a 6-character invite code (excludes ambiguous chars: 0/O, 1/I/L).
+    private func generatePrivateContestInviteCode() -> String {
+        let alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+        return String((0..<6).map { _ in alphabet.randomElement()! })
+    }
+
+    private static func privateContestsCacheKey(for userID: String) -> String {
+        "dfs_my_private_contests_\(userID)"
+    }
+
+    /// Restore the cached private-contest list so the Active Contests view can
+    /// render the correct number of cards (in shimmer) immediately, instead of
+    /// the list popping from N→N+1 once the network fetch returns.
+    func loadCachedPrivateContests() {
+        guard let uid = userID, !uid.isEmpty else { return }
+        guard let data = UserDefaults.standard.data(forKey: Self.privateContestsCacheKey(for: uid)) else { return }
+        guard let cached = try? JSONDecoder().decode([DFSPrivateContest].self, from: data) else { return }
+        if myPrivateContests.isEmpty {
+            myPrivateContests = cached
+        }
+    }
+
+    private func persistPrivateContestsCache() {
+        guard let uid = userID, !uid.isEmpty else { return }
+        guard let data = try? JSONEncoder().encode(myPrivateContests) else { return }
+        UserDefaults.standard.set(data, forKey: Self.privateContestsCacheKey(for: uid))
+    }
+
+    func loadMyPrivateContests() async {
+        // Restore from cache first so the Active Contests view can immediately
+        // render the right number of shimmer placeholders. The network fetch
+        // below replaces this with the authoritative list.
+        loadCachedPrivateContests()
+        guard let token = accessToken, let uid = userID else { return }
+        do {
+            let records = try await SupabaseService.shared.fetchMyDFSPrivateContests(userID: uid, accessToken: token)
+            myPrivateContests = records.map { $0.toModel() }
+            persistPrivateContestsCache()
+        } catch {
+            print("[DFS-Private] Failed to load contests: \(error)")
+        }
+        // Eagerly fetch each private contest's entries + members in parallel so
+        // the Active Contests card can render real data (not just a populated
+        // contest list with empty FPTS/rank). Without this, the private card
+        // pops in immediately with 0.0 while the public cards still shimmer.
+        await withTaskGroup(of: Void.self) { group in
+            for contest in myPrivateContests {
+                group.addTask { [weak self] in
+                    await self?.loadPrivateContestMembers(contestID: contest.id)
+                }
+                group.addTask { [weak self] in
+                    await self?.loadPrivateContestEntries(contestID: contest.id)
+                }
+            }
+        }
+    }
+
+    /// Whether a private contest's data is loaded enough to render its Active
+    /// Contests card without placeholder values. Used to gate the card behind
+    /// the same shimmer state the public cards use.
+    func isPrivateContestReady(_ contestID: UUID) -> Bool {
+        privateContestEntries[contestID] != nil && privateContestMembers[contestID] != nil
+    }
+
+    /// Fetches the parent tournament record from Supabase and populates the
+    /// canonical salary snapshot for it. Needed when viewing a past private
+    /// contest whose parent slate is no longer in the in-memory tournaments
+    /// array — otherwise the roster sheet shows drifted salaries instead of
+    /// the frozen prices used when the lineup was submitted.
+    func loadParentTournamentSalariesIfNeeded(parentTournamentID: String) async {
+        guard tournamentPlayerSalaries[parentTournamentID]?.isEmpty != false else { return }
+        guard let token = accessToken else { return }
+        guard let record = try? await SupabaseService.shared.fetchTournament(
+            tournamentID: parentTournamentID, accessToken: token
+        ) else { return }
+        if let sals = record.playerSalaries, !sals.isEmpty {
+            tournamentPlayerSalaries[parentTournamentID] = sals
+        }
+    }
+
+    /// Final FPTS per private contest, keyed by contest ID. Computed by
+    /// fetching the parent slate's box scores and summing the user's entry's
+    /// player points. Populates the My Contests / Recent Results rows with
+    /// real scores — without this, the rows show `entry.lineupTotalPoints`
+    /// which is 0 (set at submit time before games started).
+    var privateContestFinalScores: [UUID: Double] = [:]
+
+    /// Computes and caches the current user's final FPTS for a settled
+    /// private contest. Runs sequentially per call because the global
+    /// `pastTournamentPlayerStats` dict gets replaced on each box-score
+    /// fetch; serializing avoids cross-tournament data being overwritten
+    /// before this call finishes summing.
+    func ensureFinalScoreForPrivateContest(_ contest: DFSPrivateContest) async {
+        guard privateContestFinalScores[contest.id] == nil else { return }
+        let entries = privateContestEntries[contest.id] ?? []
+        guard let me = userID.flatMap(UUID.init(uuidString:)),
+              let entry = entries.first(where: { $0.userID == me }),
+              !entry.lineupPlayerIDs.isEmpty else { return }
+        // Already-cached stored value is good enough if non-zero
+        if entry.lineupTotalPoints > 0 {
+            privateContestFinalScores[contest.id] = entry.lineupTotalPoints
+            return
+        }
+        await loadPastTournamentBoxScores(tournamentId: contest.parentTournamentID)
+        let isSG = contest.parentTournamentID.contains("-sg-")
+        var total = 0.0
+        for (idx, pid) in entry.lineupPlayerIDs.enumerated() {
+            let pts = pastTournamentPlayerStats[pid]?.fantasyPoints ?? 0
+            total += (isSG && idx == 0) ? pts * 1.5 : pts
+        }
+        privateContestFinalScores[contest.id] = total
+    }
+
+    /// Loads final scores for every past private contest the user has been
+    /// in. Serialized to avoid the box-score state being overwritten between
+    /// fetch and compute.
+    func loadAllPrivateContestFinalScores() async {
+        for contest in myPrivateContests {
+            guard !privateContestBelongsToCurrentSlate(contest) else { continue }
+            await ensureFinalScoreForPrivateContest(contest)
+        }
+    }
+
+    /// The 8-char "YYYYMMDD" date string for the current slate, derived from
+    /// the first loaded tournament ID. Private contests should only appear
+    /// alongside their own day's slate — yesterday's contest must not show up
+    /// next to tomorrow's games.
+    var currentSlateDateString: String? {
+        for t in tournaments {
+            let parts = t.id.split(separator: "-")
+            if let dateLike = parts.first(where: { $0.count == 8 && Int($0) != nil }) {
+                return String(dateLike)
+            }
+        }
+        return nil
+    }
+
+    /// Whether a private contest belongs to the currently-displayed slate (by
+    /// matching the YYYYMMDD date embedded in the parent tournament ID).
+    func privateContestBelongsToCurrentSlate(_ contest: DFSPrivateContest) -> Bool {
+        guard let today = currentSlateDateString else { return true } // can't determine — don't hide
+        let parts = contest.parentTournamentID.split(separator: "-")
+        guard let contestDate = parts.first(where: { $0.count == 8 && Int($0) != nil }) else { return true }
+        return String(contestDate) == today
+    }
+
+    func createPrivateContest(parentTournamentID: String, name: String, maxMembers: Int = 20) async -> DFSPrivateContest? {
+        guard let token = accessToken, let uid = userID else {
+            privateContestError = "Please sign in to create a contest."
+            return nil
+        }
+        isCreatingPrivateContest = true
+        privateContestError = nil
+
+        do {
+            // Ensure the parent tournament row exists in Supabase — public tournaments
+            // are only persisted on first lineup submission, so referencing one as a
+            // foreign key requires a pre-upsert.
+            if let parent = tournaments.first(where: { $0.id == parentTournamentID }) {
+                let lockTime = lockTimeForTournament(parent)
+                let parentRecord = DFSTournamentRecord(
+                    id: parent.id,
+                    title: parent.title,
+                    league: parent.league,
+                    lockTime: lockTime
+                )
+                try await SupabaseService.shared.upsertTournament(record: parentRecord, accessToken: token)
+            } else {
+                privateContestError = "Parent slate not found. Try refreshing the lobby."
+                isCreatingPrivateContest = false
+                return nil
+            }
+
+            let code = generatePrivateContestInviteCode()
+            let record = try await SupabaseService.shared.createDFSPrivateContest(
+                parentTournamentID: parentTournamentID,
+                name: name,
+                createdBy: uid,
+                inviteCode: code,
+                maxMembers: maxMembers,
+                accessToken: token
+            )
+            let contest = record.toModel()
+            let displayName = profileName.isEmpty ? "Player" : profileName
+            try await SupabaseService.shared.joinDFSPrivateContest(
+                contestID: record.id, userID: uid, displayName: displayName, accessToken: token
+            )
+            myPrivateContests.insert(contest, at: 0)
+            isCreatingPrivateContest = false
+            return contest
+        } catch {
+            privateContestError = "Failed to create contest: \(error.localizedDescription)"
+            print("[DFS-Private] Create error: \(error)")
+            isCreatingPrivateContest = false
+            return nil
+        }
+    }
+
+    func joinPrivateContestByCode(_ code: String) async -> DFSPrivateContest? {
+        guard let token = accessToken, let uid = userID else {
+            privateContestError = "Please sign in to join a contest."
+            return nil
+        }
+        isJoiningPrivateContest = true
+        privateContestError = nil
+        let normalized = code.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard !normalized.isEmpty else {
+            privateContestError = "Enter an invite code."
+            isJoiningPrivateContest = false
+            return nil
+        }
+        do {
+            guard let record = try await SupabaseService.shared.fetchDFSPrivateContestByInviteCode(code: normalized, accessToken: token) else {
+                privateContestError = "No contest found for that code."
+                isJoiningPrivateContest = false
+                return nil
+            }
+            let displayName = profileName.isEmpty ? "Player" : profileName
+            try await SupabaseService.shared.joinDFSPrivateContest(
+                contestID: record.id, userID: uid, displayName: displayName, accessToken: token
+            )
+            let contest = record.toModel()
+            if !myPrivateContests.contains(where: { $0.id == contest.id }) {
+                myPrivateContests.insert(contest, at: 0)
+            }
+            isJoiningPrivateContest = false
+            return contest
+        } catch {
+            privateContestError = "Failed to join: \(error.localizedDescription)"
+            print("[DFS-Private] Join error: \(error)")
+            isJoiningPrivateContest = false
+            return nil
+        }
+    }
+
+    func loadPrivateContestMembers(contestID: UUID) async {
+        guard let token = accessToken else { return }
+        do {
+            let records = try await SupabaseService.shared.fetchDFSPrivateContestMembers(
+                contestID: contestID.uuidString.lowercased(), accessToken: token
+            )
+            privateContestMembers[contestID] = records.map { $0.toModel() }
+        } catch {
+            print("[DFS-Private] Failed to load members: \(error)")
+        }
+    }
+
+    /// Opens the lineup builder for a private contest. Loads the parent slate
+    /// (player pool, lock time) then marks the builder as routing submissions
+    /// to the private contest entries table.
+    func startPrivateContestLineup(_ contest: DFSPrivateContest) {
+        selectTournament(contest.parentTournamentID)
+        activePrivateContest = contest
+        editingLineupNumber = nil
+        // If the user already submitted a lineup to this private contest,
+        // preload it into the builder so "Edit Lineup" actually shows their
+        // current picks instead of an empty/foreign lineup.
+        if let myUUID = userID.flatMap(UUID.init(uuidString:)),
+           let entry = (privateContestEntries[contest.id] ?? []).first(where: { $0.userID == myUUID }),
+           !entry.lineupPlayerIDs.isEmpty {
+            selectedPlayerIDs = Set(entry.lineupPlayerIDs)
+            let isSG = tournaments.first(where: { $0.id == contest.parentTournamentID })?.isSingleGame
+                ?? contest.parentTournamentID.contains("-sg-")
+            if isSG, let firstID = entry.lineupPlayerIDs.first {
+                mvpPlayerID = firstID
+            } else {
+                mvpPlayerID = nil
+            }
+        }
+        showLineupBuilder = true
+    }
+
+    func loadPrivateContestEntries(contestID: UUID) async {
+        guard let token = accessToken else { return }
+        do {
+            let records = try await SupabaseService.shared.fetchDFSPrivateContestEntries(
+                contestID: contestID.uuidString.lowercased(), accessToken: token
+            )
+            privateContestEntries[contestID] = records.map { $0.toModel() }
+        } catch {
+            print("[DFS-Private] Failed to load entries: \(error)")
+        }
+    }
+
+    /// Submits the lineup currently in the builder to the active private contest.
+    /// The score is computed against the parent slate's current live points
+    /// (will be 0 pre-lock; refreshes on live data updates).
+    func submitActivePrivateContestLineup() async -> Bool {
+        guard let contest = activePrivateContest,
+              let token = accessToken,
+              let uid = userID else { return false }
+        let lineupIDs = selectedPlayers.map { $0.id }
+        guard !lineupIDs.isEmpty else { return false }
+
+        // Compute current points using livePlayerPoints (will be 0 pre-game).
+        let parentTournament = tournaments.first(where: { $0.id == contest.parentTournamentID })
+        let isSG = parentTournament?.isSingleGame ?? false
+        var totalPoints = 0.0
+        for (i, pid) in lineupIDs.enumerated() {
+            let pts = livePlayerPoints[pid] ?? 0
+            totalPoints += (isSG && i == 0) ? pts * 1.5 : pts
+        }
+        let name = profileName.isEmpty ? "Player" : profileName
+
+        do {
+            try await SupabaseService.shared.submitDFSPrivateContestEntry(
+                contestID: contest.id.uuidString.lowercased(),
+                userID: uid,
+                displayName: name,
+                lineupPlayerIDs: lineupIDs,
+                lineupTotalPoints: totalPoints,
+                accessToken: token
+            )
+            await loadPrivateContestEntries(contestID: contest.id)
+            await loadPrivateContestLeaderboard(contest)
+            return true
+        } catch {
+            privateContestError = "Failed to submit lineup: \(error.localizedDescription)"
+            print("[DFS-Private] Submit entry error: \(error)")
+            return false
+        }
+    }
+
+    /// Builds the private contest leaderboard from its own entries (not public
+    /// dfs_entries). Members appear with hasSubmitted=false until they enter
+    /// a lineup. Live scoring is applied when the parent slate is the currently
+    /// selected tournament; otherwise stored lineup_total_points is used.
+    func loadPrivateContestLeaderboard(_ contest: DFSPrivateContest) async {
+        if privateContestMembers[contest.id] == nil {
+            await loadPrivateContestMembers(contestID: contest.id)
+        }
+        if privateContestEntries[contest.id] == nil {
+            await loadPrivateContestEntries(contestID: contest.id)
+        }
+        guard let members = privateContestMembers[contest.id] else { return }
+        let entries = privateContestEntries[contest.id] ?? []
+
+        let entryByUser: [UUID: DFSPrivateContestEntry] = Dictionary(uniqueKeysWithValues: entries.map { ($0.userID, $0) })
+        let parentTournament = tournaments.first(where: { $0.id == contest.parentTournamentID })
+        let isSG = parentTournament?.isSingleGame ?? contest.parentTournamentID.contains("-sg-")
+        let currentUID = userID?.lowercased() ?? ""
+        // Past contest = parent slate isn't today's. For these we score using
+        // the loaded box scores (`pastTournamentPlayerStats`) — `livePlayerPoints`
+        // only covers today's slate, so without this past contest standings
+        // show 0.0 FPTS forever.
+        let isPastContest = !privateContestBelongsToCurrentSlate(contest)
+        let useLive = !isPastContest && !livePlayerPoints.isEmpty
+        let usePastStats = isPastContest && !pastTournamentPlayerStats.isEmpty
+
+        var rows: [DFSPrivateContestLeaderboardRow] = members.map { member in
+            let isMe = member.userID.uuidString.lowercased() == currentUID
+            guard let entry = entryByUser[member.userID] else {
+                return DFSPrivateContestLeaderboardRow(
+                    id: member.userID,
+                    displayName: member.displayName,
+                    lineupPlayerIDs: [],
+                    points: 0, rank: 0,
+                    isCurrentUser: isMe, hasSubmitted: false
+                )
+            }
+            let pts: Double = {
+                if useLive {
+                    var total = 0.0
+                    for (i, pid) in entry.lineupPlayerIDs.enumerated() {
+                        let p = livePlayerPoints[pid] ?? 0
+                        total += (isSG && i == 0) ? p * 1.5 : p
+                    }
+                    return total
+                }
+                if usePastStats {
+                    var total = 0.0
+                    for (i, pid) in entry.lineupPlayerIDs.enumerated() {
+                        let p = pastTournamentPlayerStats[pid]?.fantasyPoints ?? 0
+                        total += (isSG && i == 0) ? p * 1.5 : p
+                    }
+                    return total
+                }
+                return entry.lineupTotalPoints
+            }()
+            return DFSPrivateContestLeaderboardRow(
+                id: member.userID,
+                displayName: entry.displayName,
+                lineupPlayerIDs: entry.lineupPlayerIDs,
+                points: pts, rank: 0,
+                isCurrentUser: isMe, hasSubmitted: true
+            )
+        }
+
+        // Sort: submitted by points desc, unsubmitted at bottom
+        rows.sort { lhs, rhs in
+            if lhs.hasSubmitted != rhs.hasSubmitted { return lhs.hasSubmitted }
+            return lhs.points > rhs.points
+        }
+
+        // Standard competition ranking on submitted entries
+        var ranked: [DFSPrivateContestLeaderboardRow] = []
+        var currentRank = 0
+        var prevPoints: Double? = nil
+        for (idx, row) in rows.enumerated() {
+            guard row.hasSubmitted else { ranked.append(row); continue }
+            let rank: Int
+            if let p = prevPoints, abs(p - row.points) < 0.001 {
+                rank = currentRank
+            } else {
+                rank = idx + 1
+                currentRank = rank
+                prevPoints = row.points
+            }
+            ranked.append(DFSPrivateContestLeaderboardRow(
+                id: row.id, displayName: row.displayName,
+                lineupPlayerIDs: row.lineupPlayerIDs,
+                points: row.points, rank: rank,
+                isCurrentUser: row.isCurrentUser, hasSubmitted: row.hasSubmitted
+            ))
+        }
+
+        privateContestLeaderboards[contest.id] = ranked
+    }
+
+    func leavePrivateContest(_ contest: DFSPrivateContest) async {
+        guard let token = accessToken, let uid = userID else { return }
+        do {
+            try await SupabaseService.shared.leaveDFSPrivateContest(
+                contestID: contest.id.uuidString.lowercased(), userID: uid, accessToken: token
+            )
+            myPrivateContests.removeAll { $0.id == contest.id }
+            privateContestMembers.removeValue(forKey: contest.id)
+            privateContestEntries.removeValue(forKey: contest.id)
+            privateContestLeaderboards.removeValue(forKey: contest.id)
+        } catch {
+            print("[DFS-Private] Leave error: \(error)")
+        }
+    }
+
+    func deletePrivateContest(_ contest: DFSPrivateContest) async {
+        guard let token = accessToken else { return }
+        do {
+            try await SupabaseService.shared.deleteDFSPrivateContest(
+                contestID: contest.id.uuidString.lowercased(), accessToken: token
+            )
+            myPrivateContests.removeAll { $0.id == contest.id }
+            privateContestMembers.removeValue(forKey: contest.id)
+            privateContestEntries.removeValue(forKey: contest.id)
+            privateContestLeaderboards.removeValue(forKey: contest.id)
+        } catch {
+            print("[DFS-Private] Delete error: \(error)")
+        }
     }
 }

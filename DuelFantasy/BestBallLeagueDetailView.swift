@@ -4,6 +4,7 @@ struct BestBallLeagueDetailView: View {
     @Bindable var viewModel: BestBallViewModel
     let leagueID: String
     @EnvironmentObject private var auth: AuthViewModel
+    @Environment(\.dismiss) private var dismiss
     @State private var selectedTab: LeagueTab = .standings
     @State private var selectedMatchup: BestBallMatchup? = nil
     @State private var settingsLeague: BestBallLeague? = nil  // non-nil triggers sheet
@@ -392,6 +393,26 @@ struct BestBallLeagueDetailView: View {
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 14)
+
+                    // Allow leaving the league before the draft starts.
+                    if league.status == "open" {
+                        Button {
+                            Haptics.medium()
+                            Task {
+                                if await viewModel.leaveLeague(league) {
+                                    dismiss()
+                                }
+                            }
+                        } label: {
+                            Text("Leave League")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                                .foregroundStyle(.red)
+                                .background(Color.red.opacity(0.08))
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+                    }
                 }
 
                 if let error = viewModel.error {

@@ -86,7 +86,18 @@ struct ConfiguredMatchProvider: MatchProvider {
         let gameProvider = ESPNTodayGameProvider()
         // Always use the default key — @AppStorage may hold a stale/invalid value
         let effectiveKey = AppSecrets.defaultOddsAPIKey
-        let oddsProvider: OddsProvider = effectiveKey.isEmpty ? NoOddsProvider() : TheOddsAPIProvider(apiKey: effectiveKey)
+        // Primary: Supabase-backed tennis odds cache (populated by the
+        // refresh-tennis-odds edge function). Fallback: The Odds API for
+        // anything Supabase didn't cover. Once the edge-function cron has
+        // been running reliably you can drop the Odds API subscription and
+        // pass NoOddsProvider() as the fallback.
+        let fallback: OddsProvider = effectiveKey.isEmpty
+            ? NoOddsProvider()
+            : TheOddsAPIProvider(apiKey: effectiveKey)
+        let oddsProvider: OddsProvider = CompositeOddsProvider(
+            primary: SupabaseTennisOddsProvider(),
+            fallback: fallback
+        )
 
         return try await CompositeMatchProvider(gameProvider: gameProvider, oddsProvider: oddsProvider).fetchMatches()
     }
@@ -695,6 +706,7 @@ private struct ESPSportDefinition {
         ESPSportDefinition(sportPath: "basketball", leaguePath: "mens-college-basketball", displayName: "NCAAB", oddsSportKey: "basketball_ncaab"),
         ESPSportDefinition(sportPath: "soccer", leaguePath: "eng.1", displayName: "EPL", oddsSportKey: "soccer_epl"),
         ESPSportDefinition(sportPath: "soccer", leaguePath: "uefa.champions", displayName: "UCL", oddsSportKey: "soccer_uefa_champs_league"),
+        ESPSportDefinition(sportPath: "soccer", leaguePath: "fifa.world", displayName: "World Cup", oddsSportKey: "soccer_fifa_world_cup"),
     ]
 }
 
@@ -736,6 +748,185 @@ private enum ESPNDateKeys {
 struct NoOddsProvider: OddsProvider {
     func fetchOdds(for fixtures: [GameFixture]) async throws -> OddsResult {
         OddsResult(quotesByFixture: [:], extraMatches: [])
+    }
+}
+
+// MARK: - Supabase Tennis Odds Provider
+//
+// Reads pre-cached tennis moneylines from the public.tennis_odds table.
+// A Supabase Edge Function (refresh-tennis-odds) refreshes the table every
+// few minutes from Pinnacle, so the app fetches odds for ALL users with
+// exactly one Supabase request — no upstream API quota burn per user.
+//
+// Falls back gracefully when the table is empty: this provider returns no
+// quotes, and `CompositeMatchProvider` already handles "no odds for tennis"
+// by skipping the fixture (per the SportsData tennis guard).
+
+private struct SupabaseTennisOddsRow: Codable {
+    let id: String
+    let league: String
+    let home_team: String
+    let away_team: String
+    let home_moneyline: Int?
+    let away_moneyline: Int?
+    let starts_at: Date
+}
+
+struct SupabaseTennisOddsProvider: OddsProvider {
+    private let session: URLSession
+    init(session: URLSession = .shared) { self.session = session }
+
+    func fetchOdds(for fixtures: [GameFixture]) async throws -> OddsResult {
+        // Only intervene for tennis fixtures — other sports handled elsewhere.
+        let tennisFixtures = fixtures.filter { $0.sportKey.hasPrefix("tennis_") }
+        guard !tennisFixtures.isEmpty else {
+            return OddsResult(quotesByFixture: [:], extraMatches: [])
+        }
+
+        // Fetch upcoming tennis odds (starts_at >= now()) from Supabase.
+        var components = URLComponents(
+            url: SupabaseConfig.url.appending(path: "/rest/v1/tennis_odds"),
+            resolvingAgainstBaseURL: false
+        )
+        let nowISO = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-2 * 3600))
+        components?.queryItems = [
+            URLQueryItem(name: "select", value: "*"),
+            URLQueryItem(name: "starts_at", value: "gte.\(nowISO)"),
+            URLQueryItem(name: "order", value: "starts_at.asc"),
+        ]
+        guard let url = components?.url else {
+            return OddsResult(quotesByFixture: [:], extraMatches: [])
+        }
+        var request = URLRequest(url: url)
+        request.setValue(SupabaseConfig.publishableKey, forHTTPHeaderField: "apikey")
+        request.setValue("Bearer \(SupabaseConfig.publishableKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let rows: [SupabaseTennisOddsRow]
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                return OddsResult(quotesByFixture: [:], extraMatches: [])
+            }
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            rows = try decoder.decode([SupabaseTennisOddsRow].self, from: data)
+        } catch {
+            return OddsResult(quotesByFixture: [:], extraMatches: [])
+        }
+
+        // Match each fixture to an odds row by fuzzy team-name match.
+        var quotesByFixture: [String: [OddsQuote]] = [:]
+        for fixture in tennisFixtures {
+            guard let row = rows.first(where: { row in
+                Self.namesMatch(row.home_team, fixture.homeTeam)
+                    && Self.namesMatch(row.away_team, fixture.awayTeam)
+            }) ?? rows.first(where: { row in
+                // Also try swapped home/away — Pinnacle and ESPN sometimes
+                // disagree on which player is "home" vs "away" in tennis.
+                Self.namesMatch(row.home_team, fixture.awayTeam)
+                    && Self.namesMatch(row.away_team, fixture.homeTeam)
+            }) else { continue }
+            guard let homeML = row.home_moneyline, let awayML = row.away_moneyline else { continue }
+            // Map odds back to the ESPN-fixture's home/away convention.
+            let homeMatchesRowHome = Self.namesMatch(row.home_team, fixture.homeTeam)
+            let oddsForFixtureHome = Double(homeMatchesRowHome ? homeML : awayML)
+            let oddsForFixtureAway = Double(homeMatchesRowHome ? awayML : homeML)
+            let quotes = Self.rrQuotesFromTwoWay(
+                teamA: fixture.awayTeam, oddsA: oddsForFixtureAway,
+                teamB: fixture.homeTeam, oddsB: oddsForFixtureHome
+            )
+            if !quotes.isEmpty {
+                quotesByFixture[fixture.id] = quotes
+            }
+        }
+
+        return OddsResult(quotesByFixture: quotesByFixture, extraMatches: [])
+    }
+
+    // MARK: - Helpers (duplicated from CompositeMatchProvider — kept private
+    // so this provider is self-contained.)
+
+    private static func namesMatch(_ a: String, _ b: String) -> Bool {
+        let na = normalize(a)
+        let nb = normalize(b)
+        if na == nb { return true }
+        // Last-name fallback for "Carlos Alcaraz" vs "Alcaraz"
+        if let la = na.split(separator: " ").last,
+           let lb = nb.split(separator: " ").last,
+           la == lb, la.count >= 4 {
+            return true
+        }
+        return false
+    }
+
+    private static func normalize(_ s: String) -> String {
+        s.lowercased()
+            .folding(options: .diacriticInsensitive, locale: .current)
+            .replacingOccurrences(of: ".", with: "")
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "  ", with: " ")
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func rrQuotesFromTwoWay(
+        teamA: String, oddsA: Double,
+        teamB: String, oddsB: Double
+    ) -> [OddsQuote] {
+        let pA = impliedProb(oddsA)
+        let pB = impliedProb(oddsB)
+        guard pA > 0, pB > 0 else { return [] }
+        let swing = max(12, min(240, Int(((abs(oddsA) + abs(oddsB)) / 20.0).rounded())))
+        let fixed = 10
+        let aIsFavorite = pA >= pB
+        let quoteA = aIsFavorite
+            ? OddsQuote(team: teamA, gainRR: fixed, lossRR: swing)
+            : OddsQuote(team: teamA, gainRR: swing, lossRR: fixed)
+        let quoteB = aIsFavorite
+            ? OddsQuote(team: teamB, gainRR: swing, lossRR: fixed)
+            : OddsQuote(team: teamB, gainRR: fixed, lossRR: swing)
+        return [quoteA, quoteB]
+    }
+
+    private static func impliedProb(_ americanOdds: Double) -> Double {
+        if americanOdds > 0 { return 100.0 / (americanOdds + 100.0) }
+        return abs(americanOdds) / (abs(americanOdds) + 100.0)
+    }
+}
+
+// MARK: - Composite tennis-first odds provider
+//
+// Tries the Supabase-backed tennis cache first; for any tennis fixtures it
+// didn't cover (and for non-tennis fixtures), falls back to the wrapped
+// provider (Odds API). Once Supabase cron has been running for a tournament
+// cycle, the fallback rarely fires and you can drop the Odds API subscription.
+
+struct CompositeOddsProvider: OddsProvider {
+    let primary: OddsProvider
+    let fallback: OddsProvider
+
+    func fetchOdds(for fixtures: [GameFixture]) async throws -> OddsResult {
+        let primaryResult = (try? await primary.fetchOdds(for: fixtures))
+            ?? OddsResult(quotesByFixture: [:], extraMatches: [])
+
+        // Which fixtures still need odds after the primary pass?
+        let coveredIDs = Set(primaryResult.quotesByFixture.keys)
+        let uncoveredFixtures = fixtures.filter { !coveredIDs.contains($0.id) }
+        if uncoveredFixtures.isEmpty {
+            return primaryResult
+        }
+
+        let fallbackResult = (try? await fallback.fetchOdds(for: uncoveredFixtures))
+            ?? OddsResult(quotesByFixture: [:], extraMatches: [])
+
+        // Merge: primary wins on conflict (it shouldn't be any conflicts since
+        // we only asked the fallback about uncovered fixtures, but just in case).
+        var merged = primaryResult.quotesByFixture
+        for (k, v) in fallbackResult.quotesByFixture where merged[k] == nil {
+            merged[k] = v
+        }
+        let mergedExtra = primaryResult.extraMatches + fallbackResult.extraMatches
+        return OddsResult(quotesByFixture: merged, extraMatches: mergedExtra)
     }
 }
 

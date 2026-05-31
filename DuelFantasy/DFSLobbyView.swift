@@ -35,6 +35,10 @@ struct DFSLobbyView: View {
                 if !viewModel.enteredTournamentIDs.isEmpty {
                     enteredLineupsSection
                 }
+
+                // Private contests (invite-code only, no bots)
+                DFSPrivateContestsSection(viewModel: viewModel)
+
                 slateGamesSection
                 scoringSection
                 payoutTiersSection
@@ -69,6 +73,12 @@ struct DFSLobbyView: View {
             if let tournamentID = viewModel.inviteTournamentID {
                 InviteFriendsSheet(viewModel: viewModel, tournamentID: tournamentID)
             }
+        }
+        .task {
+            // Compute final scores for past private contests so Recent Results
+            // shows the user's actual FPTS instead of the 0 that was stored
+            // at submission time.
+            await viewModel.loadAllPrivateContestFinalScores()
         }
     }
 
@@ -1003,11 +1013,24 @@ struct DFSLobbyView: View {
 
     // MARK: - Recent Results
 
+    /// Private contests whose parent slate's date has passed (i.e. not the
+    /// currently-displayed slate). These get folded into Recent Results so
+    /// they don't disappear from the lobby once their game day rolls over.
+    private var pastPrivateContests: [DFSPrivateContest] {
+        let sportPrefix = viewModel.sport.lowercased() + "-"
+        return viewModel.myPrivateContests.filter { contest in
+            guard contest.parentTournamentID.hasPrefix(sportPrefix) else { return false }
+            return !viewModel.privateContestBelongsToCurrentSlate(contest)
+        }
+    }
+
     private var recentResultsSection: some View {
         let sportPrefix = viewModel.sport.lowercased() + "-"
         let sportHistory = viewModel.dfsHistory.filter { $0.tournamentId?.hasPrefix(sportPrefix) == true }
+        let pastPrivates = pastPrivateContests
+        let totalCount = sportHistory.count + pastPrivates.count
         return DisclosureGroup {
-            if sportHistory.isEmpty {
+            if totalCount == 0 {
                 Text("No results yet. Enter a tournament to get started!")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -1042,6 +1065,14 @@ struct DFSLobbyView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                     .shadow(color: .black.opacity(0.04), radius: 4, y: 2)
                 }
+                ForEach(pastPrivates) { contest in
+                    NavigationLink {
+                        DFSPrivateContestDetailView(viewModel: viewModel, contest: contest)
+                    } label: {
+                        pastPrivateContestRow(contest: contest)
+                    }
+                    .buttonStyle(.plain)
+                }
                 if sportHistory.count > 3 {
                     Button("See All") {
                         viewModel.showAllResults = true
@@ -1052,7 +1083,7 @@ struct DFSLobbyView: View {
                 }
             }
         } label: {
-            Text("Recent Results (\(sportHistory.count))")
+            Text("Recent Results (\(totalCount))")
                 .font(.headline)
                 .foregroundStyle(.primary)
         }
@@ -1060,6 +1091,79 @@ struct DFSLobbyView: View {
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .tint(.primary)
+    }
+
+    /// Row used to render a past private contest inside Recent Results.
+    /// Mirrors the public result row's layout: title + rank/pts + date.
+    private func pastPrivateContestRow(contest: DFSPrivateContest) -> some View {
+        let myUUID: UUID? = viewModel.userID.flatMap(UUID.init(uuidString:))
+        let myEntry: DFSPrivateContestEntry? = {
+            guard let me = myUUID else { return nil }
+            return (viewModel.privateContestEntries[contest.id] ?? []).first(where: { $0.userID == me })
+        }()
+        let entries = viewModel.privateContestEntries[contest.id] ?? []
+        let myRank: Int? = {
+            guard let me = myUUID,
+                  let myPoints = entries.first(where: { $0.userID == me })?.lineupTotalPoints else { return nil }
+            let higher = entries.filter { $0.lineupTotalPoints > myPoints }.count
+            return higher + 1
+        }()
+        let totalMembers = viewModel.privateContestMembers[contest.id]?.count ?? entries.count
+        let dateString: String? = {
+            let parts = contest.parentTournamentID.split(separator: "-")
+            guard let dateStr = parts.first(where: { $0.count == 8 && Int($0) != nil }) else { return nil }
+            let fmt = DateFormatter()
+            fmt.dateFormat = "yyyyMMdd"
+            guard let date = fmt.date(from: String(dateStr)) else { return nil }
+            return date.formatted(date: .abbreviated, time: .omitted)
+        }()
+        return HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text("PRIVATE")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(brandPurple)
+                        .clipShape(Capsule())
+                    Text(contest.name)
+                        .font(.subheadline.weight(.medium))
+                        .lineLimit(1)
+                }
+                HStack(spacing: 4) {
+                    if let rank = myRank, myEntry != nil {
+                        // Prefer the box-score-derived final FPTS over the
+                        // stored 0 that was set when the lineup was submitted.
+                        let score = viewModel.privateContestFinalScores[contest.id]
+                            ?? myEntry?.lineupTotalPoints ?? 0
+                        Text("#\(rank)/\(totalMembers) • \(String(format: "%.1f", score)) pts")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Tap to view")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let dateString {
+                        Text("•")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                        Text(dateString)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            }
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(12)
+        .background(Color(.systemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .shadow(color: .black.opacity(0.04), radius: 4, y: 2)
     }
 }
 

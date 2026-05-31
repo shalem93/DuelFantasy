@@ -153,6 +153,11 @@ struct ContentView: View {
         slateProvider: ESPNSoccerDFSSlateProvider(league: .ucl),
         scoringProvider: ESPNSoccerDFSLiveScoringProvider(league: .ucl)
     )
+    @State private var wcDFSViewModel = DFSViewModel(
+        sport: "WC",
+        slateProvider: ESPNSoccerDFSSlateProvider(league: .worldCup),
+        scoringProvider: ESPNSoccerDFSLiveScoringProvider(league: .worldCup)
+    )
     @State private var pgaDFSViewModel = DFSViewModel(
         sport: "PGA",
         slateProvider: ConfiguredGolfDFSSlateProvider(),
@@ -295,7 +300,7 @@ struct ContentView: View {
                 }
                 .tag(0)
 
-            DFSContestView(viewModel: dfsViewModel, nhlViewModel: nhlDFSViewModel, mlbViewModel: mlbDFSViewModel, pgaViewModel: pgaDFSViewModel, eplViewModel: eplDFSViewModel, uclViewModel: uclDFSViewModel, ufcViewModel: ufcDFSViewModel, nflViewModel: nflDFSViewModel, cfbViewModel: cfbDFSViewModel)
+            DFSContestView(viewModel: dfsViewModel, nhlViewModel: nhlDFSViewModel, mlbViewModel: mlbDFSViewModel, pgaViewModel: pgaDFSViewModel, eplViewModel: eplDFSViewModel, uclViewModel: uclDFSViewModel, wcViewModel: wcDFSViewModel, ufcViewModel: ufcDFSViewModel, nflViewModel: nflDFSViewModel, cfbViewModel: cfbDFSViewModel)
                 .tabItem {
                     Label("DFS", systemImage: "person.3")
                 }

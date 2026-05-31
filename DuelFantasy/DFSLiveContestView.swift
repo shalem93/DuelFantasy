@@ -2,6 +2,12 @@ import SwiftUI
 
 struct DFSLiveContestView: View {
     @Bindable var viewModel: DFSViewModel
+    /// Optional expected tournament ID. When provided, the view shows the
+    /// shimmer placeholder until `viewModel.activeTournamentID` matches it,
+    /// preventing the brief flash of the PREVIOUS tournament's data on
+    /// navigation. Callers that pass nil get the legacy behavior.
+    var expectedTournamentID: String? = nil
+    var expectedLineupNumber: Int? = nil
 
     private var brandPurple: Color {
         Color(red: 0.48, green: 0.23, blue: 0.93)
@@ -33,17 +39,34 @@ struct DFSLiveContestView: View {
         return false
     }
 
+    /// True iff the data backing this view is fully resolved. When false we
+    /// render a single clean shimmer placeholder instead of partial state
+    /// (raw IDs, "1 entries", "your lineup is locked in" pre-pitch, etc.).
+    /// If `expectedTournamentID` was provided at construction, the view also
+    /// requires the active tournament to match — otherwise we'd briefly show
+    /// the previous tournament's data on navigation between contests.
+    private var isReady: Bool {
+        guard let tid = viewModel.activeTournamentID else { return false }
+        if let expected = expectedTournamentID, expected != tid { return false }
+        if let expectedLN = expectedLineupNumber, expectedLN != viewModel.activeLineupNumber { return false }
+        return viewModel.isTournamentReady(tid)
+    }
+
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
-                liveStatusHeader
-                if let error = viewModel.error {
-                    errorBanner(error)
-                }
-                yourLineupCard
-                leaderboardSection
-                if !isPGA {
-                    gamesStatusSection
+                if isReady {
+                    liveStatusHeader
+                    if let error = viewModel.error {
+                        errorBanner(error)
+                    }
+                    yourLineupCard
+                    leaderboardSection
+                    if !isPGA {
+                        gamesStatusSection
+                    }
+                } else {
+                    shimmerPlaceholder
                 }
             }
             .padding(.horizontal, 16)
@@ -62,7 +85,11 @@ struct DFSLiveContestView: View {
             )
             .ignoresSafeArea()
         )
-        
+        // Trigger an immediate refresh on view appearance so the user doesn't
+        // have to wait up to 35s for the parent polling cycle to publish their rank.
+        .task {
+            await viewModel.refreshLive()
+        }
     }
 
     // MARK: - Live Status Header
@@ -302,8 +329,19 @@ struct DFSLiveContestView: View {
 
                         VStack(alignment: .leading, spacing: 1) {
                             HStack(spacing: 4) {
-                                Text(player.name)
+                                // If the slate hasn't fully loaded, `player.name` may be
+                                // the raw ID (e.g. "mlb-41169"). Substitute a friendlier
+                                // placeholder until activePlayers / entry names resolve.
+                                let resolvedName: String = {
+                                    let rawPrefixes = ["nba-", "pga-", "ncaam-", "mlb-", "nhl-", "epl-", "ucl-", "wc-", "ufc-", "cfb-", "nfl-"]
+                                    if rawPrefixes.contains(where: { player.name.hasPrefix($0) }) {
+                                        return "Loading…"
+                                    }
+                                    return player.name
+                                }()
+                                Text(resolvedName)
                                     .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(resolvedName == "Loading…" ? .secondary : .primary)
                                     .lineLimit(1)
                                 if player.salary > 0 {
                                     let displaySalary = isMVP ? Int(Double(player.salary) * 1.5) : player.salary
@@ -448,12 +486,17 @@ struct DFSLiveContestView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(viewModel.selectedPlayers) { player in
-                            Text(lastName(player.name))
+                            // Substitute "…" for raw-ID names while the slate is still loading.
+                            let rawPrefixes = ["nba-", "pga-", "ncaam-", "mlb-", "nhl-", "epl-", "ucl-", "wc-", "ufc-", "cfb-", "nfl-"]
+                            let isRaw = rawPrefixes.contains(where: { player.name.hasPrefix($0) })
+                            Text(isRaw ? "…" : lastName(player.name))
                                 .font(.caption.weight(.medium))
+                                .foregroundStyle(isRaw ? .secondary : .primary)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 6)
                                 .background(brandPurple.opacity(0.12))
                                 .clipShape(Capsule())
+                                .redacted(reason: isRaw ? .placeholder : [])
                         }
                     }
                 }
@@ -486,8 +529,41 @@ struct DFSLiveContestView: View {
     }
 
     private var playersByID: [String: DFSPlayer] {
-        // Use activePlayers so single-game tournaments get their adjusted salaries
-        Dictionary(uniqueKeysWithValues: viewModel.activePlayers.map { ($0.id, $0) })
+        // Use the slate-wide salary snapshot saved at contest creation time as the source
+        // of truth. This covers every player on the slate (not just the user's 6 picks),
+        // so bot lineups display the exact same prices that were offered during lineup
+        // building — even for players the user didn't draft. Falls back to the user's
+        // entry-record salaries (if the slate snapshot wasn't saved), then activePlayers.
+        let canonicalSalaries: [String: Int] = {
+            guard let tid = viewModel.activeTournamentID else { return [:] }
+            if let slate = viewModel.tournamentPlayerSalaries[tid], !slate.isEmpty {
+                return slate
+            }
+            if let entry = viewModel.entryRecord(for: tid, lineupNumber: viewModel.activeLineupNumber),
+               let saved = entry.lineupPlayerSalaries {
+                return saved
+            }
+            return [:]
+        }()
+        var dict: [String: DFSPlayer] = [:]
+        for p in viewModel.activePlayers {
+            if let canonical = canonicalSalaries[p.id], canonical > 0, canonical != p.salary {
+                var fixed = DFSPlayer(
+                    id: p.id, name: p.name, team: p.team, position: p.position,
+                    salary: canonical, projectedPoints: p.projectedPoints,
+                    gameID: p.gameID, injuryStatus: p.injuryStatus,
+                    battingOrder: p.battingOrder
+                )
+                fixed.gamesPlayed = p.gamesPlayed
+                fixed.playedRecently = p.playedRecently
+                fixed.isConfirmedActive = p.isConfirmedActive
+                fixed.isStartingGoalie = p.isStartingGoalie
+                dict[p.id] = fixed
+            } else {
+                dict[p.id] = p
+            }
+        }
+        return dict
     }
 
     /// Ownership percentage for each player across all field entries.
@@ -696,6 +772,11 @@ struct DFSLiveContestView: View {
                     Text(player.name)
                         .font(.caption.weight(.semibold))
                         .lineLimit(1)
+                    if isSoccer && player.isConfirmedActive {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.green)
+                    }
                     if let own {
                         Text("\(Int(own.rounded()))%")
                             .font(.system(size: 8, weight: .medium))
@@ -911,6 +992,15 @@ struct DFSLiveContestView: View {
                             Text(lastName(resolvePlayerName(playerID)))
                                 .font(.caption.weight(.medium))
                                 .lineLimit(1)
+
+                            // Confirmed starting XI icon — only meaningful for
+                            // soccer where `isConfirmedActive` is set from
+                            // ESPN's published lineup ~1h before kickoff.
+                            if isSoccer, let p = player, p.isConfirmedActive {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.green)
+                            }
 
                             if isPGA, let stats = liveStats, !stats.minutes.isEmpty, stats.minutes != "999" {
                                 Text(stats.minutes)
@@ -1171,6 +1261,7 @@ struct DFSLiveContestView: View {
 
             ForEach(viewModel.slateGames) { game in
                 let info = liveInfo[game.id]
+                let isUFCGame = info?.sportType == "ufc"
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
@@ -1180,8 +1271,16 @@ struct DFSLiveContestView: View {
                                 .fixedSize()
                                 .frame(minWidth: 36, alignment: .leading)
                             if let info {
-                                Text("\(info.awayScore)")
-                                    .font(.subheadline.weight(.bold).monospacedDigit())
+                                if isUFCGame {
+                                    if info.awayScore == 1 {
+                                        Image(systemName: "checkmark.seal.fill")
+                                            .font(.caption)
+                                            .foregroundStyle(.green)
+                                    }
+                                } else {
+                                    Text("\(info.awayScore)")
+                                        .font(.subheadline.weight(.bold).monospacedDigit())
+                                }
                             }
                         }
                         HStack(spacing: 6) {
@@ -1191,8 +1290,16 @@ struct DFSLiveContestView: View {
                                 .fixedSize()
                                 .frame(minWidth: 36, alignment: .leading)
                             if let info {
-                                Text("\(info.homeScore)")
-                                    .font(.subheadline.weight(.bold).monospacedDigit())
+                                if isUFCGame {
+                                    if info.homeScore == 1 {
+                                        Image(systemName: "checkmark.seal.fill")
+                                            .font(.caption)
+                                            .foregroundStyle(.green)
+                                    }
+                                } else {
+                                    Text("\(info.homeScore)")
+                                        .font(.subheadline.weight(.bold).monospacedDigit())
+                                }
                             }
                         }
                     }
@@ -1201,9 +1308,24 @@ struct DFSLiveContestView: View {
 
                     let state = info?.state ?? game.state
                     if state == "post" {
-                        Text("Final")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.green)
+                        // UFC: surface the finish method (e.g. "U Dec",
+                        // "Sub R3 2:32", "TKO R1 4:30") which we stash in
+                        // `info.clock`. Other sports keep the simple "Final".
+                        let ufcFinish: String? = {
+                            guard info?.sportType == "ufc",
+                                  let c = info?.clock, !c.isEmpty else { return nil }
+                            return c
+                        }()
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text("Final")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.green)
+                            if let ufcFinish {
+                                Text(ufcFinish)
+                                    .font(.caption2.weight(.semibold).monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                     } else if state == "in", let info {
                         VStack(spacing: 2) {
                             Text(info.displayStatus)
@@ -1452,5 +1574,80 @@ struct DFSLiveContestView: View {
                     .clipShape(Capsule())
             }
         }
+    }
+
+    // MARK: - Shimmer Placeholder
+
+    /// Skeleton layout shown while `isTournamentReady` is false. Mimics the
+    /// real card structure so the layout doesn't jump when data lands.
+    private var shimmerPlaceholder: some View {
+        VStack(spacing: 16) {
+            // Status header skeleton (dark card)
+            VStack(spacing: 16) {
+                HStack(spacing: 24) {
+                    shimmerBox(width: 60, height: 32)
+                    shimmerBox(width: 60, height: 32)
+                    shimmerBox(width: 60, height: 32)
+                }
+                .padding(.vertical, 8)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(20)
+            .background(Color(red: 0.10, green: 0.12, blue: 0.22))
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+
+            // Your Lineup skeleton
+            VStack(alignment: .leading, spacing: 10) {
+                shimmerBox(width: 100, height: 18)
+                HStack(spacing: 8) {
+                    ForEach(0..<5, id: \.self) { _ in
+                        shimmerBox(width: 60, height: 26)
+                    }
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.white)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .shadow(color: .black.opacity(0.05), radius: 4, y: 2)
+
+            // Leaderboard skeleton
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    shimmerBox(width: 100, height: 18)
+                    Spacer()
+                    shimmerBox(width: 60, height: 12)
+                }
+                ForEach(0..<6, id: \.self) { _ in
+                    HStack {
+                        shimmerBox(width: 20, height: 14)
+                        shimmerBox(width: 140, height: 16)
+                        Spacer()
+                        shimmerBox(width: 40, height: 14)
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            .padding(16)
+            .background(.white)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .shadow(color: .black.opacity(0.05), radius: 4, y: 2)
+
+            HStack(spacing: 6) {
+                ProgressView()
+                    .scaleEffect(0.75)
+                Text("Loading contest…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    private func shimmerBox(width: CGFloat, height: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 4)
+            .fill(Color(.systemGray5))
+            .frame(width: width, height: height)
+            .shimmering()
     }
 }

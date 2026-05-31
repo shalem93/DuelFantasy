@@ -57,16 +57,13 @@ struct AuthView: View {
 
                 // Logo / Title
                 VStack(spacing: 10) {
-                    // Purple rounded-rect badge with "DF" to match app icon
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 18)
-                            .fill(brandPurple)
-                            .frame(width: 78, height: 72)
-
-                        Text("DF")
-                            .font(.custom("Lobster-Regular", size: 30))
-                            .foregroundStyle(.white)
-                    }
+                    // Use the actual app icon asset so the logo on the auth screen always
+                    // matches the home-screen icon — no font/clipping issues to chase.
+                    Image("AppLogo")
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 78, height: 78)
+                        .clipShape(RoundedRectangle(cornerRadius: 18))
 
                     Text("DuelFantasy")
                         .font(.custom("Lobster-Regular", size: 34))

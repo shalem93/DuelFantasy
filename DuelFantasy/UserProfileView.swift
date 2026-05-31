@@ -340,7 +340,8 @@ struct UserProfileView: View {
         if tournamentID.contains("french-open") || tournamentID.contains("wimbledon")
             || tournamentID.contains("us-open-tennis") || tournamentID.contains("australian-open")
             || tournamentID.contains("tennis") { return "Tennis" }
-        if tournamentID.hasPrefix("epl-") || tournamentID.hasPrefix("soccer-") { return "Soccer" }
+        if tournamentID.hasPrefix("epl-") || tournamentID.hasPrefix("ucl-")
+            || tournamentID.hasPrefix("wc-") || tournamentID.hasPrefix("soccer-") { return "Soccer" }
         return "DFS"
     }
 

@@ -68,11 +68,20 @@ final class AuthViewModel: ObservableObject {
                 persistSession(refreshed)
                 return refreshed.accessToken
             } catch {
-                // Only sign out on definitive auth rejections, not transient errors
+                // Only sign out on definitive auth rejections, not transient
+                // errors. "Already used" responses are a race-condition
+                // artifact (another concurrent refresh already rotated the
+                // token) — keep the session so the next API call can retry
+                // with whatever access token the winning refresh produced.
                 let message = error.localizedDescription.lowercased()
-                let isAuthRejection = message.contains("invalid") || message.contains("revoked")
-                    || message.contains("expired") || message.contains("unauthorized")
-                    || message.contains("401") || message.contains("403")
+                let isRaceArtifact = message.contains("already used")
+                    || message.contains("already_used")
+                let isAuthRejection = !isRaceArtifact && (
+                    message.contains("not found") || message.contains("not_found")
+                    || message.contains("revoked")
+                    || message.contains("token expired") || message.contains("token_expired")
+                    || message.contains("unauthorized")
+                )
                 if isAuthRejection {
                     print("[Auth] Token refresh rejected — signing out: \(error.localizedDescription)")
                     session = nil
@@ -185,26 +194,14 @@ final class AuthViewModel: ObservableObject {
             return // Token is still valid for more than 5 minutes
         }
 
-        do {
-            let refreshed = try await SupabaseService.shared.refreshSession(refreshToken: refreshToken)
-            session = refreshed
-            persistSession(refreshed)
-        } catch {
-            // Only sign out if the error is an auth rejection (invalid/revoked token).
-            // Transient network errors should NOT clear the session — the user can
-            // retry on the next app foreground cycle.
-            let message = error.localizedDescription.lowercased()
-            let isAuthRejection = message.contains("invalid") || message.contains("revoked")
-                || message.contains("expired") || message.contains("unauthorized")
-                || message.contains("401") || message.contains("403")
-            if isAuthRejection {
-                print("[Auth] Refresh token rejected — signing out: \(error.localizedDescription)")
-                session = nil
-                UserDefaults.standard.removeObject(forKey: sessionKey)
-            } else {
-                print("[Auth] Refresh failed (transient) — keeping session: \(error.localizedDescription)")
-            }
-        }
+        // Route through performTokenRefresh so we share the activeRefreshTask
+        // serialization. Without this, multiple concurrent callers (init +
+        // scenePhase + .task on launch + 9 polling tasks) could each fire
+        // their own refreshSession with the same refresh token. Supabase
+        // rotates the refresh token on success, so the losers get back
+        // "Invalid Refresh Token: Already Used" which previously matched the
+        // "invalid" substring heuristic and signed the user out by mistake.
+        _ = await performTokenRefresh()
     }
 
     private func jwtExpiration(from token: String) -> Date? {

@@ -94,15 +94,19 @@ final class PlayoffTiersViewModel {
     var hasLiveData: Bool { lastRefreshDate != nil }
 
     var userRank: Int? {
-        guard hasLiveData else { return nil }
-        // Don't report a rank if the leaderboard is incomplete (e.g. bots haven't loaded yet).
-        // A real contest has hundreds of entries; a small count means only the user entry loaded.
-        guard leaderboardEntries.count >= 10 else { return nil }
-        return leaderboardEntries.first(where: { $0.isCurrentUser })?.rank
+        // Don't report a rank when every entry is tied at 0 points — otherwise the user
+        // sees a misleading "Rank #1" flash before live scoring populates.
+        guard hasLiveData, leaderboardEntries.count >= 10,
+              let entry = leaderboardEntries.first(where: { $0.isCurrentUser }),
+              entry.totalPoints > 0 || leaderboardEntries.contains(where: { $0.totalPoints > 0 })
+        else { return nil }
+        return entry.rank
     }
 
     var userTotalPoints: Double? {
-        guard hasLiveData else { return nil }
+        guard hasLiveData,
+              leaderboardEntries.contains(where: { $0.totalPoints > 0 })
+        else { return nil }
         return leaderboardEntries.first(where: { $0.isCurrentUser })?.totalPoints
     }
 

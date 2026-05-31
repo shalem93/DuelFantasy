@@ -5,11 +5,13 @@ import Foundation
 enum SoccerLeague: String, Sendable {
     case epl = "eng.1"
     case ucl = "uefa.champions"
+    case worldCup = "fifa.world"
 
     var displayName: String {
         switch self {
         case .epl: return "EPL"
         case .ucl: return "UCL"
+        case .worldCup: return "WC"
         }
     }
 
@@ -17,6 +19,7 @@ enum SoccerLeague: String, Sendable {
         switch self {
         case .epl: return "epl-"
         case .ucl: return "ucl-"
+        case .worldCup: return "wc-"
         }
     }
 
@@ -24,6 +27,7 @@ enum SoccerLeague: String, Sendable {
         switch self {
         case .epl: return "epl-"
         case .ucl: return "ucl-"
+        case .worldCup: return "wc-"
         }
     }
 }
@@ -328,9 +332,17 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
     // MARK: - Fetch Today's Fixtures
 
     private func fetchTodayFixtures() async throws -> [SoccerScoreboardEvent] {
-        let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date()
-        let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: Date()) ?? Date()
-        let dateKeys = [dateKey(for: yesterday), dateKey(for: Date()), dateKey(for: tomorrow)]
+        // Look back 1 day (catches just-finished games) and forward up to 10
+        // days. UCL knockout / final stages can be 3-6 days away with no
+        // intermediate fixtures, and World Cup rest days between knockout
+        // rounds can stretch to 5-7 days — a narrow window misses those.
+        let calendarBase = Calendar.current
+        var dateKeys: [String] = []
+        for offset in -1...10 {
+            if let date = calendarBase.date(byAdding: .day, value: offset, to: Date()) {
+                dateKeys.append(dateKey(for: date))
+            }
+        }
 
         let allScoreboards: [SoccerScoreboardResponse] = await withTaskGroup(of: SoccerScoreboardResponse?.self) { group in
             for dk in dateKeys {
@@ -765,8 +777,9 @@ struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
                         playerResults = []
                         teamRosters = [:]
                     } else {
-                        let (stats, rosters) = self.extractSoccerPlayerStats(
+                        let (stats, rosters) = await self.extractSoccerPlayerStats(
                             payload: payload,
+                            eventID: game.id,
                             gameStatus: gameInfo.displayStatus,
                             gameFinal: gameFinal,
                             homeTeam: game.homeTeam,
@@ -877,17 +890,55 @@ struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
 
     nonisolated private func extractSoccerPlayerStats(
         payload: [String: Any],
+        eventID: String,
         gameStatus: String,
         gameFinal: Bool,
         homeTeam: String,
         awayTeam: String,
         homeScore: Int,
         awayScore: Int
-    ) -> ([(String, Double, DFSPlayerLiveStats)], [String: Set<String>]) {
+    ) async -> ([(String, Double, DFSPlayerLiveStats)], [String: Set<String>]) {
         // ESPN soccer summary uses top-level "rosters" array (NOT boxscore.players)
         guard let rostersArr = payload["rosters"] as? [[String: Any]] else {
             print("[Soccer-Score] No 'rosters' key in payload")
             return ([], [:])
+        }
+
+        // Defensive stats (tackles/ints/blocks/clearances) aren't in the
+        // summary payload — fetch them per-player from ESPN's core-API stats
+        // endpoint. Collect (athleteID, teamID) pairs in the first pass, then
+        // fan out in parallel, then build the final result with merged stats.
+        var defensiveStatsByPlayerID: [String: (tackles: Int, interceptions: Int, blockedShots: Int, clearances: Int)] = [:]
+        var defensiveFetchInputs: [(playerID: String, athleteID: String, teamID: String)] = []
+        for rosterBlock in rostersArr {
+            let teamDict = rosterBlock["team"] as? [String: Any]
+            guard let teamID = teamDict?["id"] as? String else { continue }
+            guard let rosterEntries = rosterBlock["roster"] as? [[String: Any]] else { continue }
+            for entry in rosterEntries {
+                let isActive = entry["active"] as? Bool ?? false
+                let isStarter = entry["starter"] as? Bool ?? false
+                let subbedIn = entry["subbedIn"] as? Bool ?? false
+                guard isActive || isStarter || subbedIn else { continue }
+                guard let athleteDict = entry["athlete"] as? [String: Any],
+                      let athleteID = athleteDict["id"] as? String else { continue }
+                let playerID = "\(self.league.playerIDPrefix)\(athleteID)"
+                defensiveFetchInputs.append((playerID, athleteID, teamID))
+            }
+        }
+        await withTaskGroup(of: (String, (Int, Int, Int, Int))?.self) { group in
+            for input in defensiveFetchInputs {
+                group.addTask {
+                    let stats = await self.fetchSoccerDefensiveStatsLive(
+                        eventID: eventID, teamID: input.teamID, athleteID: input.athleteID
+                    )
+                    return (input.playerID, stats)
+                }
+            }
+            for await result in group {
+                if let (pid, s) = result {
+                    defensiveStatsByPlayerID[pid] = (s.0, s.1, s.2, s.3)
+                }
+            }
         }
 
         var results: [(String, Double, DFSPlayerLiveStats)] = []
@@ -956,6 +1007,12 @@ struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
                 let redCards = Int(statMap["redCards"] ?? 0)
                 let foulsDrawn = Int(statMap["foulsSuffered"] ?? 0)
                 let goalsAgainst = Int(statMap["goalsConceded"] ?? 0)
+                // Defensive stats come from the per-player core-API fetch we
+                // did above — the `/summary` payload doesn't expose them.
+                let defStats = defensiveStatsByPlayerID[playerID] ?? (tackles: 0, interceptions: 0, blockedShots: 0, clearances: 0)
+                let interceptions = defStats.interceptions
+                let blockedShots = defStats.blockedShots
+                let clearances = defStats.clearances
 
                 // Estimate minutes played from substitution events in "plays" array
                 var minutesPlayed = 0
@@ -990,8 +1047,9 @@ struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
                     }
                 }
 
-                // Tackles: ESPN soccer doesn't provide this stat; use 0
-                let tackles = 0
+                // Tackles also come from the core-API stats fetch (statMap
+                // doesn't include them — verified against PSG@MUN payload).
+                let tackles = defStats.tackles
 
                 // Compute fantasy points
                 let fantasy = computeSoccerFantasyPoints(
@@ -1001,6 +1059,9 @@ struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
                     shotsOnTarget: shotsOnTarget,
                     totalShots: totalShots,
                     tackles: tackles,
+                    interceptions: interceptions,
+                    blockedShots: blockedShots,
+                    clearances: clearances,
                     saves: saves,
                     yellowCards: yellowCards,
                     redCards: redCards,
@@ -1051,6 +1112,9 @@ struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
         shotsOnTarget: Int,
         totalShots: Int,
         tackles: Int,
+        interceptions: Int,
+        blockedShots: Int,
+        clearances: Int,
         saves: Int,
         yellowCards: Int,
         redCards: Int,
@@ -1089,6 +1153,13 @@ struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
         // Red Card: -3
         pts -= Double(redCards) * 3.0
 
+        // Defensive actions — applied to every position but disproportionately
+        // benefit DEF/CDM players who rack these up without scoring goals.
+        // Without these, centre-backs averaged ~1.7 FPTS and were unplayable.
+        pts += Double(interceptions) * 1.0
+        pts += Double(blockedShots) * 1.5
+        pts += Double(clearances) * 0.3
+
         // --- Defenders only ---
         if position == "DEF" {
             // Clean Sheet: +5 (only when match is final)
@@ -1119,6 +1190,49 @@ struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
         }
 
         return pts
+    }
+
+    // MARK: - Defensive Stats Fetch
+
+    /// Fetches a single player's defensive stats for one event from ESPN's
+    /// core-API. The `/summary?event=` endpoint we use for the main payload
+    /// omits these stats entirely, so we make a separate request per player.
+    /// Returns zeros on any failure so callers degrade gracefully.
+    nonisolated private func fetchSoccerDefensiveStatsLive(
+        eventID: String,
+        teamID: String,
+        athleteID: String
+    ) async -> (tackles: Int, interceptions: Int, blockedShots: Int, clearances: Int) {
+        let urlString = "https://sports.core.api.espn.com/v2/sports/soccer/leagues/\(self.league.rawValue)/events/\(eventID)/competitions/\(eventID)/competitors/\(teamID)/roster/\(athleteID)/statistics/0"
+        guard let url = URL(string: urlString) else { return (0, 0, 0, 0) }
+        var request = URLRequest(url: url)
+        request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+        guard let (data, response) = try? await self.session.data(for: request),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let splits = json["splits"] as? [String: Any],
+              let categories = splits["categories"] as? [[String: Any]] else {
+            return (0, 0, 0, 0)
+        }
+        var values: [String: Double] = [:]
+        for cat in categories {
+            guard let stats = cat["stats"] as? [[String: Any]] else { continue }
+            for s in stats {
+                guard let name = s["name"] as? String else { continue }
+                if let v = s["value"] as? Double {
+                    values[name] = v
+                } else if let v = s["value"] as? Int {
+                    values[name] = Double(v)
+                }
+            }
+        }
+        // Match the past-gamelog fetcher: prefer `total*` over `effective*`
+        // so attempted-but-failed actions still earn partial credit.
+        let tackles = Int(values["totalTackles"] ?? values["effectiveTackles"] ?? 0)
+        let interceptions = Int(values["interceptions"] ?? 0)
+        let blockedShots = Int(values["blockedShots"] ?? 0)
+        let clearances = Int(values["totalClearance"] ?? values["effectiveClearance"] ?? 0)
+        return (tackles, interceptions, blockedShots, clearances)
     }
 
     // MARK: - Position Helper

@@ -264,13 +264,25 @@ struct TennisBracketEngine {
 
         scored.sort { $0.total > $1.total }
 
+        // Standard competition ranking (1, 2, 2, 2, 2, 6, ...): everyone with the same
+        // score gets the same rank, and the next rank skips ahead by the size of the tie.
+        var ranks: [Int] = []
+        ranks.reserveCapacity(scored.count)
+        for index in scored.indices {
+            if index > 0, scored[index].total == scored[index - 1].total {
+                ranks.append(ranks[index - 1])
+            } else {
+                ranks.append(index + 1)
+            }
+        }
+
         return scored.enumerated().map { index, item in
             TennisBracketLeaderboardEntry(
                 id: item.entry.id,
                 entryName: item.entry.entryName,
                 picks: item.entry.picks,
                 totalPoints: item.total,
-                rank: index + 1,
+                rank: ranks[index],
                 isCurrentUser: item.entry.userID == currentUserID,
                 roundBreakdown: item.breakdown
             )
@@ -353,73 +365,535 @@ struct ESPNTennisResultsProvider: Sendable {
     /// Maps each completed match to a draw slot using player names.
     func fetchMatchResults(
         drawType: DrawType,
-        drawPlayers: [TennisBracketPlayer]
+        drawPlayers: [TennisBracketPlayer],
+        grandSlam: GrandSlam = .frenchOpen
     ) async -> [String: String] {
         var results: [String: String] = [:]
+        var totalCompleted = 0
+        var totalSingles = 0
+        var totalNameMissed = 0
 
+        // ESPN's tennis scoreboard returns one "event" per tournament — not per match.
+        // The competitions array inside a scoreboard event is the tournament-level
+        // summary, so all match-level data must come from the per-event summary endpoint.
         let league = drawType.espnLeague
-        // Fetch last 14 days of scoreboard data to cover the whole slam
+
+        // Collect tournament event IDs paired with their name so we can filter to the
+        // specific Grand Slam. The ATP/WTA scoreboard returns concurrent tour events
+        // (Geneva, Hamburg, etc.) alongside the slam — without this filter, results
+        // from those tournaments get mapped onto the slam's draw positions.
+        var eventIDToName: [String: String] = [:]
         let calendar = Calendar.current
         let today = Date()
-
         for dayOffset in 0..<16 {
             guard let date = calendar.date(byAdding: .day, value: -dayOffset, to: today) else { continue }
             let fmt = DateFormatter()
             fmt.dateFormat = "yyyyMMdd"
             let dateKey = fmt.string(from: date)
-
             guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/tennis/\(league)/scoreboard?dates=\(dateKey)") else { continue }
-
             do {
-                let (data, _) = try await session.data(from: url)
+                let (data, response) = try await session.data(from: url)
+                if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) { continue }
                 guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let events = json["events"] as? [[String: Any]] else { continue }
-
                 for event in events {
-                    guard let competitions = event["competitions"] as? [[String: Any]],
-                          let comp = competitions.first,
-                          let competitors = comp["competitors"] as? [[String: Any]],
-                          competitors.count == 2 else { continue }
-
-                    // Check state is post (completed)
-                    guard let status = comp["status"] as? [String: Any],
-                          let statusType = status["type"] as? [String: Any],
-                          let state = statusType["state"] as? String,
-                          state == "post" else { continue }
-
-                    // Skip doubles
-                    let names = competitors.compactMap { $0["athlete"] as? [String: Any] }.compactMap { $0["displayName"] as? String }
-                    guard names.count == 2, !names.contains(where: { $0.contains(" / ") }) else { continue }
-
-                    // Find winner
-                    guard let winner = competitors.first(where: { ($0["winner"] as? Bool) == true }),
-                          let winnerAthlete = winner["athlete"] as? [String: Any],
-                          let winnerName = winnerAthlete["displayName"] as? String else { continue }
-
-                    let loser = competitors.first(where: { ($0["winner"] as? Bool) != true })
-                    let loserAthlete = loser?["athlete"] as? [String: Any]
-                    let loserName = loserAthlete?["displayName"] as? String ?? ""
-
-                    // Match to draw positions
-                    let winnerPos = findDrawPosition(name: winnerName, in: drawPlayers)
-                    let loserPos = findDrawPosition(name: loserName, in: drawPlayers)
-
-                    guard let wPos = winnerPos, let lPos = loserPos else { continue }
-
-                    // Determine the slot
-                    if let slot = determineSlot(winnerPos: wPos, loserPos: lPos) {
-                        results[slot] = drawPlayers.first(where: { $0.drawPosition == wPos })?.name ?? winnerName
-                    }
+                    let id: String?
+                    if let idStr = event["id"] as? String { id = idStr }
+                    else if let idNum = event["id"] as? Int { id = String(idNum) }
+                    else { id = nil }
+                    guard let eventID = id else { continue }
+                    let name = (event["name"] as? String)
+                        ?? (event["shortName"] as? String)
+                        ?? ""
+                    eventIDToName[eventID] = name
                 }
-            } catch {
-                continue
-            }
+            } catch { continue }
         }
 
+        // Pick the slam-specific keywords to look for. Use the broadest unique tokens
+        // possible to defend against ESPN naming variations.
+        let slamKeywords: [String]
+        switch grandSlam {
+        case .australianOpen: slamKeywords = ["australian", "aus open"]
+        case .frenchOpen:     slamKeywords = ["roland", "garros", "french open"]
+        case .wimbledon:      slamKeywords = ["wimbledon"]
+        case .usOpen:         slamKeywords = ["us open", "u.s. open", "uso"]
+        }
+        print("[TennisESPN] \(league) all events found: \(eventIDToName)")
+        let slamEventIDs = eventIDToName.filter { (_, name) in
+            let lower = name.lowercased()
+            return slamKeywords.contains(where: { lower.contains($0) })
+        }.map(\.key)
+        // Hard requirement: if we can't identify the slam, return no results rather than
+        // mixing in matches from concurrent tour events (e.g., Geneva, Hamburg) which
+        // would otherwise be mapped onto Roland Garros slot positions by name collision.
+        guard !slamEventIDs.isEmpty else {
+            print("[TennisESPN] \(league) no slam-name match in any event; returning empty to avoid cross-tournament pollution")
+            return results
+        }
+        let tournamentEventIDs: [String] = slamEventIDs
+        print("[TennisESPN] \(league) filtered to slam-only events: \(slamEventIDs)")
+
+        // For each tournament event, try several known ESPN endpoint variants until one
+        // returns a JSON body we can parse. Tennis tournament event IDs are non-numeric
+        // (e.g. "942-2026"), which not every endpoint accepts.
+        for eventID in tournamentEventIDs {
+            // Strip the "-2026" suffix for endpoints that want just the event number.
+            let numericID = eventID.components(separatedBy: "-").first ?? eventID
+            let candidateURLs = [
+                "https://sports.core.api.espn.com/v2/sports/tennis/leagues/\(league)/events/\(eventID)/competitions?limit=200",
+                "https://sports.core.api.espn.com/v2/sports/tennis/leagues/\(league)/events/\(numericID)/competitions?limit=200",
+                "https://sports.core.api.espn.com/v2/sports/tennis/leagues/\(league)/events/\(eventID)",
+                "https://site.api.espn.com/apis/site/v2/sports/tennis/\(league)/summary?event=\(eventID)",
+                "https://site.api.espn.com/apis/site/v2/sports/tennis/\(league)/summary?event=\(numericID)"
+            ]
+
+            var json: [String: Any]? = nil
+            for candidateURL in candidateURLs {
+                guard let url = URL(string: candidateURL) else { continue }
+                do {
+                    let (data, response) = try await session.data(from: url)
+                    let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+                    if !(200..<300).contains(statusCode) {
+                        print("[TennisESPN] event=\(eventID) URL=\(candidateURL) status=\(statusCode)")
+                        continue
+                    }
+                    guard let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                        print("[TennisESPN] event=\(eventID) URL=\(candidateURL) status=\(statusCode) not-json")
+                        continue
+                    }
+                    print("[TennisESPN] event=\(eventID) URL=\(candidateURL) status=\(statusCode) topKeys=\(Array(parsed.keys).sorted())")
+                    json = parsed
+                    break
+                } catch {
+                    print("[TennisESPN] event=\(eventID) URL=\(candidateURL) error=\(error.localizedDescription)")
+                    continue
+                }
+            }
+
+            guard let json else { continue }
+
+                // Match-level competitions live under several possible keys depending on
+                // tour vs slam. Try them in order.
+                var matchCompetitions: [[String: Any]] = []
+                if let arr = json["competitions"] as? [[String: Any]] {
+                    matchCompetitions = arr
+                }
+                if matchCompetitions.isEmpty, let groupings = json["groupings"] as? [[String: Any]] {
+                    for group in groupings {
+                        if let comps = group["competitions"] as? [[String: Any]] {
+                            matchCompetitions.append(contentsOf: comps)
+                        }
+                    }
+                }
+                if matchCompetitions.isEmpty, let drawData = json["drawData"] as? [String: Any],
+                   let rounds = drawData["rounds"] as? [[String: Any]] {
+                    for round in rounds {
+                        if let comps = round["competitions"] as? [[String: Any]] {
+                            matchCompetitions.append(contentsOf: comps)
+                        }
+                    }
+                }
+                if matchCompetitions.isEmpty, let events = json["events"] as? [[String: Any]] {
+                    for evt in events {
+                        if let comps = evt["competitions"] as? [[String: Any]] {
+                            matchCompetitions.append(contentsOf: comps)
+                        }
+                    }
+                }
+                if matchCompetitions.isEmpty, let header = json["header"] as? [String: Any],
+                   let comps = header["competitions"] as? [[String: Any]] {
+                    matchCompetitions = comps
+                }
+
+                // Core API: `items[]` is a list of $ref URLs to per-competition (per-match) details.
+                if matchCompetitions.isEmpty, let items = json["items"] as? [[String: Any]] {
+                    var refURLs: [String] = []
+                    for item in items {
+                        if let ref = item["$ref"] as? String { refURLs.append(ref) }
+                    }
+
+                    // ESPN's core API caps each page at limit=200 and returns pageCount.
+                    // A Grand Slam (singles main draw 255 + doubles + qualifying) easily
+                    // spans 2-3 pages, so we MUST paginate or 4+ R1 matches stay invisible.
+                    if let pageCount = json["pageCount"] as? Int, pageCount > 1 {
+                        print("[TennisESPN] event=\(eventID) paginating: \(pageCount) pages")
+                        for page in 2...min(pageCount, 10) {
+                            let pageURL = "https://sports.core.api.espn.com/v2/sports/tennis/leagues/\(league)/events/\(eventID)/competitions?limit=200&page=\(page)"
+                            guard let url = URL(string: pageURL),
+                                  let (data, _) = try? await session.data(from: url),
+                                  let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                                  let pageItems = parsed["items"] as? [[String: Any]] else { continue }
+                            for item in pageItems {
+                                if let ref = item["$ref"] as? String { refURLs.append(ref) }
+                            }
+                        }
+                    }
+
+                    print("[TennisESPN] event=\(eventID) found \(refURLs.count) $ref item URLs (core API, paginated)")
+                    let drillLimit = 800
+                    if refURLs.count > drillLimit {
+                        print("[TennisESPN] WARNING event=\(eventID) truncating \(refURLs.count) → \(drillLimit) — some matches may be missed")
+                    }
+
+                    // Drill into each competition. Force HTTPS — ESPN's $ref URLs are http://
+                    // which is blocked by App Transport Security. A Grand Slam (singles main
+                    // draw 255 + doubles ~100 + qualifying ~64 + mixed/wheelchair) can exceed
+                    // 500 competitions, so the limit needs to be generous.
+                    let drilled: [[String: Any]] = await withTaskGroup(of: [String: Any]?.self) { group in
+                        for ref in refURLs.prefix(drillLimit) {
+                            let secured = ref.hasPrefix("http://") ? "https://" + ref.dropFirst("http://".count) : ref
+                            group.addTask {
+                                guard let url = URL(string: secured) else { return nil }
+                                guard let (data, _) = try? await self.session.data(from: url),
+                                      let comp = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+                                return comp
+                            }
+                        }
+                        var out: [[String: Any]] = []
+                        for await comp in group { if let comp { out.append(comp) } }
+                        return out
+                    }
+                    matchCompetitions = drilled
+                    if let first = drilled.first {
+                        print("[TennisESPN] event=\(eventID) first competition keys=\(Array(first.keys).sorted())")
+                    }
+                }
+
+                print("[TennisESPN] event=\(eventID) summary → \(matchCompetitions.count) match competitions")
+
+                // First pass: extract (slot, winnerName, winnerPos, loserPos) for every
+                // valid, completed singles match. We sort R1→F before applying validation
+                // so the R2+ "both players already in results.values" check fires AFTER
+                // R1 winners have been recorded — otherwise R2 matches that arrived first
+                // in the API stream were getting rejected.
+                struct ParsedMatch {
+                    let slot: String
+                    let winnerName: String
+                    let winnerPos: Int
+                    let loserPos: Int
+                    // True when this match's slot was inferred from a single mapped
+                    // position (the other side was a qualifier/LL not in our draw).
+                    // These are best-effort R1 assumptions and must NOT overwrite
+                    // a slot that's already been resolved by a "both names mapped"
+                    // match — otherwise a R2 with one unmapped name would clobber
+                    // the real R1 result for the same slot.
+                    let isInferred: Bool
+                }
+                let parsed: [ParsedMatch] = await withTaskGroup(of: ParsedMatch?.self) { group in
+                    var sampleLogged = false
+                    var doublesSkipped = 0
+                    for comp in matchCompetitions {
+                        guard let competitors = comp["competitors"] as? [[String: Any]],
+                              competitors.count == 2 else { continue }
+                        if !sampleLogged, let first = competitors.first {
+                            sampleLogged = true
+                            print("[TennisESPN] event=\(eventID) sample competitor keys=\(Array(first.keys).sorted()) name=\(first["name"] ?? "nil")")
+                        }
+
+                        // Aggressive doubles filtering — we don't care about doubles/mixed/wheelchair.
+                        // Check multiple potential indicators on the competition itself before we
+                        // even bother parsing names. ESPN exposes this via several different fields
+                        // depending on which endpoint surfaced the competition.
+                        if Self.looksLikeNonSinglesCompetition(comp) {
+                            doublesSkipped += 1
+                            continue
+                        }
+                        // Per-competitor: a singles match always has exactly one athlete per side.
+                        // Doubles competitors carry a `roster` array, `athletes` array, or no
+                        // singular `athlete` field — skip if any competitor looks multi-player.
+                        if competitors.contains(where: { Self.competitorIsMultiPlayer($0) }) {
+                            doublesSkipped += 1
+                            continue
+                        }
+
+                        let hasWinner = competitors.contains(where: { ($0["winner"] as? Bool) == true })
+                        guard hasWinner else { continue }
+                        group.addTask {
+                            let names: [String?] = await withTaskGroup(of: (Int, String?).self) { inner in
+                                for (i, c) in competitors.enumerated() {
+                                    inner.addTask {
+                                        if let n = c["name"] as? String, !n.isEmpty { return (i, n) }
+                                        if let athlete = c["athlete"] as? [String: Any] {
+                                            if let inline = athlete["displayName"] as? String, !inline.isEmpty { return (i, inline) }
+                                            if let inline = athlete["fullName"] as? String, !inline.isEmpty { return (i, inline) }
+                                            if let ref = athlete["$ref"] as? String {
+                                                let secured = ref.hasPrefix("http://") ? "https://" + ref.dropFirst("http://".count) : ref
+                                                if let url = URL(string: secured),
+                                                   let (data, _) = try? await self.session.data(from: url),
+                                                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                                                    return (i, json["displayName"] as? String ?? json["fullName"] as? String)
+                                                }
+                                            }
+                                        }
+                                        return (i, nil)
+                                    }
+                                }
+                                var out: [String?] = Array(repeating: nil, count: competitors.count)
+                                for await (i, name) in inner { if i < out.count { out[i] = name } }
+                                return out
+                            }
+                            guard let n0 = names[0], let n1 = names[1],
+                                  !n0.contains(" / "), !n1.contains(" / ") else { return nil }
+                            guard let wIdx = competitors.firstIndex(where: { ($0["winner"] as? Bool) == true }) else { return nil }
+                            let winnerName = wIdx == 0 ? n0 : n1
+                            let loserName = wIdx == 0 ? n1 : n0
+                            let wPosMaybe = self.findDrawPosition(name: winnerName, in: drawPlayers)
+                            let lPosMaybe = self.findDrawPosition(name: loserName, in: drawPlayers)
+
+                            // Happy path: both names map → existing slot derivation.
+                            if let wPos = wPosMaybe, let lPos = lPosMaybe,
+                               let slot = self.determineSlot(winnerPos: wPos, loserPos: lPos) {
+                                let resolvedName = drawPlayers.first(where: { $0.drawPosition == wPos })?.name ?? winnerName
+                                return ParsedMatch(slot: slot, winnerName: resolvedName, winnerPos: wPos, loserPos: lPos, isInferred: false)
+                            }
+
+                            // Qualifier / lucky-loser path: exactly ONE name maps to the draw
+                            // (the other is a qualifier or LL whose name wasn't filled in at
+                            // draw-scrape time, OR was a withdrawal replacement). We assume R1
+                            // because that's the only round where a single position uniquely
+                            // identifies the match. ESPN's round field is typically a $ref URL
+                            // we can't easily resolve inline, so the previous round-gating was
+                            // failing silently. R2+ matches with one missing name are rare
+                            // (winners are tracked) and would just be skipped here.
+                            let knownPos = wPosMaybe ?? lPosMaybe
+                            if let knownPos, (wPosMaybe == nil) != (lPosMaybe == nil) {
+                                let matchNum = (knownPos - 1) / 2 + 1
+                                let slot = TennisBracketEngine.matchSlot(round: "R1", matchNumber: matchNum)
+                                let resolvedName: String = {
+                                    if let wPos = wPosMaybe {
+                                        return drawPlayers.first(where: { $0.drawPosition == wPos })?.name ?? winnerName
+                                    }
+                                    return winnerName
+                                }()
+                                let partnerPos = knownPos % 2 == 1 ? knownPos + 1 : knownPos - 1
+                                let wPos = wPosMaybe ?? partnerPos
+                                let lPos = lPosMaybe ?? partnerPos
+                                return ParsedMatch(slot: slot, winnerName: resolvedName, winnerPos: wPos, loserPos: lPos, isInferred: true)
+                            }
+
+                            if wPosMaybe == nil {
+                                print("[TennisESPN] name-miss: winner '\(winnerName)' not in draw (vs '\(loserName)')")
+                            }
+                            if lPosMaybe == nil {
+                                print("[TennisESPN] name-miss: loser '\(loserName)' not in draw (vs '\(winnerName)')")
+                            }
+                            return nil
+                        }
+                    }
+                    var out: [ParsedMatch] = []
+                    for await m in group { if let m { out.append(m) } }
+                    if doublesSkipped > 0 {
+                        print("[TennisESPN] event=\(eventID) skipped \(doublesSkipped) non-singles competitions")
+                    }
+                    return out
+                }
+                totalCompleted += parsed.count
+                totalSingles += parsed.count
+
+                // Sort by round so R1 lands first, then R2, etc. — keeps the R2+ "both
+                // competitors already advanced" validation working correctly.
+                let roundOrder = ["R1", "R2", "R3", "R4", "QF", "SF", "F"]
+                let sortedMatches = parsed.sorted { a, b in
+                    let aIdx = roundOrder.firstIndex(of: a.slot.components(separatedBy: "-").first ?? "") ?? 99
+                    let bIdx = roundOrder.firstIndex(of: b.slot.components(separatedBy: "-").first ?? "") ?? 99
+                    return aIdx < bIdx
+                }
+                // Apply confirmed (both-names-mapped) matches FIRST so they own their
+                // slots. Inferred matches (qualifier/LL path, R1-assumed) only apply
+                // when the target slot is still empty — prevents a R2 match with one
+                // unmapped side from clobbering the legitimate R1 result.
+                let confirmedMatches = sortedMatches.filter { !$0.isInferred }
+                let inferredMatches = sortedMatches.filter { $0.isInferred }
+                for match in confirmedMatches {
+                    if !isPlausibleSlotAtCurrentTime(slot: match.slot, results: results, drawPlayers: drawPlayers,
+                                                     winnerPos: match.winnerPos, loserPos: match.loserPos) {
+                        continue
+                    }
+                    results[match.slot] = match.winnerName
+                }
+                for match in inferredMatches {
+                    guard results[match.slot] == nil else { continue }
+                    if !isPlausibleSlotAtCurrentTime(slot: match.slot, results: results, drawPlayers: drawPlayers,
+                                                     winnerPos: match.winnerPos, loserPos: match.loserPos) {
+                        continue
+                    }
+                    results[match.slot] = match.winnerName
+                }
+        }
+
+        print("[TennisESPN] Summary: \(totalCompleted) completed, \(totalSingles) singles, \(totalNameMissed) name-mismatches, \(results.count) slots resolved")
+
+        // Diagnostic: list unresolved R1 slots so we can tell when ESPN's data is
+        // genuinely missing a match vs when our parser dropped it.
+        let r1MatchCount = TennisBracketEngine.matchesPerRound.first ?? 64
+        var unresolvedR1: [String] = []
+        for matchNum in 1...r1MatchCount {
+            let slot = TennisBracketEngine.matchSlot(round: "R1", matchNumber: matchNum)
+            if results[slot] == nil {
+                let p1 = drawPlayers.first(where: { $0.drawPosition == 2 * matchNum - 1 })?.name ?? "?"
+                let p2 = drawPlayers.first(where: { $0.drawPosition == 2 * matchNum })?.name ?? "?"
+                unresolvedR1.append("\(slot) (\(p1) vs \(p2))")
+            }
+        }
+        if !unresolvedR1.isEmpty {
+            print("[TennisESPN] Unresolved R1 matches (\(unresolvedR1.count)): \(unresolvedR1.joined(separator: ", "))")
+        }
+
+        // Fallback: ESPN's JSON APIs don't expose Grand Slam matches, so scrape the
+        // public bracket HTML page (the same source the draw fetcher already uses).
+        if results.isEmpty {
+            print("[TennisESPN] JSON APIs returned no results, falling back to bracket HTML scrape")
+            let scraped = await scrapeResultsFromBracketHTML(drawType: drawType, drawPlayers: drawPlayers)
+            for (slot, winner) in scraped { results[slot] = winner }
+        }
         return results
     }
 
-    /// Find draw position by fuzzy name match.
+    /// Scrape match results from ESPN's public tennis bracket HTML page.
+    /// Counts how many times each draw player is flagged `"winner":true` in the embedded
+    /// JSON. A player's win count tells us how many rounds they've advanced.
+    private func scrapeResultsFromBracketHTML(
+        drawType: DrawType,
+        drawPlayers: [TennisBracketPlayer]
+    ) async -> [String: String] {
+        // ESPN bracket page URL — only French Open is in the live draw set today.
+        let candidatePages: [String] = [
+            "https://www.espn.com/tennis/french-open/bracket\(drawType == .wta ? "/_/type/wta" : "")",
+            "https://www.espn.com/tennis/bracket/_/eventId/172/year/2026\(drawType == .wta ? "/type/wta" : "")"
+        ]
+        var html: String?
+        for urlString in candidatePages {
+            guard let url = URL(string: urlString) else { continue }
+            var request = URLRequest(url: url)
+            request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+            request.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
+            guard let (data, response) = try? await session.data(for: request),
+                  let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                  let text = String(data: data, encoding: .utf8) else { continue }
+            print("[TennisESPN] bracket HTML \(urlString) → \(text.count) bytes, status=\(http.statusCode)")
+            html = text
+            break
+        }
+        guard let html else {
+            print("[TennisESPN] bracket HTML fetch failed for both candidate URLs")
+            return [:]
+        }
+
+        // Count how many times each player appears with winner:true.
+        // ESPN's bracket JSON encodes competitors with displayName + winner flags.
+        // Both orderings appear in different page builds, so check both.
+        var winCount: [String: Int] = [:]
+        let patterns = [
+            #""displayName":"([^"]{1,80})"[^{\}]{0,400}?"winner":true"#,
+            #""winner":true[^{\}]{0,400}?"displayName":"([^"]{1,80})""#,
+            #""athlete":\{[^\}]*"displayName":"([^"]{1,80})"[^\}]*\}[^{]{0,300}?"winner":true"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) else { continue }
+            let range = NSRange(html.startIndex..., in: html)
+            regex.enumerateMatches(in: html, options: [], range: range) { match, _, _ in
+                guard let match, let nameRange = Range(match.range(at: 1), in: html) else { return }
+                let raw = String(html[nameRange])
+                let normalized = TennisBracketEngine.normalizedName(raw)
+                winCount[normalized, default: 0] += 1
+            }
+        }
+        print("[TennisESPN] bracket HTML produced winCount for \(winCount.count) players (top: \(winCount.sorted(by: { $0.value > $1.value }).prefix(5).map { "\($0.key)=\($0.value)" }))")
+
+        // Resolve win counts to draw positions using normalized name lookup.
+        func winsFor(_ player: TennisBracketPlayer) -> Int {
+            let normalized = TennisBracketEngine.normalizedName(player.name)
+            if let direct = winCount[normalized] { return direct }
+            // Fallback: last-name match (handles diacritics drops, e.g. "Felix Auger-Aliassime" → "felix auger-aliassime")
+            let lastName = normalized.split(separator: " ").last.map(String.init) ?? normalized
+            let candidates = winCount.filter { entry in
+                let entryLast = entry.key.split(separator: " ").last.map(String.init) ?? ""
+                return entryLast == lastName
+            }
+            if candidates.count == 1 { return candidates.first!.value }
+            return 0
+        }
+
+        let drawSorted = drawPlayers.sorted { $0.drawPosition < $1.drawPosition }
+        guard drawSorted.count == 128 else { return [:] }
+        var results: [String: String] = [:]
+
+        // Walk the bracket round by round. winsFor(p) >= roundIndex+1 means p won at least that round.
+        var prevWinners: [Int: TennisBracketPlayer] = [:]
+        for matchNum in 1...64 {
+            let p1 = drawSorted[(matchNum - 1) * 2]
+            let p2 = drawSorted[(matchNum - 1) * 2 + 1]
+            let w1 = winsFor(p1)
+            let w2 = winsFor(p2)
+            // Winner must have >= 1 win and more than opponent
+            let winner: TennisBracketPlayer?
+            if w1 >= 1 && w1 > w2 { winner = p1 }
+            else if w2 >= 1 && w2 > w1 { winner = p2 }
+            else { winner = nil }
+            if let w = winner {
+                results[TennisBracketEngine.matchSlot(round: "R1", matchNumber: matchNum)] = w.name
+                prevWinners[matchNum] = w
+            }
+        }
+        for roundIndex in 1..<TennisBracketEngine.rounds.count {
+            let round = TennisBracketEngine.rounds[roundIndex]
+            let matchCount = TennisBracketEngine.matchesPerRound[roundIndex]
+            var current: [Int: TennisBracketPlayer] = [:]
+            for matchNum in 1...matchCount {
+                guard let p1 = prevWinners[matchNum * 2 - 1],
+                      let p2 = prevWinners[matchNum * 2] else { continue }
+                let needed = roundIndex + 1
+                let w1 = winsFor(p1)
+                let w2 = winsFor(p2)
+                let winner: TennisBracketPlayer?
+                if w1 >= needed && w1 > w2 { winner = p1 }
+                else if w2 >= needed && w2 > w1 { winner = p2 }
+                else { winner = nil }
+                if let w = winner {
+                    results[TennisBracketEngine.matchSlot(round: round, matchNumber: matchNum)] = w.name
+                    current[matchNum] = w
+                }
+            }
+            prevWinners = current
+        }
+
+        print("[TennisESPN] bracket HTML scraper resolved \(results.count) slots")
+        return results
+    }
+
+    /// Reject slot mappings that can't possibly correspond to a real match yet.
+    /// For round N (where R1=1, R2=2, ..., F=7), both competitors must already have
+    /// (N-1) prior wins recorded in `results`. Counting appearances in `results.values`
+    /// gives us that directly — a R1 winner shows up once, a R2 winner shows up twice,
+    /// etc. This stops a qualifying-round upset from getting walked into a deep-bracket
+    /// slot just because both names happen to match main-draw players.
+    private func isPlausibleSlotAtCurrentTime(
+        slot: String,
+        results: [String: String],
+        drawPlayers: [TennisBracketPlayer],
+        winnerPos: Int,
+        loserPos: Int
+    ) -> Bool {
+        let round = slot.components(separatedBy: "-").first ?? ""
+        if round == "R1" { return true }
+        let roundOrder: [String: Int] = ["R1": 1, "R2": 2, "R3": 3, "R4": 4, "QF": 5, "SF": 6, "F": 7]
+        guard let roundN = roundOrder[round] else { return false }
+        let requiredPriorWins = roundN - 1
+        let winnerName = drawPlayers.first(where: { $0.drawPosition == winnerPos })?.name ?? ""
+        let loserName = drawPlayers.first(where: { $0.drawPosition == loserPos })?.name ?? ""
+        var winsByPlayer: [String: Int] = [:]
+        for v in results.values { winsByPlayer[v, default: 0] += 1 }
+        return (winsByPlayer[winnerName] ?? 0) >= requiredPriorWins
+            && (winsByPlayer[loserName] ?? 0) >= requiredPriorWins
+    }
+
+    /// Find draw position by fuzzy name match. Handles compound surnames like
+    /// "Diaz Acosta", "Van Assche", "Auger Aliassime" by trying both single
+    /// last-name and two-word last-name. Also tries first-initial + last-name
+    /// matches so "S. Wawrinka" resolves to "Stan Wawrinka". And handles ESPN's
+    /// Asian name ordering (e.g. "Wu Yibing" → "Yibing Wu") via reversed-token
+    /// fallback.
     private func findDrawPosition(name: String, in draw: [TennisBracketPlayer]) -> Int? {
         let normalized = TennisBracketEngine.normalizedName(name)
 
@@ -428,17 +902,116 @@ struct ESPNTennisResultsProvider: Sendable {
             return player.drawPosition
         }
 
-        // Last name match
-        let lastName = normalized.split(separator: " ").last.map(String.init) ?? normalized
-        let matches = draw.filter { player in
-            let playerLastName = TennisBracketEngine.normalizedName(player.name).split(separator: " ").last.map(String.init) ?? ""
+        let parts = normalized.split(separator: " ").map(String.init)
+        guard !parts.isEmpty else { return nil }
+
+        // ESPN sometimes uses Asian name ordering (Surname Given) where the draw
+        // has Western order (Given Surname). Try the reversed token order as an
+        // exact match. Handles "Wu Yibing" ↔ "Yibing Wu", "Zhang Zhizhen" ↔ "Zhizhen Zhang".
+        if parts.count >= 2 {
+            let reversed = parts.reversed().joined(separator: " ")
+            if let player = draw.first(where: {
+                TennisBracketEngine.normalizedName($0.name) == reversed
+            }) {
+                return player.drawPosition
+            }
+        }
+
+        // Try LAST TWO words as a compound surname (Diaz Acosta, Van Assche, Auger Aliassime).
+        if parts.count >= 2 {
+            let twoWord = parts.suffix(2).joined(separator: " ")
+            let matches = draw.filter { player in
+                let pNorm = TennisBracketEngine.normalizedName(player.name)
+                let pParts = pNorm.split(separator: " ").map(String.init)
+                guard pParts.count >= 2 else { return false }
+                let pTwoWord = pParts.suffix(2).joined(separator: " ")
+                return pTwoWord == twoWord
+            }
+            if matches.count == 1 { return matches[0].drawPosition }
+        }
+
+        // Last word as surname (Wawrinka, Wu, Zhang). Only succeeds when unique.
+        let lastName = parts.last ?? normalized
+        let lastNameMatches = draw.filter { player in
+            let playerLastName = TennisBracketEngine.normalizedName(player.name)
+                .split(separator: " ").last.map(String.init) ?? ""
             return playerLastName == lastName
         }
-        if matches.count == 1 {
-            return matches[0].drawPosition
+        if lastNameMatches.count == 1 { return lastNameMatches[0].drawPosition }
+
+        // First-initial + last-name fallback ("S. Wawrinka" → first=S, last=wawrinka).
+        // Useful when ESPN abbreviates the first name.
+        if parts.count >= 2 {
+            let firstChar = parts.first?.first
+            let multi = draw.filter { player in
+                let pNorm = TennisBracketEngine.normalizedName(player.name)
+                let pParts = pNorm.split(separator: " ").map(String.init)
+                guard pParts.count >= 2 else { return false }
+                let pLast = pParts.last ?? ""
+                let pFirstChar = pParts.first?.first
+                return pLast == lastName && firstChar == pFirstChar
+            }
+            if multi.count == 1 { return multi[0].drawPosition }
         }
 
         return nil
+    }
+
+    /// Returns true if the competition object looks like anything other than a
+    /// main-draw singles match (doubles, mixed doubles, wheelchair, juniors,
+    /// quad, etc.). We inspect several optional fields because ESPN's exact
+    /// shape varies by endpoint.
+    private static func looksLikeNonSinglesCompetition(_ comp: [String: Any]) -> Bool {
+        // type: { id, text, abbreviation }
+        if let type = comp["type"] as? [String: Any] {
+            for key in ["text", "abbreviation", "name", "description"] {
+                if let s = type[key] as? String, isNonSinglesLabel(s) { return true }
+            }
+        }
+        // format hints
+        if let format = comp["format"] as? [String: Any] {
+            for key in ["name", "text", "description"] {
+                if let s = format[key] as? String, isNonSinglesLabel(s) { return true }
+            }
+        }
+        // notes: [{ type, value }]
+        if let notes = comp["notes"] as? [[String: Any]] {
+            for note in notes {
+                if let v = note["value"] as? String, isNonSinglesLabel(v) { return true }
+                if let v = note["headline"] as? String, isNonSinglesLabel(v) { return true }
+            }
+        }
+        // headline / name / shortName fallbacks
+        for key in ["name", "shortName", "headline", "displayName"] {
+            if let s = comp[key] as? String, isNonSinglesLabel(s) { return true }
+        }
+        // $ref path occasionally contains "/doubles/" or competition path
+        if let ref = comp["$ref"] as? String, isNonSinglesLabel(ref) { return true }
+        return false
+    }
+
+    private static func isNonSinglesLabel(_ s: String) -> Bool {
+        let lower = s.lowercased()
+        return lower.contains("doubles")
+            || lower.contains("mixed")
+            || lower.contains("wheelchair")
+            || lower.contains("junior")
+            || lower.contains("quad")
+            || lower.contains("legends")
+    }
+
+    /// Returns true if a competitor object looks like a doubles team (multiple
+    /// athletes, a roster array, or an empty/missing singular athlete).
+    private static func competitorIsMultiPlayer(_ c: [String: Any]) -> Bool {
+        if let athletes = c["athletes"] as? [Any], athletes.count > 1 { return true }
+        if let roster = c["roster"] as? [Any], roster.count > 1 { return true }
+        // ESPN sometimes uses a team object with multiple athlete refs
+        if let team = c["team"] as? [String: Any],
+           let teamAthletes = team["athletes"] as? [Any], teamAthletes.count > 1 { return true }
+        // A slash in the visible name is the classic doubles signature
+        if let name = c["name"] as? String, name.contains(" / ") { return true }
+        if let display = c["displayName"] as? String, display.contains(" / ") { return true }
+        return false
     }
 
     /// Given two draw positions of match participants, determine the bracket slot.
@@ -1204,6 +1777,7 @@ struct TennisBracketBotDrafter {
     ) -> Double {
         let rank1 = max(1, Double(player1.rank))
         let rank2 = max(1, Double(player2.rank))
+        let rankGap = abs(rank1 - rank2)
         let total = rank1 + rank2
         // Higher rank number = worse player, so rank2/total favors player1 when rank2 > rank1
         var prob = rank2 / total
@@ -1213,10 +1787,9 @@ struct TennisBracketBotDrafter {
 
         switch personality {
         case .upsetHunter:
-            // Flatten probabilities toward 50/50
-            prob = 0.5 + (prob - 0.5) * 0.5 + noise
+            // Mildly flatten — still favor the chalk, just less strongly
+            prob = 0.5 + (prob - 0.5) * 0.75 + noise
         case .chalkPicker:
-            // Strengthen favorite's advantage
             prob = 0.5 + (prob - 0.5) * 1.5 + noise
         case .homeAdvantage:
             prob += noise
@@ -1224,6 +1797,18 @@ struct TennisBracketBotDrafter {
             if player2.country == grandSlam.hostCountry { prob -= 0.06 }
         default:
             prob += noise
+        }
+
+        // Chalk floor: top seeds against unseeded long-shots almost never lose early rounds.
+        // Tennis Grand Slam R1/R2 upsets of #1-4 seeds vs. rank >30 are extremely rare.
+        let topSeed1 = (player1.seed ?? 99) <= 4
+        let topSeed2 = (player2.seed ?? 99) <= 4
+        if topSeed1 && !topSeed2 && rank2 > 30 { prob = max(prob, 0.93) }
+        if topSeed2 && !topSeed1 && rank1 > 30 { prob = min(prob, 0.07) }
+
+        // Generic large-rank-gap floor: a 40+ rank delta almost always wins.
+        if rankGap > 40 {
+            if rank1 < rank2 { prob = max(prob, 0.85) } else { prob = min(prob, 0.15) }
         }
 
         return max(0.05, min(0.95, prob))

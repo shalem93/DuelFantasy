@@ -19,6 +19,10 @@ final class GolfTiersViewModel {
     var error: String?
     var hasSubmitted: Bool = false
     var isSubmitting: Bool = false
+    /// True when today isn't inside any major's pick/play/results window —
+    /// i.e. we're in between majors. The lobby shows a quiet "next major in
+    /// X" state instead of running the tiers UI against a regular PGA event.
+    var noActiveMajor: Bool = false
 
     // MARK: - Persisted History (synced from ContentView)
     var dfsHistoryData: Data = Data()
@@ -37,6 +41,30 @@ final class GolfTiersViewModel {
     var groupError: String?
     var isCreatingGroup: Bool = false
     var isJoiningGroup: Bool = false
+
+    /// Group creation is only allowed when the current major is upcoming AND
+    /// within 14 days of lock. Prevents users from creating a group for a
+    /// settled major (e.g. PGA Championship after it ended) or stacking
+    /// groups months in advance for a far-off tournament.
+    var canCreateGroups: Bool {
+        guard let t = tournament else { return false }
+        if t.isSettled { return false }
+        guard let lockTime = t.lockTime else { return false }
+        let daysUntilLock = lockTime.timeIntervalSince(Date()) / 86_400
+        return daysUntilLock <= 14 && daysUntilLock >= -1
+    }
+
+    /// Human-readable reason group creation is disabled.
+    var groupCreationLockReason: String? {
+        guard let t = tournament else { return "Loading tournament…" }
+        if t.isSettled { return "This major is settled. Groups will reopen when the next major is ~2 weeks out." }
+        guard let lockTime = t.lockTime else { return "Tournament details not loaded yet." }
+        let days = Int(lockTime.timeIntervalSince(Date()) / 86_400)
+        if days > 14 {
+            return "Groups open ~2 weeks before the tournament. Check back in \(days - 14) day\(days - 14 == 1 ? "" : "s")."
+        }
+        return nil
+    }
 
     // MARK: - Settled History State
     var settledTournaments: [GolfTiersTournamentRecord] = []
@@ -101,16 +129,14 @@ final class GolfTiersViewModel {
     var hasLiveData: Bool { lastRefreshDate != nil }
 
     var userRank: Int? {
-        guard hasLiveData else { return nil }
-        if let rank = leaderboardEntries.first(where: { $0.isCurrentUser })?.rank,
-           leaderboardEntries.count >= 10 {
-            return rank
-        }
-        // If no leaderboard yet (no bots), show rank as 1 (only entry)
-        if !userPicks.isEmpty && !liveGolferScores.isEmpty {
-            return nil  // Don't show rank without a real field to compare against
-        }
-        return nil
+        // Hold the rank back until at least one golfer has a non-zero score —
+        // otherwise everyone is tied at E (0) and the user sees a misleading
+        // "Rank #1" flash before live scoring updates.
+        guard hasLiveData, leaderboardEntries.count >= 10 else { return nil }
+        let anyScored = liveGolferScores.values.contains { $0 != 0 } ||
+            leaderboardEntries.contains { $0.totalScore != 0 }
+        guard anyScored else { return nil }
+        return leaderboardEntries.first(where: { $0.isCurrentUser })?.rank
     }
 
     var userTotalScore: Int? {
@@ -145,6 +171,24 @@ final class GolfTiersViewModel {
         guard !isLoading else { return }
         isLoading = true
         error = nil
+
+        // Off-major-week guard: if we're not inside any major's window, don't
+        // load whatever ESPN is currently playing — that's a regular Tour
+        // event, not a major. Set `noActiveMajor` so the lobby can render a
+        // "next major in X days" state instead.
+        if GolfTiersTournament.activeMajorID(now: Date()) == nil {
+            tournament = nil
+            tiers = []
+            userPicks = [:]
+            leaderboardEntries = []
+            fieldEntries = []
+            noActiveMajor = true
+            isLoading = false
+            hasAttemptedLoad = true
+            print("[GolfTiers] No active major this week — skipping ESPN load")
+            return
+        }
+        noActiveMajor = false
 
         do {
             let tournamentID = GolfTiersTournament.currentMajorID()
@@ -225,6 +269,73 @@ final class GolfTiersViewModel {
                             pickScores: pickScores,
                             countingPicks: countingIDs
                         )
+                    }
+                }
+
+                // Recompute from ESPN final scores when stored entries have placeholder
+                // values. Trigger on EITHER the user's entry being a placeholder OR
+                // half-plus of entries being placeholders — the user-only case happens
+                // when bots were scored at settle() but the user's row wasn't.
+                let userEntry = fieldEntries.first(where: { $0.isCurrentUser })
+                let userIsPlaceholder = userEntry.map { $0.rank == 0 && $0.totalScore == 0 } ?? false
+                let placeholderEntries = fieldEntries.filter { $0.rank == 0 && $0.totalScore == 0 }
+                let fieldIsPlaceholder = !placeholderEntries.isEmpty && placeholderEntries.count >= fieldEntries.count / 2
+                let needsRecompute = userIsPlaceholder || fieldIsPlaceholder
+                if needsRecompute, let eventID = existing.espnEventID {
+                    print("[GolfTiers] Settled tournament recompute (userPlaceholder=\(userIsPlaceholder), fieldPlaceholders=\(placeholderEntries.count)/\(fieldEntries.count)) — fetching ESPN event \(eventID)")
+                    if let snapshot = try? await espnProvider.fetchLiveScores(
+                        espnEventID: eventID, searchAroundDate: existing.lockTime ?? existing.createdAt
+                    ) {
+                        liveGolferScores = snapshot.golferScoresToPar
+                        liveGolferRounds = snapshot.golferRoundScores
+                        liveGolferStatuses = snapshot.golferStatuses
+                        leaderboardEntries = GolfTiersEngine.computeLeaderboard(
+                            entries: fieldEntries,
+                            golferScores: liveGolferScores,
+                            golferStatuses: liveGolferStatuses,
+                            golferRoundScores: liveGolferRounds,
+                            currentUserID: userID
+                        )
+                        // Persist the recomputed scores back to the server so future
+                        // loads don't need to redo this work, and the user's
+                        // dfs_tournament_results row gets populated.
+                        if let token = accessToken, let uid = userID,
+                           let userEntry = leaderboardEntries.first(where: { $0.isCurrentUser }) {
+                            let totalEntries = leaderboardEntries.count
+                            let rrDelta = GolfTiersEngine.rrDelta(forRank: userEntry.rank, totalEntries: totalEntries)
+                            // Local DFS history — only append if we don't already have one
+                            let localHistory = (try? JSONDecoder().decode([DFSResult].self, from: dfsHistoryData)) ?? []
+                            if !localHistory.contains(where: { $0.tournamentId == existing.id }) {
+                                let result = DFSResult(
+                                    id: UUID(), tournamentTitle: existing.title,
+                                    rank: userEntry.rank, totalEntries: totalEntries,
+                                    lineupPoints: Double(userEntry.totalScore),
+                                    rrDelta: rrDelta, loggedAt: Date(),
+                                    tournamentId: existing.id
+                                )
+                                appendToHistory(result)
+                            }
+                            let updates = leaderboardEntries.map { entry in
+                                (id: entry.id.uuidString, totalPoints: Double(entry.totalScore), rank: entry.rank)
+                            }
+                            try? await SupabaseService.shared.updateGolfTiersEntryScores(
+                                entries: updates, accessToken: token
+                            )
+                            let supabaseResult = DFSTournamentResultRecord(
+                                id: UUID().uuidString, tournamentID: existing.id, userID: uid,
+                                entryName: profileName.isEmpty ? "Player" : profileName,
+                                lineupPlayerIDs: userEntry.picks.map { $0.playerID },
+                                lineupPlayerNames: userEntry.picks.map { $0.playerName },
+                                totalPoints: Double(userEntry.totalScore),
+                                playerPoints: nil, playerSalaries: nil,
+                                rank: userEntry.rank, rrDelta: rrDelta,
+                                isCurrentUser: true, isBot: false, createdAt: Date()
+                            )
+                            try? await SupabaseService.shared.upsertTournamentResults(
+                                tournamentID: existing.id, results: [supabaseResult], accessToken: token
+                            )
+                            print("[GolfTiers] Recomputed user result: rank=\(userEntry.rank), score=\(userEntry.totalScore), pushed to server")
+                        }
                     }
                 }
                 lastRefreshDate = Date()
@@ -1158,11 +1269,36 @@ final class GolfTiersViewModel {
         isLoadingHistory = true
 
         do {
-            let tournaments = try await SupabaseService.shared.fetchSettledGolfTiersTournaments(
+            var tournaments = try await SupabaseService.shared.fetchSettledGolfTiersTournaments(
                 accessToken: token
             )
+            print("[GolfTiers] loadSettledHistory: server returned \(tournaments.count) settled tournament(s)")
+
+            // Self-heal: if the current tournament is settled locally but missing from the
+            // server-returned list, the markGolfTiersTournamentSettled PATCH must have
+            // failed previously. Retry the PATCH now and inject the row into the list so
+            // the user sees their result in MAJOR RESULTS history this session.
+            if let current = self.tournament, current.isSettled,
+               !tournaments.contains(where: { $0.id == current.id }) {
+                print("[GolfTiers] Current tournament \(current.id) settled locally but missing from server list — re-marking and adding")
+                try? await SupabaseService.shared.markGolfTiersTournamentSettled(
+                    tournamentID: current.id, accessToken: token
+                )
+                let synthetic = GolfTiersTournamentRecord(
+                    id: current.id,
+                    title: current.title,
+                    majorName: current.majorName,
+                    season: current.season,
+                    status: "settled",
+                    lockTime: current.lockTime,
+                    espnEventID: current.espnEventID,
+                    entryCount: current.entryCount,
+                    isSettled: true,
+                    createdAt: current.createdAt
+                )
+                tournaments.insert(synthetic, at: 0)
+            }
             settledTournaments = tournaments
-            print("[GolfTiers] loadSettledHistory: found \(tournaments.count) settled tournament(s)")
 
             // Fetch user result for each settled tournament concurrently
             // Try dfs_tournament_results first, fall back to golf_tiers_entries
@@ -1214,29 +1350,119 @@ final class GolfTiersViewModel {
             print("[GolfTiers] Failed to load settled history: \(error)")
         }
 
-        // Also populate results from the local DFS history for any tournaments still missing
-        print("[GolfTiers] settledResults has \(settledResults.count) entries, leaderboard has \(leaderboardEntries.count) entries")
-        let localHistory = (try? JSONDecoder().decode([DFSResult].self, from: dfsHistoryData)) ?? []
-        for t in settledTournaments where settledResults[t.id] == nil {
-            if let localResult = localHistory.first(where: { $0.tournamentId == t.id }) {
-                print("[GolfTiers] Using local history for \(t.id): rank=\(localResult.rank), pts=\(localResult.lineupPoints), rr=\(localResult.rrDelta)")
-                settledResults[t.id] = DFSTournamentResultRecord(
-                    id: localResult.id.uuidString,
-                    tournamentID: t.id,
-                    userID: uid,
-                    entryName: profileName.isEmpty ? "Player" : profileName,
-                    lineupPlayerIDs: [],
-                    lineupPlayerNames: [],
-                    totalPoints: localResult.lineupPoints,
-                    playerPoints: nil,
-                    playerSalaries: nil,
-                    rank: localResult.rank,
-                    rrDelta: localResult.rrDelta,
-                    isCurrentUser: true,
-                    isBot: false,
-                    createdAt: localResult.loggedAt
+        // Recompute placeholder (rank 0 / pts 0) results from ESPN final scores.
+        // This is the only path for past majors where the current `tournament`
+        // loaded by the view model is a DIFFERENT major (e.g., U.S. Open is the
+        // active one and PGA Championship is just in history). loadTournament's
+        // recompute only fires for the active settled tournament; here we cover
+        // all the others.
+        for t in settledTournaments {
+            guard let existing = settledResults[t.id],
+                  existing.rank == 0, existing.totalPoints == 0,
+                  let eventID = t.espnEventID else { continue }
+            print("[GolfTiers] Recomputing settled history for \(t.id) from ESPN event \(eventID) — entry has placeholder rank/pts")
+            let entries = (try? await SupabaseService.shared.fetchGolfTiersEntries(
+                tournamentID: t.id, accessToken: token
+            )) ?? []
+            guard !entries.isEmpty else { continue }
+            let modelEntries: [GolfTiersEntry] = entries.map { rec in
+                GolfTiersEntry(
+                    id: UUID(uuidString: rec.id) ?? UUID(),
+                    tournamentID: rec.tournamentID, userID: rec.userID,
+                    entryName: rec.entryName, picks: rec.picks.map { $0.toModel() },
+                    totalScore: Int(rec.totalPoints), rank: rec.rank,
+                    isBot: rec.isBot, isCurrentUser: rec.userID == uid
                 )
             }
+            guard let snapshot = try? await espnProvider.fetchLiveScores(
+                espnEventID: eventID, searchAroundDate: t.lockTime ?? t.createdAt
+            ) else { continue }
+            let board = GolfTiersEngine.computeLeaderboard(
+                entries: modelEntries,
+                golferScores: snapshot.golferScoresToPar,
+                golferStatuses: snapshot.golferStatuses,
+                golferRoundScores: snapshot.golferRoundScores,
+                currentUserID: uid
+            )
+            guard let userBoardEntry = board.first(where: { $0.isCurrentUser }) else { continue }
+            let totalEntries = board.count
+            let rrDelta = GolfTiersEngine.rrDelta(forRank: userBoardEntry.rank, totalEntries: totalEntries)
+            // Overwrite the placeholder result and persist back to the server.
+            settledResults[t.id] = DFSTournamentResultRecord(
+                id: UUID().uuidString,
+                tournamentID: t.id, userID: uid,
+                entryName: existing.entryName,
+                lineupPlayerIDs: existing.lineupPlayerIDs,
+                lineupPlayerNames: existing.lineupPlayerNames,
+                totalPoints: Double(userBoardEntry.totalScore),
+                playerPoints: nil, playerSalaries: nil,
+                rank: userBoardEntry.rank, rrDelta: rrDelta,
+                isCurrentUser: true, isBot: false, createdAt: Date()
+            )
+            print("[GolfTiers] Recomputed \(t.id): rank=\(userBoardEntry.rank), score=\(userBoardEntry.totalScore), pushing to server")
+            let updates = board.map { entry in
+                (id: entry.id.uuidString, totalPoints: Double(entry.totalScore), rank: entry.rank)
+            }
+            try? await SupabaseService.shared.updateGolfTiersEntryScores(entries: updates, accessToken: token)
+            let supabaseResult = DFSTournamentResultRecord(
+                id: UUID().uuidString, tournamentID: t.id, userID: uid,
+                entryName: existing.entryName,
+                lineupPlayerIDs: userBoardEntry.picks.map { $0.playerID },
+                lineupPlayerNames: userBoardEntry.picks.map { $0.playerName },
+                totalPoints: Double(userBoardEntry.totalScore),
+                playerPoints: nil, playerSalaries: nil,
+                rank: userBoardEntry.rank, rrDelta: rrDelta,
+                isCurrentUser: true, isBot: false, createdAt: Date()
+            )
+            try? await SupabaseService.shared.upsertTournamentResults(
+                tournamentID: t.id, results: [supabaseResult], accessToken: token
+            )
+            // Append to local DFS history if not already present.
+            let history = (try? JSONDecoder().decode([DFSResult].self, from: dfsHistoryData)) ?? []
+            if !history.contains(where: { $0.tournamentId == t.id }) {
+                let dfsResult = DFSResult(
+                    id: UUID(), tournamentTitle: t.title,
+                    rank: userBoardEntry.rank, totalEntries: totalEntries,
+                    lineupPoints: Double(userBoardEntry.totalScore),
+                    rrDelta: rrDelta, loggedAt: Date(),
+                    tournamentId: t.id
+                )
+                appendToHistory(dfsResult)
+            }
+        }
+
+        // Also populate / overwrite results from the local DFS history when either:
+        //  - we have no settledResults entry yet, OR
+        //  - the existing entry is a placeholder (rank == 0 AND totalPoints == 0), which
+        //    happens when the entries-table fallback fires before the settle() pipeline
+        //    wrote real rank/score values. The local DFS history captured at settle()
+        //    time is the authoritative source for the user's final position.
+        print("[GolfTiers] settledResults has \(settledResults.count) entries, leaderboard has \(leaderboardEntries.count) entries")
+        let localHistory = (try? JSONDecoder().decode([DFSResult].self, from: dfsHistoryData)) ?? []
+        for t in settledTournaments {
+            let existing = settledResults[t.id]
+            let isPlaceholder = existing != nil && existing?.rank == 0 && existing?.totalPoints == 0
+            guard existing == nil || isPlaceholder else { continue }
+            guard let localResult = localHistory.first(where: { $0.tournamentId == t.id }) else { continue }
+            print("[GolfTiers] \(isPlaceholder ? "Overwriting placeholder" : "Using local history") for \(t.id): rank=\(localResult.rank), pts=\(localResult.lineupPoints), rr=\(localResult.rrDelta)")
+            // Preserve the existing entry's picks if present (they came from the entries
+            // row), only the score/rank fields get the local-history values.
+            settledResults[t.id] = DFSTournamentResultRecord(
+                id: existing?.id ?? localResult.id.uuidString,
+                tournamentID: t.id,
+                userID: uid,
+                entryName: existing?.entryName ?? (profileName.isEmpty ? "Player" : profileName),
+                lineupPlayerIDs: existing?.lineupPlayerIDs ?? [],
+                lineupPlayerNames: existing?.lineupPlayerNames ?? [],
+                totalPoints: localResult.lineupPoints,
+                playerPoints: existing?.playerPoints,
+                playerSalaries: existing?.playerSalaries,
+                rank: localResult.rank,
+                rrDelta: localResult.rrDelta,
+                isCurrentUser: true,
+                isBot: false,
+                createdAt: localResult.loggedAt
+            )
         }
 
         // Last resort: populate from the already-loaded leaderboard for the current tournament
@@ -1286,6 +1512,10 @@ final class GolfTiersViewModel {
     func createGroup(name: String) async -> GolfTiersGroup? {
         guard let token = accessToken, let uid = userID else {
             groupError = "Please sign in to create a group."
+            return nil
+        }
+        guard canCreateGroups else {
+            groupError = groupCreationLockReason ?? "Group creation is not currently open."
             return nil
         }
         let tournamentID = tournament?.id ?? GolfTiersTournament.currentMajorID()

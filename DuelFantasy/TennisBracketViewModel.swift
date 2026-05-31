@@ -14,6 +14,17 @@ final class TennisBracketViewModel {
     var hasAttemptedLoad: Bool = false
     var error: String?
     var hasSubmitted: Bool = false
+    /// Whether the user has submitted an ATP bracket for the current slam season.
+    var hasSubmittedATP: Bool = false
+    /// Whether the user has submitted a WTA bracket for the current slam season.
+    var hasSubmittedWTA: Bool = false
+    /// Per-draw cached rank / status used to populate the FantasyHub active-contest
+    /// cards for both ATP and WTA simultaneously, regardless of which draw the
+    /// viewModel currently has loaded as the "active" tournament.
+    var atpUserRank: Int?
+    var wtaUserRank: Int?
+    var atpIsLive: Bool = false
+    var wtaIsLive: Bool = false
     var isSubmitting: Bool = false
     var submitError: String?
     var drawAvailable: Bool = false
@@ -36,6 +47,14 @@ final class TennisBracketViewModel {
     var myGroups: [TennisBracketGroup] = []
     var currentGroup: TennisBracketGroup?
     var currentGroupMembers: [TennisBracketGroupMember] = []
+    /// Standings for the currently-open group, computed by fetching the group's
+    /// tournament entries + results directly — independent of which tournament
+    /// is currently selected in the main view model.
+    var currentGroupStandings: [TennisBracketLeaderboardEntry] = []
+    /// Results dictionary for the currently-open group's tournament, used to
+    /// color pick status badges in the entry-detail sheet regardless of which
+    /// tournament the main view model has loaded.
+    var currentGroupResults: [String: String] = [:]
     var groupError: String?
     var isCreatingGroup: Bool = false
     var isJoiningGroup: Bool = false
@@ -123,12 +142,18 @@ final class TennisBracketViewModel {
     var hasLiveData: Bool { lastRefreshDate != nil }
 
     var userRank: Int? {
-        guard hasLiveData, leaderboardEntries.count >= 10 else { return nil }
-        return leaderboardEntries.first(where: { $0.isCurrentUser })?.rank
+        // Don't surface a rank until at least one real match result is in. Otherwise
+        // every entry is tied at 0 → everyone shows "Rank #1" briefly before the live
+        // data lands. Better to show nothing than flash a wrong value.
+        guard hasLiveData, !results.isEmpty,
+              let entry = leaderboardEntries.first(where: { $0.isCurrentUser }),
+              entry.totalPoints > 0 || leaderboardEntries.contains(where: { $0.totalPoints > 0 })
+        else { return nil }
+        return entry.rank
     }
 
     var userTotalPoints: Double? {
-        guard hasLiveData else { return nil }
+        guard hasLiveData, !results.isEmpty else { return nil }
         return leaderboardEntries.first(where: { $0.isCurrentUser })?.totalPoints
     }
 
@@ -163,15 +188,20 @@ final class TennisBracketViewModel {
         return (completed, matchCount)
     }
 
-    /// Group leaderboard: filter to group members, re-rank
+    /// Group standings — read directly from `currentGroupStandings` which is
+    /// populated by `loadGroupStandings`. Falls back to filtering the current
+    /// view model's leaderboardEntries if the dedicated load hasn't run yet.
     var groupLeaderboard: [TennisBracketLeaderboardEntry] {
-        guard let group = currentGroup else { return [] }
-        let memberIDs = Set(currentGroupMembers.map { $0.userID })
+        if !currentGroupStandings.isEmpty { return currentGroupStandings }
+        guard currentGroup != nil else { return [] }
+        // Fallback path (legacy): filter the currently-loaded leaderboard by member IDs.
+        // This works only when the current tournament matches the group's tournament
+        // AND every member's entry is in fieldEntries.
+        let memberIDs = Set(currentGroupMembers.map { $0.userID.lowercased() })
         let filtered = leaderboardEntries.filter { entry in
             if entry.isCurrentUser { return true }
-            // Match by finding the field entry
             if let field = fieldEntries.first(where: { $0.id == entry.id }),
-               let uid = field.userID, memberIDs.contains(uid) {
+               let uid = field.userID?.lowercased(), memberIDs.contains(uid) {
                 return true
             }
             return false
@@ -183,6 +213,68 @@ final class TennisBracketViewModel {
                 isCurrentUser: entry.isCurrentUser, roundBreakdown: entry.roundBreakdown
             )
         }
+    }
+
+    /// Robustly compute the group standings by fetching the group's tournament
+    /// entries and results directly. This is independent of which tournament is
+    /// currently selected in the view model — so opening a group always shows
+    /// correct scores even if the user is browsing a different bracket.
+    func loadGroupStandings(group: TennisBracketGroup) async {
+        guard let token = accessToken else { return }
+        let groupTournamentID = group.tournamentID
+
+        async let resultsFetch = SupabaseService.shared.fetchTennisBracketResults(
+            tournamentID: groupTournamentID, accessToken: token
+        )
+        async let entriesFetch = SupabaseService.shared.fetchTennisBracketEntries(
+            tournamentID: groupTournamentID, accessToken: token
+        )
+
+        let storedResults = (try? await resultsFetch) ?? [:]
+        let records = (try? await entriesFetch) ?? []
+        currentGroupResults = storedResults
+
+        let memberIDs = Set(currentGroupMembers.map { $0.userID.lowercased() })
+        let uid = userID?.lowercased()
+
+        // Filter to members' entries (matched by user_id, case-insensitive).
+        // The current user is always included even if their UUID case differs.
+        let memberEntries = records.filter { rec in
+            guard let rid = rec.userID?.lowercased() else { return false }
+            return memberIDs.contains(rid) || rid == uid
+        }
+
+        // Score each entry against current results and rank.
+        var scored: [(record: TennisBracketEntryRecord, points: Double, breakdown: [String: Int])] = []
+        for rec in memberEntries {
+            let (total, breakdown) = TennisBracketEngine.scoreBracket(picks: rec.picks, results: storedResults)
+            scored.append((rec, total, breakdown))
+        }
+        scored.sort { $0.points > $1.points }
+
+        // Standard competition ranking.
+        var ranks: [Int] = []
+        for index in scored.indices {
+            if index > 0, scored[index].points == scored[index - 1].points {
+                ranks.append(ranks[index - 1])
+            } else {
+                ranks.append(index + 1)
+            }
+        }
+
+        let board: [TennisBracketLeaderboardEntry] = scored.enumerated().map { idx, item in
+            TennisBracketLeaderboardEntry(
+                id: UUID(uuidString: item.record.id) ?? UUID(),
+                entryName: item.record.entryName,
+                picks: item.record.picks,
+                totalPoints: item.points,
+                rank: ranks[idx],
+                isCurrentUser: item.record.userID?.lowercased() == uid,
+                roundBreakdown: item.breakdown
+            )
+        }
+
+        currentGroupStandings = board
     }
 
     // MARK: - Tournament ID
@@ -207,7 +299,7 @@ final class TennisBracketViewModel {
         let (month, day): (Int, Int)
         switch grandSlam {
         case .australianOpen: (month, day) = (1, 14)   // Mid January
-        case .frenchOpen:     (month, day) = (5, 25)   // Late May
+        case .frenchOpen:     (month, day) = (5, 24)   // Late May (2026: R1 starts Sun May 24)
         case .wimbledon:      (month, day) = (6, 30)   // Late June
         case .usOpen:         (month, day) = (8, 25)   // Late August
         }
@@ -281,6 +373,64 @@ final class TennisBracketViewModel {
                 }
             }
 
+            // Pull the lockTime forward if our current estimate is earlier than the stored value,
+            // or if the stored value is missing entirely.
+            if let loaded = loadedTournament,
+               loaded.status == "open",
+               let estimated = estimatedLockTime,
+               (loaded.lockTime == nil || estimated < loaded.lockTime!) {
+                let corrected = TennisBracketTournament(
+                    id: loaded.id, title: loaded.title, grandSlam: loaded.grandSlam,
+                    drawType: loaded.drawType, season: loaded.season, status: loaded.status,
+                    lockTime: estimated, entryCount: loaded.entryCount,
+                    isSettled: loaded.isSettled, createdAt: loaded.createdAt
+                )
+                loadedTournament = corrected
+                if let token = accessToken {
+                    let record = TennisBracketTournamentRecord(
+                        id: corrected.id, title: corrected.title,
+                        grandSlam: corrected.grandSlam.rawValue, drawType: corrected.drawType.rawValue,
+                        season: corrected.season, status: corrected.status, lockTime: estimated
+                    )
+                    try? await SupabaseService.shared.upsertTennisBracketTournament(
+                        record: record, accessToken: token
+                    )
+                }
+            }
+
+            // Detect and undo a false settlement: a Grand Slam takes ~14 days. If the
+            // tournament is flagged settled but lockTime was less than 13 days ago, the
+            // settle() call was triggered by polluted cross-tournament results. Reset.
+            if let loaded = loadedTournament,
+               loaded.isSettled || loaded.status == "settled",
+               let lock = loaded.lockTime ?? estimatedLockTime,
+               Date().timeIntervalSince(lock) < 13 * 24 * 3600 {
+                print("[TennisBracket] Detected false settlement (lockTime only \(Int(Date().timeIntervalSince(lock) / 3600))h ago) — resetting")
+                let corrected = TennisBracketTournament(
+                    id: loaded.id, title: loaded.title, grandSlam: loaded.grandSlam,
+                    drawType: loaded.drawType, season: loaded.season, status: "live",
+                    lockTime: loaded.lockTime, entryCount: loaded.entryCount,
+                    isSettled: false, createdAt: loaded.createdAt
+                )
+                loadedTournament = corrected
+                if let token = accessToken {
+                    try? await SupabaseService.shared.updateTennisBracketResults(
+                        tournamentID: loaded.id, results: [:], accessToken: token
+                    )
+                    // Upsert with is_settled=false so the row's settlement flag is cleared.
+                    let record = TennisBracketTournamentRecord(
+                        id: corrected.id, title: corrected.title,
+                        grandSlam: corrected.grandSlam.rawValue, drawType: corrected.drawType.rawValue,
+                        season: corrected.season, status: "live", lockTime: corrected.lockTime,
+                        entryCount: corrected.entryCount, isSettled: false
+                    )
+                    try? await SupabaseService.shared.upsertTennisBracketTournament(
+                        record: record, accessToken: token
+                    )
+                }
+                results = [:]
+            }
+
             tournament = loadedTournament ?? fallbackTournament
 
             // Only upsert if we created a new tournament (no existing record found)
@@ -349,11 +499,97 @@ final class TennisBracketViewModel {
                     userPicks = existingEntry.picks
                     print("[TennisBracket] Restored \(existingEntry.picks.count) picks from server")
                 }
+
+                // Also probe the OTHER draw type so the active-contests list can show
+                // both ATP and WTA cards on the home screen even when only one is loaded.
+                let year = Calendar.current.component(.year, from: Date())
+                let atpID = "\(selectedGrandSlam.rawValue)-\(DrawType.atp.rawValue)-\(year)"
+                let wtaID = "\(selectedGrandSlam.rawValue)-\(DrawType.wta.rawValue)-\(year)"
+                async let atpEntry = SupabaseService.shared.fetchUserTennisBracketEntry(
+                    tournamentID: atpID, userID: uid, accessToken: token
+                )
+                async let wtaEntry = SupabaseService.shared.fetchUserTennisBracketEntry(
+                    tournamentID: wtaID, userID: uid, accessToken: token
+                )
+                let atpEntryRec = try? await atpEntry
+                let wtaEntryRec = try? await wtaEntry
+                hasSubmittedATP = atpEntryRec != nil
+                hasSubmittedWTA = wtaEntryRec != nil
+
+                // Also fetch each draw's live status so both home-screen cards reflect
+                // LIVE/LOCKED correctly without needing to open both views.
+                async let atpTournament = SupabaseService.shared.fetchTennisBracketTournament(
+                    tournamentID: atpID, accessToken: token
+                )
+                async let wtaTournament = SupabaseService.shared.fetchTennisBracketTournament(
+                    tournamentID: wtaID, accessToken: token
+                )
+                if let atpT = try? await atpTournament {
+                    atpIsLive = atpT.status == "live"
+                }
+                if let wtaT = try? await wtaTournament {
+                    wtaIsLive = wtaT.status == "live"
+                }
+
+                // Compute the user's rank for the OTHER draw in background so both
+                // active-contest cards show real ranks. We compute the currently-loaded
+                // draw's rank via the main pipeline; only the off-draw needs prefetch.
+                let otherDrawType: DrawType = selectedDrawType == .atp ? .wta : .atp
+                let otherID = otherDrawType == .atp ? atpID : wtaID
+                let otherEntry = otherDrawType == .atp ? atpEntryRec : wtaEntryRec
+                if let otherEntry, !otherEntry.picks.isEmpty {
+                    Task { [otherID, otherEntry, otherDrawType] in
+                        // Fetch the field + results for the off-draw, compute leaderboard,
+                        // pull out the user's rank.
+                        async let resultsFetch = SupabaseService.shared.fetchTennisBracketResults(
+                            tournamentID: otherID, accessToken: token
+                        )
+                        async let entriesFetch = SupabaseService.shared.fetchTennisBracketEntries(
+                            tournamentID: otherID, accessToken: token
+                        )
+                        let storedResults = (try? await resultsFetch) ?? [:]
+                        let records = (try? await entriesFetch) ?? []
+                        guard !records.isEmpty, !storedResults.isEmpty else { return }
+                        let entries = records.map { rec in
+                            TennisBracketEntry(
+                                id: UUID(uuidString: rec.id) ?? UUID(),
+                                tournamentID: rec.tournamentID, userID: rec.userID,
+                                entryName: rec.entryName, picks: rec.picks,
+                                totalPoints: rec.totalPoints ?? 0,
+                                rank: rec.rank ?? 0,
+                                isBot: rec.isBot ?? false,
+                                isCurrentUser: rec.userID == uid
+                            )
+                        } + [TennisBracketEntry(
+                            id: UUID(), tournamentID: otherID, userID: uid,
+                            entryName: self.profileName.isEmpty ? "Player" : self.profileName,
+                            picks: otherEntry.picks,
+                            totalPoints: 0, rank: 0, isBot: false, isCurrentUser: true
+                        )]
+                        let board = TennisBracketEngine.computeLeaderboard(
+                            entries: entries, results: storedResults, currentUserID: uid
+                        )
+                        guard let userRow = board.first(where: { $0.isCurrentUser }) else { return }
+                        // Only surface the rank if real scoring has happened (someone scored > 0).
+                        let anyScored = board.contains(where: { $0.totalPoints > 0 })
+                        guard anyScored else { return }
+                        await MainActor.run {
+                            if otherDrawType == .atp { self.atpUserRank = userRow.rank }
+                            else { self.wtaUserRank = userRow.rank }
+                        }
+                    }
+                }
             }
 
             // If no server entry, try to restore from local progress
             if !hasSubmitted {
                 loadPickProgress()
+            }
+            // Mirror the currently-loaded draw's submitted state into the dual flags
+            // for the case where loadPickProgress restored picks locally.
+            if hasSubmitted {
+                if selectedDrawType == .atp { hasSubmittedATP = true }
+                else { hasSubmittedWTA = true }
             }
 
             // Fetch stored results
@@ -368,6 +604,25 @@ final class TennisBracketViewModel {
 
             // Auto-detect status transitions
             await checkStatusTransition()
+
+            // If status is still "open" but the draw is live, poll ESPN — a non-empty
+            // response proves the slam has started even if lockTime/results were stale,
+            // and the subsequent transition flips us into the live view.
+            if tournament?.status == "open", drawAvailable,
+               let t = tournament {
+                let espnResults = await espnProvider.fetchMatchResults(
+                    drawType: t.drawType, drawPlayers: drawPlayers, grandSlam: t.grandSlam
+                )
+                if !espnResults.isEmpty {
+                    for (slot, winner) in espnResults { results[slot] = winner }
+                    if let token = accessToken {
+                        try? await SupabaseService.shared.updateTennisBracketResults(
+                            tournamentID: t.id, results: results, accessToken: token
+                        )
+                    }
+                    await checkStatusTransition()
+                }
+            }
 
             // If locked/live, load field and scores
             if isLocked {
@@ -441,8 +696,11 @@ final class TennisBracketViewModel {
     private func checkStatusTransition() async {
         guard var t = tournament, !t.isSettled else { return }
 
-        // open → locked: past lock time
-        if t.status == "open", let lockTime = t.lockTime, Date() >= lockTime {
+        // open → locked: past lock time, or results already exist (slam is underway).
+        // The results check handles cases where the stored lockTime estimate was off — once
+        // ESPN reports any completed match, the tournament has clearly started.
+        let lockTimePassed = (t.lockTime.map { Date() >= $0 }) ?? false
+        if t.status == "open", lockTimePassed || !results.isEmpty {
             let updated = TennisBracketTournament(
                 id: t.id, title: t.title, grandSlam: t.grandSlam, drawType: t.drawType,
                 season: t.season, status: "locked", lockTime: t.lockTime,
@@ -473,9 +731,16 @@ final class TennisBracketViewModel {
             }
         }
 
-        // live → settled: Final match completed
+        // live → settled: Final match completed. Gate on time elapsed since lock so a
+        // bogus F-1 entry (e.g., from a misattributed match) can't prematurely settle
+        // the bracket during the first week of the slam.
         if t.status == "live" && results["F-1"] != nil {
-            await settle()
+            let elapsed = t.lockTime.map { Date().timeIntervalSince($0) } ?? .infinity
+            if elapsed >= 12 * 24 * 3600 {
+                await settle()
+            } else {
+                print("[TennisBracket] Ignoring suspicious F-1 result (only \(Int(elapsed / 3600))h since lockTime)")
+            }
         }
     }
 
@@ -484,18 +749,23 @@ final class TennisBracketViewModel {
     func refreshLive() async {
         guard let tournament, !tournament.isSettled else { return }
 
-        // Fetch fresh ESPN results
+        // Fetch fresh ESPN results and MERGE with existing — never shrink. ESPN
+        // occasionally returns partial / empty responses on transient failures,
+        // and clobbering with that would flash a 0-score leaderboard on view
+        // reappearance (e.g., when navigating back from a group detail). New slot
+        // values still overwrite old ones, so corrections still propagate.
         if drawAvailable {
             let espnResults = await espnProvider.fetchMatchResults(
                 drawType: tournament.drawType,
-                drawPlayers: drawPlayers
+                drawPlayers: drawPlayers,
+                grandSlam: tournament.grandSlam
             )
-            if !espnResults.isEmpty {
-                // Merge with existing results
-                for (slot, winner) in espnResults {
-                    results[slot] = winner
-                }
-                // Save updated results to Supabase
+            var merged = results
+            for (slot, winner) in espnResults {
+                merged[slot] = winner
+            }
+            if merged != results {
+                results = merged
                 if let token = accessToken {
                     try? await SupabaseService.shared.updateTennisBracketResults(
                         tournamentID: tournament.id, results: results, accessToken: token
@@ -515,6 +785,28 @@ final class TennisBracketViewModel {
             results: results,
             currentUserID: userID
         )
+
+        // Stale-cache guard: if ESPN has resolved enough matches that bots should score
+        // but every bot is at zero, the cached lineups predate our chalk-favoring bot
+        // generator (they're all upset-heavy losers). Wipe the cache and regenerate.
+        if results.count >= 5 {
+            let botEntries = fieldEntries.filter { $0.isBot }
+            let totalBotPoints = leaderboardEntries
+                .filter { !$0.isCurrentUser }
+                .reduce(0.0) { $0 + $1.totalPoints }
+            if botEntries.count >= 500, totalBotPoints == 0 {
+                print("[TennisBracket] All \(botEntries.count) cached bots score 0 vs \(results.count) resolved results — regenerating with current chalk-favoring logic")
+                UserDefaults.standard.removeObject(forKey: "\(Self.botCacheKey)_\(tournament.id)")
+                fieldEntries = []
+                fieldGenerated = false
+                await generateBotField()
+                leaderboardEntries = TennisBracketEngine.computeLeaderboard(
+                    entries: fieldEntries,
+                    results: results,
+                    currentUserID: userID
+                )
+            }
+        }
         lastRefreshDate = Date()
 
         // Check for tournament completion
@@ -590,8 +882,26 @@ final class TennisBracketViewModel {
             ))
         }
 
-        // Add user entry if submitted
-        if hasSubmitted, let uid = userID {
+        // Stale-cache guard: if the cached bots' picks reference player names that
+        // aren't in the current draw (e.g., the WTA draw got updated since these bots
+        // were generated), every bot will score 0 against fresh ESPN results. Detect
+        // that and bail so the caller will regenerate from the current draw instead.
+        if !entries.isEmpty, !drawPlayers.isEmpty {
+            let drawNames = Set(drawPlayers.map { TennisBracketEngine.normalizedName($0.name) })
+            let samplePicks = entries.prefix(20).flatMap { Array($0.picks.values) }
+            let matched = samplePicks.filter { drawNames.contains(TennisBracketEngine.normalizedName($0)) }.count
+            let matchRate = samplePicks.isEmpty ? 0.0 : Double(matched) / Double(samplePicks.count)
+            if matchRate < 0.5 {
+                print("[TennisBracket] Cached bots stale (only \(Int(matchRate * 100))% of picks match current draw); discarding so they regenerate")
+                fieldEntries = []
+                return
+            }
+        }
+
+        // Include the user's entry whenever they have picks loaded — `hasSubmitted`
+        // only flips for server-confirmed entries, but the leaderboard should still
+        // grade local picks.
+        if (hasSubmitted || !userPicks.isEmpty), let uid = userID {
             entries.append(TennisBracketEntry(
                 id: UUID(),
                 tournamentID: tournamentID,
@@ -630,7 +940,11 @@ final class TennisBracketViewModel {
 
         // Add user entry
         var allEntries = bots
-        if hasSubmitted, let uid = userID {
+        // Include the user's entry whenever they have picks loaded. The previous
+        // `hasSubmitted` check required a server record, but if the server fetch missed
+        // the user falls out of fieldEntries entirely (no rank, no points, no leaderboard
+        // presence) even though their picks are locally available and graded.
+        if (hasSubmitted || !userPicks.isEmpty), let uid = userID {
             allEntries.append(TennisBracketEntry(
                 id: UUID(), tournamentID: tournament.id, userID: uid,
                 entryName: profileName.isEmpty ? "Player" : profileName,
@@ -807,10 +1121,28 @@ final class TennisBracketViewModel {
 
     func recheckStatusIfNeeded() async {
         guard let tournament, !tournament.isSettled else { return }
-        if tournament.status == "open", let lockTime = tournament.lockTime, Date() >= lockTime {
-            await checkStatusTransition()
-            if isLocked { await refreshLive() }
+        guard tournament.status == "open" else { return }
+
+        let lockTimePassed = (tournament.lockTime.map { Date() >= $0 }) ?? false
+
+        // If our cached lockTime hasn't passed, poll ESPN for results — a non-empty response
+        // proves the slam is underway despite a stale estimate.
+        if !lockTimePassed, drawAvailable {
+            let espnResults = await espnProvider.fetchMatchResults(
+                drawType: tournament.drawType, drawPlayers: drawPlayers, grandSlam: tournament.grandSlam
+            )
+            if !espnResults.isEmpty {
+                for (slot, winner) in espnResults { results[slot] = winner }
+                if let token = accessToken {
+                    try? await SupabaseService.shared.updateTennisBracketResults(
+                        tournamentID: tournament.id, results: results, accessToken: token
+                    )
+                }
+            }
         }
+
+        await checkStatusTransition()
+        if isLocked { await refreshLive() }
     }
 
     // MARK: - Groups
@@ -900,6 +1232,11 @@ final class TennisBracketViewModel {
 
     func loadGroupDetail(group: TennisBracketGroup) async {
         guard let token = accessToken else { return }
+        // Reset standings when switching groups so stale data doesn't bleed in.
+        if currentGroup?.id != group.id {
+            currentGroupStandings = []
+            currentGroupResults = [:]
+        }
         currentGroup = group
         do {
             let members = try await SupabaseService.shared.fetchTennisBracketGroupMembers(
@@ -909,6 +1246,9 @@ final class TennisBracketViewModel {
         } catch {
             print("[TennisBracket] Failed to load group members: \(error)")
         }
+        // Members are now loaded — fetch the group tournament's entries+results and
+        // compute standings directly (independent of the currently-selected tournament).
+        await loadGroupStandings(group: group)
     }
 
     func leaveGroup(_ group: TennisBracketGroup) async {

@@ -3888,7 +3888,10 @@ struct ESPNNHLDFSSlateProvider: DFSSlateProvider {
         let calendar = Calendar.current
         var recentEventsByTeam: [String: String] = [:]  // teamID → most recent completed eventID
 
-        let datesToCheck = (-3...(-1)).compactMap { calendar.date(byAdding: .day, value: $0, to: Date()) }
+        // Look back 7 days — NHL playoff teams often have 3-5 rest days between games,
+        // so a 3-day window misses a team's most recent box score and leaves their
+        // roster's playedRecently flag at default-true, slipping DNPs through.
+        let datesToCheck = (-7...(-1)).compactMap { calendar.date(byAdding: .day, value: $0, to: Date()) }
         let dateStrings = datesToCheck.map { dateKey(for: $0) }
 
         // Fetch scoreboards for recent days
@@ -4934,7 +4937,7 @@ struct ESPNPlayerGameLogProvider {
         let (espnID, sportPath) = Self.parsePlayerID(cleanedID)
         let isMLB = cleanedID.hasPrefix("mlb-")
         let isNHL = cleanedID.hasPrefix("nhl-")
-        let isSoccer = cleanedID.hasPrefix("epl-") || cleanedID.hasPrefix("ucl-")
+        let isSoccer = cleanedID.hasPrefix("epl-") || cleanedID.hasPrefix("ucl-") || cleanedID.hasPrefix("wc-")
         let isUFC = cleanedID.hasPrefix("ufc-")
 
         // Soccer uses a different approach — ESPN's soccer gamelog endpoint doesn't return game data.
@@ -5061,6 +5064,8 @@ struct ESPNPlayerGameLogProvider {
             return (String(playerID.dropFirst(4)), "soccer/eng.1")
         } else if playerID.hasPrefix("ucl-") {
             return (String(playerID.dropFirst(4)), "soccer/uefa.champions")
+        } else if playerID.hasPrefix("wc-") {
+            return (String(playerID.dropFirst(3)), "soccer/fifa.world")
         } else if playerID.hasPrefix("ufc-") {
             return (String(playerID.dropFirst(4)), "mma/ufc")
         } else if playerID.hasPrefix("nfl-") {
@@ -5407,7 +5412,8 @@ struct ESPNPlayerGameLogProvider {
                         isHome: event.isHome,
                         teamScore: event.teamScore,
                         opponentScore: event.opponentScore,
-                        teamAbbreviation: teamAbbreviation
+                        teamAbbreviation: teamAbbreviation,
+                        teamID: teamID
                     )
                 }
             }
@@ -5515,6 +5521,11 @@ struct ESPNPlayerGameLogProvider {
     /// Fetches a single match summary and extracts stats for a specific player.
     /// Soccer summaries store per-player stats in rosters[].roster[].stats (array of dicts),
     /// NOT in boxscore.players like basketball/hockey.
+    ///
+    /// The `/summary?event=` payload only exposes a thin set of stats (goals,
+    /// assists, shots, cards, fouls). Defensive actions (tackles, interceptions,
+    /// clearances, blocked shots) live at a separate core-API endpoint, so we
+    /// fetch both in parallel and merge.
     private func fetchSoccerPlayerStatsFromSummary(
         eventID: String,
         espnAthleteID: String,
@@ -5525,7 +5536,8 @@ struct ESPNPlayerGameLogProvider {
         isHome: Bool,
         teamScore: Int,
         opponentScore: Int,
-        teamAbbreviation: String
+        teamAbbreviation: String,
+        teamID: String
     ) async throws -> DFSPlayerGameLog? {
         let summaryURL = "https://site.api.espn.com/apis/site/v2/sports/soccer/\(leaguePath)/summary?event=\(eventID)"
         guard let url = URL(string: summaryURL) else { return nil }
@@ -5550,15 +5562,25 @@ struct ESPNPlayerGameLogProvider {
                       athleteID == espnAthleteID,
                       let stats = entry["stats"] as? [[String: Any]] else { continue }
 
-                // Build stat lookup: abbreviation → value
+                // Build stat lookup under BOTH abbreviation and name keys.
+                // ESPN soccer's `/summary?event=` endpoint exposes goals/assists/
+                // shots under short abbreviations (G/A/SH/ST...), but the rich
+                // defensive stats (tackles, interceptions, clearances) only
+                // appear under their full `name` field (wonTackle, totalInter-
+                // ceptions, etc). Reading both lets us pick up either.
                 var statLookup: [String: Double] = [:]
                 for stat in stats {
-                    if let abbr = stat["abbreviation"] as? String {
-                        if let val = stat["value"] as? Double {
-                            statLookup[abbr] = val
-                        } else if let val = stat["value"] as? Int {
-                            statLookup[abbr] = Double(val)
-                        }
+                    let rawValue: Double? = {
+                        if let v = stat["value"] as? Double { return v }
+                        if let v = stat["value"] as? Int { return Double(v) }
+                        return nil
+                    }()
+                    guard let val = rawValue else { continue }
+                    if let abbr = stat["abbreviation"] as? String, !abbr.isEmpty {
+                        statLookup[abbr] = val
+                    }
+                    if let name = stat["name"] as? String, !name.isEmpty {
+                        statLookup[name] = val
                     }
                 }
 
@@ -5567,16 +5589,30 @@ struct ESPNPlayerGameLogProvider {
                 let rawPos = posDict?["abbreviation"] as? String ?? posDict?["displayName"] as? String ?? position
                 let playerPos = mapSoccerGameLogPosition(rawPos)
 
-                // Extract stats
-                let goals = Int(statLookup["G"] ?? 0)
-                let assists = Int(statLookup["A"] ?? 0)
-                let shotsOnTarget = Int(statLookup["ST"] ?? 0)
-                let totalShots = Int(statLookup["SH"] ?? 0)
-                let saves = Int(statLookup["SV"] ?? 0)
-                let yellowCards = Int(statLookup["YC"] ?? 0)
-                let redCards = Int(statLookup["RC"] ?? 0)
-                let foulsDrawn = Int(statLookup["FA"] ?? 0)
-                let goalsAgainst = Int(statLookup["GA"] ?? 0)
+                // Extract stats — prefer the `name` keys (richer + match the
+                // live boxscore parser in SoccerDFSData), fall back to short
+                // abbreviations for the basics ESPN always exposes.
+                let goals = Int(statLookup["totalGoals"] ?? statLookup["G"] ?? 0)
+                let assists = Int(statLookup["goalAssists"] ?? statLookup["A"] ?? 0)
+                let shotsOnTarget = Int(statLookup["shotsOnTarget"] ?? statLookup["ST"] ?? 0)
+                let totalShots = Int(statLookup["totalShots"] ?? statLookup["SH"] ?? 0)
+                let saves = Int(statLookup["saves"] ?? statLookup["SV"] ?? 0)
+                let yellowCards = Int(statLookup["yellowCards"] ?? statLookup["YC"] ?? 0)
+                let redCards = Int(statLookup["redCards"] ?? statLookup["RC"] ?? 0)
+                let foulsDrawn = Int(statLookup["foulsSuffered"] ?? statLookup["FA"] ?? 0)
+                let goalsAgainst = Int(statLookup["goalsConceded"] ?? statLookup["GA"] ?? 0)
+                // Defensive actions are NOT in the summary endpoint. Fetch
+                // them from the per-player core-API stats endpoint. Failures
+                // return zeros (same as before — we just lose the defender
+                // bonus for that game).
+                let defStats = await self.fetchSoccerDefensiveStats(
+                    eventID: eventID, leaguePath: leaguePath,
+                    teamID: teamID, athleteID: espnAthleteID
+                )
+                let tackles = defStats.tackles
+                let interceptions = defStats.interceptions
+                let blockedShots = defStats.blockedShots
+                let clearances = defStats.clearances
 
                 // Estimate minutes played from starter/sub status
                 let isStarter = (entry["starter"] as? Int ?? entry["starter"] as? Bool as? Int ?? 0) != 0
@@ -5608,6 +5644,10 @@ struct ESPNPlayerGameLogProvider {
                 fpts += Double(foulsDrawn) * 1.0
                 fpts -= Double(yellowCards) * 1.0
                 fpts -= Double(redCards) * 3.0
+                fpts += Double(tackles) * 1.6
+                fpts += Double(interceptions) * 1.0
+                fpts += Double(blockedShots) * 1.5
+                fpts += Double(clearances) * 0.3
                 if playerPos == "DEF" {
                     if cleanSheet { fpts += 5.0 }
                     fpts -= Double(goalsAgainst) * 0.6
@@ -5626,6 +5666,10 @@ struct ESPNPlayerGameLogProvider {
 
                 let oppDisplay = (isHome ? "vs " : "@ ") + opponent
 
+                // Repurpose threePM/threePA (unused for soccer) to carry the
+                // headline defensive numbers so the gamelog row can show why
+                // a centre-back's FPTS isn't zero on a 0g/0a/0sot night.
+                let defActions = tackles + interceptions + blockedShots + clearances
                 return DFSPlayerGameLog(
                     id: eventID,
                     date: dateStr,
@@ -5640,8 +5684,8 @@ struct ESPNPlayerGameLogProvider {
                     turnovers: totalShots,       // total shots
                     fgm: yellowCards,            // yellow cards
                     fga: redCards,               // red cards
-                    threePM: 0,
-                    threePA: 0,
+                    threePM: tackles,           // tackles
+                    threePA: defActions,        // tackles + ints + blocks + clearances
                     ftm: cleanSheet ? 1 : 0,    // clean sheet flag
                     fta: 0,
                     fantasyPoints: fpts
@@ -5651,6 +5695,51 @@ struct ESPNPlayerGameLogProvider {
 
         // Player wasn't in the roster for this match (didn't play)
         return nil
+    }
+
+    /// Fetches the per-player defensive stats for one event from ESPN's
+    /// core-API. The `/summary?event=` endpoint we use for the basic stats
+    /// returns only a thin slice (goals/assists/shots/cards) — defenders'
+    /// tackles, interceptions, clearances, and blocked shots only show up
+    /// here. Returns zeros on any failure so the caller can degrade gracefully.
+    private func fetchSoccerDefensiveStats(
+        eventID: String,
+        leaguePath: String,
+        teamID: String,
+        athleteID: String
+    ) async -> (tackles: Int, interceptions: Int, blockedShots: Int, clearances: Int) {
+        let urlString = "https://sports.core.api.espn.com/v2/sports/soccer/leagues/\(leaguePath)/events/\(eventID)/competitions/\(eventID)/competitors/\(teamID)/roster/\(athleteID)/statistics/0"
+        guard let url = URL(string: urlString) else { return (0, 0, 0, 0) }
+        var request = URLRequest(url: url)
+        request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+        guard let (data, response) = try? await session.data(for: request),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let splits = json["splits"] as? [String: Any],
+              let categories = splits["categories"] as? [[String: Any]] else {
+            return (0, 0, 0, 0)
+        }
+        var values: [String: Double] = [:]
+        for cat in categories {
+            guard let stats = cat["stats"] as? [[String: Any]] else { continue }
+            for s in stats {
+                guard let name = s["name"] as? String else { continue }
+                if let v = s["value"] as? Double {
+                    values[name] = v
+                } else if let v = s["value"] as? Int {
+                    values[name] = Double(v)
+                }
+            }
+        }
+        // Prefer "totalTackles" over "effectiveTackles" — total includes both
+        // won and lost tackles and is the closer analogue to FanDuel's
+        // "tackle" stat. Defenders get rewarded for attempts even if not all
+        // result in dispossession, mirroring how the live boxscore counts.
+        let tackles = Int(values["totalTackles"] ?? values["effectiveTackles"] ?? 0)
+        let interceptions = Int(values["interceptions"] ?? 0)
+        let blockedShots = Int(values["blockedShots"] ?? 0)
+        let clearances = Int(values["totalClearance"] ?? values["effectiveClearance"] ?? 0)
+        return (tackles, interceptions, blockedShots, clearances)
     }
 
     /// Maps ESPN soccer position abbreviations to DFS positions for game log display
@@ -6538,5 +6627,52 @@ struct ESPNDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
         }
         return results
     }
+}
+
+// MARK: - Private DFS Contests
+
+/// A user-created private contest tied to a public DFS tournament (slate).
+/// Friends join by entering the 6-char invite code. No bots — leaderboard
+/// contains only real human entries.
+struct DFSPrivateContest: Identifiable, Hashable, Codable {
+    let id: UUID
+    let parentTournamentID: String
+    let name: String
+    let createdBy: UUID
+    let inviteCode: String
+    let maxMembers: Int
+    let createdAt: Date
+}
+
+struct DFSPrivateContestMember: Identifiable, Hashable, Codable {
+    let id: UUID
+    let contestID: UUID
+    let userID: UUID
+    let displayName: String
+    let joinedAt: Date
+}
+
+/// A lineup submitted to a private contest. Stored in its own table — entirely
+/// separate from public dfs_entries.
+struct DFSPrivateContestEntry: Identifiable, Hashable, Codable {
+    let id: UUID
+    let contestID: UUID
+    let userID: UUID
+    let displayName: String
+    let lineupPlayerIDs: [String]
+    let lineupTotalPoints: Double
+    let submittedAt: Date
+}
+
+/// Computed leaderboard row for a private contest. Built from private entries
+/// scored against current live player points.
+struct DFSPrivateContestLeaderboardRow: Identifiable, Hashable {
+    let id: UUID            // member user_id
+    let displayName: String
+    let lineupPlayerIDs: [String]
+    let points: Double
+    let rank: Int
+    let isCurrentUser: Bool
+    let hasSubmitted: Bool   // false when member joined but hasn't entered a lineup
 }
 

@@ -13,9 +13,13 @@ struct TennisBracketLiveView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
+                drawTypeToggle
                 statusHeader
                 roundProgressCard
                 yourPicksCard
+                if !viewModel.myGroups.isEmpty {
+                    groupsCard
+                }
                 leaderboardSection
             }
             .padding(.horizontal, 16)
@@ -34,9 +38,14 @@ struct TennisBracketLiveView: View {
             .ignoresSafeArea()
         )
         .task {
-            if !viewModel.hasLiveData {
-                await viewModel.refreshLive()
-            }
+            // Refresh on every appearance. The bracket runs across two weeks of slams
+            // and matches finish hourly — the prior cached state goes stale fast, so
+            // unconditionally re-fetch when the user opens the view.
+            await viewModel.refreshLive()
+        }
+        .refreshable {
+            // Pull-to-refresh for explicit re-fetch.
+            await viewModel.refreshLive()
         }
         .task(id: refreshTick) {
             guard viewModel.isLive else { return }
@@ -46,6 +55,31 @@ struct TennisBracketLiveView: View {
         }
         .sheet(item: $selectedEntry) { entry in
             entryDetailSheet(entry)
+        }
+    }
+
+    // MARK: - Draw Type Toggle
+
+    private var drawTypeToggle: some View {
+        HStack(spacing: 8) {
+            ForEach(DrawType.allCases) { dt in
+                Button {
+                    if viewModel.selectedDrawType != dt {
+                        viewModel.selectedDrawType = dt
+                        viewModel.hasAttemptedLoad = false
+                        Task { await viewModel.loadTournament() }
+                    }
+                } label: {
+                    Text(dt.shortName)
+                        .font(.caption.weight(.bold))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(viewModel.selectedDrawType == dt ? brandPurple : Color.gray.opacity(0.15))
+                        .foregroundStyle(viewModel.selectedDrawType == dt ? .white : .primary)
+                        .clipShape(Capsule())
+                }
+            }
+            Spacer()
         }
     }
 
@@ -264,6 +298,47 @@ struct TennisBracketLiveView: View {
             case .pending: return .gray.opacity(0.08)
             }
         }
+    }
+
+    // MARK: - Groups Card
+
+    private var groupsCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Image(systemName: "person.3.fill")
+                    .foregroundStyle(brandPurple)
+                Text("My Groups")
+                    .font(.headline.weight(.bold))
+                Spacer()
+            }
+            ForEach(viewModel.myGroups) { group in
+                NavigationLink {
+                    TennisBracketGroupDetailView(viewModel: viewModel, group: group)
+                } label: {
+                    HStack {
+                        Text(group.name)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Text("View Standings")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(brandPurple)
+                        Image(systemName: "chevron.right")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 12)
+                    .background(brandPurple.opacity(0.06))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(14)
+        .background(.white)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .shadow(color: .black.opacity(0.04), radius: 4, y: 2)
     }
 
     // MARK: - Leaderboard

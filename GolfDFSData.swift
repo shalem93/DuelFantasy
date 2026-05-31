@@ -186,8 +186,12 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
             throw NSError(domain: "GolfDFS", code: 4, userInfo: [NSLocalizedDescriptionKey: "No competition data in event"])
         }
 
-        // Fetch DraftKings salaries (primary) and OWGR world rankings (fallback)
-        async let dkSalariesTask = RotoGrindersSalaryProvider.shared.fetchSalaries(sport: "golf", maxClassicSalary: 15000)
+        // Fetch DraftKings salaries (primary) and OWGR world rankings (fallback).
+        // Golf doesn't have showdown/single-game DK variants — the salary
+        // distribution is naturally compressed (top ~$11k, bottom ~$6k), so
+        // the median-based showdown detection in the salary provider was
+        // false-positive-ing every PGA fetch. Pass nil to skip that gate.
+        async let dkSalariesTask = RotoGrindersSalaryProvider.shared.fetchSalaries(sport: "golf", maxClassicSalary: nil)
         async let worldRankTask = fetchOWGRRankings()
         let dkSalaries = await dkSalariesTask
         let worldRankByName = await worldRankTask
@@ -199,6 +203,9 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
         }
 
         // Map competitors to DFSPlayer using DK salary (primary) or world ranking (fallback)
+        var dkMatched = 0
+        var dkMissed = 0
+        var sampleMisses: [String] = []
         let players: [DFSPlayer] = competition.competitors.compactMap { competitor in
             let athleteID = competitor.id
             let name = competitor.athlete.displayName
@@ -209,8 +216,13 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
             let salary: Int
             if let dkSalary = RotoGrindersSalaryProvider.lookupSalary(espnName: name, in: dkSalaries) {
                 salary = dkSalary
+                dkMatched += 1
             } else {
                 salary = salaryFromWorldRanking(worldRank, athleteID: athleteID)
+                dkMissed += 1
+                if sampleMisses.count < 5 && !dkSalaries.isEmpty {
+                    sampleMisses.append(name)
+                }
             }
 
             let projection = projectedGolfPoints(salary: salary, worldRank: worldRank, athleteID: athleteID)
@@ -224,6 +236,12 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
                 projectedPoints: projection,
                 gameID: event.id
             )
+        }
+        if !dkSalaries.isEmpty {
+            print("[GolfDFS] DK match rate: \(dkMatched)/\(dkMatched + dkMissed) — sample misses: \(sampleMisses.joined(separator: ", "))")
+            if let firstKey = dkSalaries.keys.sorted().first {
+                print("[GolfDFS] Sample DK keys: \(dkSalaries.keys.sorted().prefix(5).joined(separator: ", ")) (first=\(firstKey))")
+            }
         }
 
         guard !players.isEmpty else {
@@ -403,11 +421,15 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
             baseSalary = 6000                               // $6,000 floor
         }
 
-        // Stable per-player jitter (±150) so same-tier golfers get slightly different prices
-        guard !athleteID.isEmpty else { return baseSalary }
+        // Stable per-player jitter so same-tier golfers get slightly different
+        // prices. Round to $100 increments so the OWGR fallback matches DK's
+        // pricing style (no $10,504 weirdness — always $10,500 / $10,600 etc).
+        guard !athleteID.isEmpty else { return (baseSalary / 100) * 100 }
         let stableHash = athleteID.utf8.reduce(0) { ($0 &* 31) &+ Int($1) }
-        let jitter = abs(stableHash % 300) - 150
-        return max(6000, min(15000, baseSalary + jitter))
+        let jitterSteps = (abs(stableHash) % 3) - 1   // -1, 0, or +1 — three buckets
+        let jittered = baseSalary + jitterSteps * 100
+        let snapped = (jittered / 100) * 100
+        return max(6000, min(15000, snapped))
     }
 
     /// Projected DraftKings fantasy points based on salary tier and world ranking.

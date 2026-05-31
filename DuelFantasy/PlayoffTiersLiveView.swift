@@ -156,20 +156,42 @@ struct PlayoffTiersLiveView: View {
     // MARK: - Your Picks Card
 
     private var yourPicksCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("YOUR PICKS")
-                .font(.caption.weight(.bold))
-                .foregroundStyle(.secondary)
+        Group {
+            if viewModel.userPicks.isEmpty {
+                noEntryCard
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("YOUR PICKS")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.secondary)
 
-            ForEach(1...6, id: \.self) { tier in
-                if let player = viewModel.userPicks[tier] {
-                    pickRow(tier: tier, player: player)
-                } else {
-                    emptyPickRow(tier: tier)
+                    ForEach(1...6, id: \.self) { tier in
+                        if let player = viewModel.userPicks[tier] {
+                            pickRow(tier: tier, player: player)
+                        } else {
+                            emptyPickRow(tier: tier)
+                        }
+                    }
                 }
+                .padding(16)
+                .background(.white)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .shadow(color: .black.opacity(0.05), radius: 4, y: 2)
             }
         }
-        .padding(16)
+    }
+
+    private var noEntryCard: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "ticket")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+            Text("You didn't enter this contest")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(14)
         .background(.white)
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .shadow(color: .black.opacity(0.05), radius: 4, y: 2)

@@ -994,6 +994,16 @@ final class SoccerTiersViewModel {
             return nil
         }
         let tournamentID = tournament?.id ?? SoccerTiersTournament.currentTournamentID()
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Idempotency: if the user already has a group with this exact name,
+        // return it instead of double-creating. The DB also enforces a unique
+        // (created_by, name) constraint as a hard guarantee.
+        if let existing = myGroups.first(where: { $0.name.caseInsensitiveCompare(trimmedName) == .orderedSame }) {
+            groupError = "You already have a group named \"\(existing.name)\"."
+            return existing
+        }
+
         isCreatingGroup = true
         groupError = nil
 
@@ -1002,7 +1012,7 @@ final class SoccerTiersViewModel {
             let code = generateInviteCode()
             let record = try await SupabaseService.shared.createSoccerTiersGroup(
                 tournamentID: tournamentID,
-                name: name,
+                name: trimmedName,
                 createdBy: uid,
                 inviteCode: code,
                 maxMembers: 20,

@@ -16,6 +16,8 @@ struct GolfTiersLobbyView: View {
         VStack(spacing: 0) {
             if viewModel.isLoading && !viewModel.hasAttemptedLoad {
                 loadingView
+            } else if viewModel.noActiveMajor {
+                noActiveMajorView
             } else if viewModel.isSettled {
                 settledView
             } else if viewModel.isLocked {
@@ -366,6 +368,42 @@ struct GolfTiersLobbyView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// Shown when today isn't inside any major's pick/play/results window.
+    /// Tells the user the next upcoming major and a rough countdown, without
+    /// dragging them into a tiers UI for whichever regular Tour event ESPN
+    /// happens to be running.
+    private var noActiveMajorView: some View {
+        let upcomingID: String? = {
+            let now = Date()
+            let cal = Calendar.current
+            let year = cal.component(.year, from: now)
+            let mmdd = cal.component(.month, from: now) * 100 + cal.component(.day, from: now)
+            let sequence: [(id: String, opens: Int)] = [
+                ("masters-\(year)", 402),
+                ("pga-championship-\(year)", 507),
+                ("us-open-\(year)", 611),
+                ("the-open-\(year)", 709),
+                ("masters-\(year + 1)", 402 + 10000)
+            ]
+            return sequence.first(where: { $0.opens > mmdd })?.id
+        }()
+        let upcomingTitle = upcomingID.map { GolfTiersTournament.majorTitle(for: $0) } ?? "Next Major"
+        return VStack(spacing: 16) {
+            Image(systemName: "flag.checkered")
+                .font(.system(size: 44))
+                .foregroundStyle(darkGreen.opacity(0.7))
+            Text("No Major This Week")
+                .font(.title3.weight(.semibold))
+            Text("Golf Tiers is only active during the four PGA majors. Check back when \(upcomingTitle) opens for picks.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+
     private func errorView(_ message: String) -> some View {
         VStack(spacing: 16) {
             Image(systemName: "exclamationmark.triangle")
@@ -391,7 +429,13 @@ struct GolfTiersLobbyView: View {
         ScrollView {
             VStack(spacing: 16) {
                 // ── Current settled tournament hero ──
-                if let tournament = viewModel.tournament, tournament.isSettled {
+                // Only show the big FINAL banner when the major just wrapped (within ~5 days
+                // of lockTime). After that the result belongs in the MAJOR RESULTS history
+                // list below — keeping the hero around makes the lobby feel stuck on a
+                // tournament that ended weeks ago.
+                if let tournament = viewModel.tournament, tournament.isSettled,
+                   let lock = tournament.lockTime,
+                   Date().timeIntervalSince(lock) < 5 * 24 * 3600 {
                     settledHeroCard(tournament)
                 }
 
@@ -436,18 +480,18 @@ struct GolfTiersLobbyView: View {
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 20)
-                } else {
-                    VStack(spacing: 8) {
+                } else if !(viewModel.tournament?.isSettled ?? false) {
+                    // Only show the empty "no results yet" state when there isn't already a
+                    // current-settled hero card above — otherwise the hero IS the result.
+                    HStack(spacing: 10) {
                         Image(systemName: "trophy")
-                            .font(.title2).foregroundStyle(.secondary)
+                            .foregroundStyle(.secondary)
                         Text("No major results yet")
-                            .font(.subheadline).foregroundStyle(.secondary)
-                        Text("Play a Golf Major Tiers contest to see your results here")
-                            .font(.caption).foregroundStyle(.tertiary)
-                            .multilineTextAlignment(.center)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        Spacer()
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 24)
+                    .padding(14)
                     .background(Color(.systemGray6))
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
@@ -650,12 +694,14 @@ struct GolfTiersLobbyView: View {
                     .font(.caption.weight(.bold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button {
-                    showCreateGroup = true
-                } label: {
-                    Label("Create", systemImage: "plus.circle.fill")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(darkGreen)
+                if viewModel.canCreateGroups {
+                    Button {
+                        showCreateGroup = true
+                    } label: {
+                        Label("Create", systemImage: "plus.circle.fill")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(darkGreen)
+                    }
                 }
                 Button {
                     showJoinGroup = true
@@ -665,22 +711,23 @@ struct GolfTiersLobbyView: View {
                         .foregroundStyle(darkGreen)
                 }
             }
+            if !viewModel.canCreateGroups, let reason = viewModel.groupCreationLockReason {
+                Text(reason)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 4)
+            }
 
             if viewModel.myGroups.isEmpty {
-                VStack(spacing: 8) {
+                HStack(spacing: 10) {
                     Image(systemName: "person.3")
-                        .font(.title2)
                         .foregroundStyle(.secondary)
                     Text("No groups yet")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-                    Text("Create a group and invite friends to compete")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .multilineTextAlignment(.center)
+                    Spacer()
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 20)
+                .padding(14)
                 .background(Color(.systemGray6))
                 .clipShape(RoundedRectangle(cornerRadius: 12))
             } else {

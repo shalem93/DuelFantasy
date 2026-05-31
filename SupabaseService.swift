@@ -519,10 +519,25 @@ struct ChatMessageRecord: Codable, Identifiable {
 struct BotFieldEntry: Codable {
     let name: String
     let playerIDs: [String]
+    let playerSalaries: [String: Int]?
 
     enum CodingKeys: String, CodingKey {
         case name
         case playerIDs = "player_ids"
+        case playerSalaries = "player_salaries"
+    }
+
+    init(name: String, playerIDs: [String], playerSalaries: [String: Int]? = nil) {
+        self.name = name
+        self.playerIDs = playerIDs
+        self.playerSalaries = playerSalaries
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(name, forKey: .name)
+        try container.encode(playerIDs, forKey: .playerIDs)
+        try container.encodeIfPresent(playerSalaries, forKey: .playerSalaries)
     }
 }
 
@@ -963,6 +978,97 @@ struct SoccerTiersGroupMemberRecord: Codable, Identifiable {
             userID: userID,
             displayName: displayName,
             joinedAt: joinedAt ?? Date()
+        )
+    }
+}
+
+// MARK: - DFS Private Contest Records
+
+struct DFSPrivateContestRecord: Codable, Identifiable {
+    let id: String
+    let parentTournamentID: String
+    let name: String
+    let createdBy: String
+    let inviteCode: String
+    let maxMembers: Int
+    let createdAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case parentTournamentID = "parent_tournament_id"
+        case createdBy = "created_by"
+        case inviteCode = "invite_code"
+        case maxMembers = "max_members"
+        case createdAt = "created_at"
+    }
+
+    func toModel() -> DFSPrivateContest {
+        DFSPrivateContest(
+            id: UUID(uuidString: id) ?? UUID(),
+            parentTournamentID: parentTournamentID,
+            name: name,
+            createdBy: UUID(uuidString: createdBy) ?? UUID(),
+            inviteCode: inviteCode,
+            maxMembers: maxMembers,
+            createdAt: createdAt ?? Date()
+        )
+    }
+}
+
+struct DFSPrivateContestMemberRecord: Codable, Identifiable {
+    let id: String
+    let contestID: String
+    let userID: String
+    let displayName: String
+    let joinedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case contestID = "contest_id"
+        case userID = "user_id"
+        case displayName = "display_name"
+        case joinedAt = "joined_at"
+    }
+
+    func toModel() -> DFSPrivateContestMember {
+        DFSPrivateContestMember(
+            id: UUID(uuidString: id) ?? UUID(),
+            contestID: UUID(uuidString: contestID) ?? UUID(),
+            userID: UUID(uuidString: userID) ?? UUID(),
+            displayName: displayName,
+            joinedAt: joinedAt ?? Date()
+        )
+    }
+}
+
+struct DFSPrivateContestEntryRecord: Codable, Identifiable {
+    let id: String
+    let contestID: String
+    let userID: String
+    let displayName: String?
+    let lineupPlayerIDs: [String]
+    let lineupTotalPoints: Double?
+    let submittedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case contestID = "contest_id"
+        case userID = "user_id"
+        case displayName = "display_name"
+        case lineupPlayerIDs = "lineup_player_ids"
+        case lineupTotalPoints = "lineup_total_points"
+        case submittedAt = "submitted_at"
+    }
+
+    func toModel() -> DFSPrivateContestEntry {
+        DFSPrivateContestEntry(
+            id: UUID(uuidString: id) ?? UUID(),
+            contestID: UUID(uuidString: contestID) ?? UUID(),
+            userID: UUID(uuidString: userID) ?? UUID(),
+            displayName: displayName ?? "Player",
+            lineupPlayerIDs: lineupPlayerIDs,
+            lineupTotalPoints: lineupTotalPoints ?? 0,
+            submittedAt: submittedAt ?? Date()
         )
     }
 }
@@ -2050,6 +2156,18 @@ final class SupabaseService {
         return counts
     }
 
+    /// Remove a user from a Best Ball league. Only safe before the draft starts —
+    /// the caller is expected to gate on league status.
+    func leaveLeague(leagueID: String, userID: String, accessToken: String) async throws {
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/bestball_members"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "league_id", value: "eq.\(leagueID)"),
+            URLQueryItem(name: "user_id", value: "eq.\(userID)")
+        ]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        try await requestNoResponse(url: url, method: "DELETE", body: Optional<String>.none, bearerToken: accessToken)
+    }
+
     func joinLeague(leagueID: String, userID: String, displayName: String, slotIndex: Int, accessToken: String) async throws -> BestBallMemberRecord {
         var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/bestball_members"), resolvingAgainstBaseURL: false)
         components?.queryItems = [URLQueryItem(name: "select", value: "*")]
@@ -3026,13 +3144,19 @@ final class SupabaseService {
     }
 
     func fetchMyPlayoffTiersGroups(userID: String, tournamentID: String, accessToken: String) async throws -> [PlayoffTiersGroupRecord] {
-        // Fetch group IDs the user is a member of
+        // Lean wire type: select=group_id alone can't decode into the full
+        // PlayoffTiersGroupMemberRecord (non-optional id/user_id/display_name),
+        // which silently empties myGroups.
+        struct MemberGroupID: Codable {
+            let groupID: String
+            enum CodingKeys: String, CodingKey { case groupID = "group_id" }
+        }
         let membersURL = SupabaseConfig.url.appending(path: "/rest/v1/playoff_tiers_group_members")
             .appending(queryItems: [
                 URLQueryItem(name: "user_id", value: "eq.\(userID)"),
                 URLQueryItem(name: "select", value: "group_id")
             ])
-        let memberships: [PlayoffTiersGroupMemberRecord] = try await request(url: membersURL, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+        let memberships: [MemberGroupID] = try await request(url: membersURL, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
         guard !memberships.isEmpty else { return [] }
 
         let groupIDs = memberships.map { $0.groupID }
@@ -3354,21 +3478,30 @@ final class SupabaseService {
     }
 
     func fetchMySoccerTiersGroups(userID: String, tournamentID: String, accessToken: String) async throws -> [SoccerTiersGroupRecord] {
-        // Fetch group IDs the user is a member of
+        // Lean wire type: the query selects only group_id, so the full
+        // SoccerTiersGroupMemberRecord (with non-optional id/user_id/display_name)
+        // would fail to decode and leave myGroups silently empty.
+        struct MemberGroupID: Codable {
+            let groupID: String
+            enum CodingKeys: String, CodingKey { case groupID = "group_id" }
+        }
         let membersURL = SupabaseConfig.url.appending(path: "/rest/v1/soccer_tiers_group_members")
             .appending(queryItems: [
                 URLQueryItem(name: "user_id", value: "eq.\(userID)"),
                 URLQueryItem(name: "select", value: "group_id")
             ])
-        let memberships: [SoccerTiersGroupMemberRecord] = try await request(url: membersURL, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+        let memberships: [MemberGroupID] = try await request(url: membersURL, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
         guard !memberships.isEmpty else { return [] }
 
         let groupIDs = memberships.map { $0.groupID }
-        // Fetch groups that match these IDs and the tournament
+        // Fetch all groups the user is a member of (across tournaments).
+        // The lobby may load a different tournament than the one the group
+        // was created against (e.g. FIFA Club World Cup vs. World Cup 2026),
+        // so filtering by tournament_id here was hiding valid groups.
+        _ = tournamentID
         let groupsURL = SupabaseConfig.url.appending(path: "/rest/v1/soccer_tiers_groups")
             .appending(queryItems: [
                 URLQueryItem(name: "id", value: "in.(\(groupIDs.joined(separator: ",")))"),
-                URLQueryItem(name: "tournament_id", value: "eq.\(tournamentID)"),
                 URLQueryItem(name: "select", value: "*"),
                 URLQueryItem(name: "order", value: "created_at.desc")
             ])
@@ -3435,6 +3568,171 @@ final class SupabaseService {
             ])
         let results: [SoccerTiersGroupMemberRecord] = try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
         return results.count
+    }
+
+    // MARK: - DFS Private Contests
+
+    func createDFSPrivateContest(
+        parentTournamentID: String,
+        name: String,
+        createdBy: String,
+        inviteCode: String,
+        maxMembers: Int,
+        accessToken: String
+    ) async throws -> DFSPrivateContestRecord {
+        let url = SupabaseConfig.url.appending(path: "/rest/v1/dfs_private_contests")
+        struct Payload: Codable {
+            let parentTournamentID: String
+            let name: String
+            let createdBy: String
+            let inviteCode: String
+            let maxMembers: Int
+            enum CodingKeys: String, CodingKey {
+                case name
+                case parentTournamentID = "parent_tournament_id"
+                case createdBy = "created_by"
+                case inviteCode = "invite_code"
+                case maxMembers = "max_members"
+            }
+        }
+        let payload = Payload(parentTournamentID: parentTournamentID, name: name, createdBy: createdBy, inviteCode: inviteCode, maxMembers: maxMembers)
+        let results: [DFSPrivateContestRecord] = try await request(url: url, method: "POST", body: payload, bearerToken: accessToken, preferReturn: "representation")
+        guard let contest = results.first else {
+            throw NSError(domain: "Supabase", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to create private contest"])
+        }
+        return contest
+    }
+
+    func fetchMyDFSPrivateContests(userID: String, accessToken: String) async throws -> [DFSPrivateContestRecord] {
+        // Lean wire type: select=contest_id alone can't decode into the full
+        // DFSPrivateContestMemberRecord (non-optional id/user_id/display_name),
+        // which would silently empty myPrivateContests on every fetch.
+        struct MemberContestID: Codable {
+            let contestID: String
+            enum CodingKeys: String, CodingKey { case contestID = "contest_id" }
+        }
+        let membersURL = SupabaseConfig.url.appending(path: "/rest/v1/dfs_private_contest_members")
+            .appending(queryItems: [
+                URLQueryItem(name: "user_id", value: "eq.\(userID)"),
+                URLQueryItem(name: "select", value: "contest_id")
+            ])
+        let memberships: [MemberContestID] = try await request(url: membersURL, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+        guard !memberships.isEmpty else { return [] }
+
+        let contestIDs = memberships.map { $0.contestID }
+        let contestsURL = SupabaseConfig.url.appending(path: "/rest/v1/dfs_private_contests")
+            .appending(queryItems: [
+                URLQueryItem(name: "id", value: "in.(\(contestIDs.joined(separator: ",")))"),
+                URLQueryItem(name: "select", value: "*"),
+                URLQueryItem(name: "order", value: "created_at.desc")
+            ])
+        return try await request(url: contestsURL, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+    }
+
+    func fetchDFSPrivateContestByInviteCode(code: String, accessToken: String) async throws -> DFSPrivateContestRecord? {
+        let url = SupabaseConfig.url.appending(path: "/rest/v1/dfs_private_contests")
+            .appending(queryItems: [
+                URLQueryItem(name: "invite_code", value: "eq.\(code)"),
+                URLQueryItem(name: "select", value: "*")
+            ])
+        let results: [DFSPrivateContestRecord] = try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+        return results.first
+    }
+
+    func joinDFSPrivateContest(contestID: String, userID: String, displayName: String, accessToken: String) async throws {
+        let url = SupabaseConfig.url.appending(path: "/rest/v1/dfs_private_contest_members")
+        struct Payload: Codable {
+            let contestID: String
+            let userID: String
+            let displayName: String
+            enum CodingKeys: String, CodingKey {
+                case contestID = "contest_id"
+                case userID = "user_id"
+                case displayName = "display_name"
+            }
+        }
+        try await requestNoResponse(url: url, method: "POST", body: Payload(contestID: contestID, userID: userID, displayName: displayName), bearerToken: accessToken, preferUpsert: true)
+    }
+
+    func fetchDFSPrivateContestMembers(contestID: String, accessToken: String) async throws -> [DFSPrivateContestMemberRecord] {
+        let url = SupabaseConfig.url.appending(path: "/rest/v1/dfs_private_contest_members")
+            .appending(queryItems: [
+                URLQueryItem(name: "contest_id", value: "eq.\(contestID)"),
+                URLQueryItem(name: "select", value: "*"),
+                URLQueryItem(name: "order", value: "joined_at.asc")
+            ])
+        return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+    }
+
+    func leaveDFSPrivateContest(contestID: String, userID: String, accessToken: String) async throws {
+        let url = SupabaseConfig.url.appending(path: "/rest/v1/dfs_private_contest_members")
+            .appending(queryItems: [
+                URLQueryItem(name: "contest_id", value: "eq.\(contestID)"),
+                URLQueryItem(name: "user_id", value: "eq.\(userID)")
+            ])
+        try await requestNoResponse(url: url, method: "DELETE", body: Optional<String>.none, bearerToken: accessToken)
+    }
+
+    func deleteDFSPrivateContest(contestID: String, accessToken: String) async throws {
+        let url = SupabaseConfig.url.appending(path: "/rest/v1/dfs_private_contests")
+            .appending(queryItems: [
+                URLQueryItem(name: "id", value: "eq.\(contestID)")
+            ])
+        try await requestNoResponse(url: url, method: "DELETE", body: Optional<String>.none, bearerToken: accessToken)
+    }
+
+    func submitDFSPrivateContestEntry(
+        contestID: String,
+        userID: String,
+        displayName: String,
+        lineupPlayerIDs: [String],
+        lineupTotalPoints: Double,
+        accessToken: String
+    ) async throws {
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/dfs_private_contest_entries"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "on_conflict", value: "contest_id,user_id")]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        struct Payload: Codable {
+            let contestID: String
+            let userID: String
+            let displayName: String
+            let lineupPlayerIDs: [String]
+            let lineupTotalPoints: Double
+            enum CodingKeys: String, CodingKey {
+                case contestID = "contest_id"
+                case userID = "user_id"
+                case displayName = "display_name"
+                case lineupPlayerIDs = "lineup_player_ids"
+                case lineupTotalPoints = "lineup_total_points"
+            }
+        }
+        try await requestNoResponse(url: url, method: "POST", body: Payload(
+            contestID: contestID, userID: userID, displayName: displayName,
+            lineupPlayerIDs: lineupPlayerIDs, lineupTotalPoints: lineupTotalPoints
+        ), bearerToken: accessToken, preferUpsert: true)
+    }
+
+    func fetchDFSPrivateContestEntries(contestID: String, accessToken: String) async throws -> [DFSPrivateContestEntryRecord] {
+        let url = SupabaseConfig.url.appending(path: "/rest/v1/dfs_private_contest_entries")
+            .appending(queryItems: [
+                URLQueryItem(name: "contest_id", value: "eq.\(contestID)"),
+                URLQueryItem(name: "select", value: "*"),
+                URLQueryItem(name: "order", value: "submitted_at.asc")
+            ])
+        return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+    }
+
+    func updateDFSPrivateContestEntryScore(entryID: String, totalPoints: Double, accessToken: String) async throws {
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/dfs_private_contest_entries"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "id", value: "eq.\(entryID)")]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        struct Payload: Codable {
+            let lineupTotalPoints: Double
+            enum CodingKeys: String, CodingKey {
+                case lineupTotalPoints = "lineup_total_points"
+            }
+        }
+        try await requestNoResponse(url: url, method: "PATCH", body: Payload(lineupTotalPoints: totalPoints), bearerToken: accessToken)
     }
 
     // MARK: - Tennis Bracket Tournaments
@@ -4012,16 +4310,33 @@ final class SupabaseService {
     }
 
     func updateGolfTiersEntryScores(entries: [(id: String, totalPoints: Double, rank: Int)], accessToken: String) async throws {
-        for entry in entries {
-            var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/golf_tiers_entries"), resolvingAgainstBaseURL: false)
-            components?.queryItems = [URLQueryItem(name: "id", value: "eq.\(entry.id)")]
-            guard let url = components?.url else { continue }
-            struct Payload: Codable {
-                let totalPoints: Double
-                let rank: Int
-                enum CodingKeys: String, CodingKey { case totalPoints = "total_points"; case rank }
+        // Parallelize PATCHes with a bounded concurrency. 1000 sequential PATCHes would
+        // take 1-5 minutes; this finishes in a few seconds and is resilient to single
+        // failures (each task swallows its error so partial progress is still committed).
+        struct Payload: Codable {
+            let totalPoints: Double
+            let rank: Int
+            enum CodingKeys: String, CodingKey { case totalPoints = "total_points"; case rank }
+        }
+        let concurrency = 16
+        var index = 0
+        while index < entries.count {
+            let batch = Array(entries[index..<min(index + concurrency, entries.count)])
+            await withTaskGroup(of: Void.self) { group in
+                for entry in batch {
+                    group.addTask {
+                        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/golf_tiers_entries"), resolvingAgainstBaseURL: false)
+                        components?.queryItems = [URLQueryItem(name: "id", value: "eq.\(entry.id)")]
+                        guard let url = components?.url else { return }
+                        try? await self.requestNoResponse(
+                            url: url, method: "PATCH",
+                            body: Payload(totalPoints: entry.totalPoints, rank: entry.rank),
+                            bearerToken: accessToken
+                        )
+                    }
+                }
             }
-            try await requestNoResponse(url: url, method: "PATCH", body: Payload(totalPoints: entry.totalPoints, rank: entry.rank), bearerToken: accessToken)
+            index += concurrency
         }
     }
 

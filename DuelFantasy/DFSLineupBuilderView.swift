@@ -65,6 +65,9 @@ struct DFSLineupBuilderView: View {
                     let currentBase = viewModel.baseTournamentID(current.id)
                     let currentType = current.tournamentType
                     var entries: [DFSEntryRecord] = []
+
+                    // 1. Public entries from `userEntryRecords` — the original
+                    //    behavior.
                     for (tid, records) in viewModel.userEntryRecords {
                         let entryBase = viewModel.baseTournamentID(tid)
                         if current.isSingleGame {
@@ -83,6 +86,41 @@ struct DFSLineupBuilderView: View {
                             }
                         }
                     }
+
+                    // 2. Private contest entries submitted by the user that
+                    //    share the same slate/game as the builder. Converted
+                    //    into synthetic DFSEntryRecord rows so they slot into
+                    //    the same import menu and `loadLineupFromEntry` path.
+                    guard let myUUID = viewModel.userID.flatMap(UUID.init(uuidString:)) else { return entries }
+                    for contest in viewModel.myPrivateContests {
+                        let parentBase = viewModel.baseTournamentID(contest.parentTournamentID)
+                        let parentType = DFSTournamentType.from(tournamentID: contest.parentTournamentID)
+                        let matches: Bool = {
+                            if current.isSingleGame {
+                                let currentGamePart = currentBase.components(separatedBy: "-").dropLast().joined(separator: "-")
+                                let parentGamePart = parentBase.components(separatedBy: "-").dropLast().joined(separator: "-")
+                                return parentGamePart == currentGamePart
+                            }
+                            return parentType == currentType
+                        }()
+                        guard matches else { continue }
+                        guard let entry = (viewModel.privateContestEntries[contest.id] ?? []).first(where: { $0.userID == myUUID }) else { continue }
+                        // Skip if we'd re-import the lineup the user is already editing
+                        guard entry.lineupPlayerIDs != viewModel.selectedPlayers.map(\.id) else { continue }
+                        let synthetic = DFSEntryRecord(
+                            id: "priv-\(contest.id.uuidString)",
+                            tournamentID: contest.parentTournamentID,
+                            userID: viewModel.userID ?? "",
+                            lineupPlayerIDs: entry.lineupPlayerIDs,
+                            submittedAt: entry.submittedAt,
+                            lineupTotalPoints: entry.lineupTotalPoints,
+                            displayName: "Private: \(contest.name)",
+                            lineupPlayerSalaries: nil,
+                            lineupPlayerNames: nil,
+                            lineupNumber: nil
+                        )
+                        entries.append(synthetic)
+                    }
                     return entries
                 }()
                 if !allSlateEntries.isEmpty {
@@ -91,11 +129,18 @@ struct DFSLineupBuilderView: View {
                             Button {
                                 viewModel.loadLineupFromEntry(entry)
                             } label: {
-                                let num = entry.lineupNumber ?? (idx + 1)
-                                let names = (entry.lineupPlayerNames ?? []).prefix(3).map {
-                                    $0.components(separatedBy: " ").last ?? $0
-                                }.joined(separator: ", ")
-                                Label("Lineup #\(num) — \(names)…", systemImage: "doc.on.clipboard")
+                                let isPrivate = entry.id.hasPrefix("priv-")
+                                let label: String = {
+                                    if isPrivate, let name = entry.displayName {
+                                        return name
+                                    }
+                                    let num = entry.lineupNumber ?? (idx + 1)
+                                    let names = (entry.lineupPlayerNames ?? []).prefix(3).map {
+                                        $0.components(separatedBy: " ").last ?? $0
+                                    }.joined(separator: ", ")
+                                    return "Lineup #\(num) — \(names)…"
+                                }()
+                                Label(label, systemImage: isPrivate ? "lock.shield" : "doc.on.clipboard")
                             }
                         }
                     } label: {
@@ -228,6 +273,11 @@ struct DFSLineupBuilderView: View {
 
     private func filledSlot(player: DFSPlayer, isMVP: Bool = false, isSingleGame: Bool = false) -> some View {
         let badgeLabel = isMVP ? "MVP" : (isSingleGame ? "FLEX" : player.position)
+        // Use the player's canonical salary (already applied via selectedPlayers
+        // override) so the chip matches the running cap total and the price
+        // that gets stored on submit. Raw activePlayers can drift post-contest
+        // creation, which would make the chip show a different price than the
+        // lobby/saved view.
         let displaySalary = isMVP ? Int(Double(player.salary) * 1.5) : player.salary
         return VStack(spacing: 4) {
             ZStack(alignment: .topTrailing) {
@@ -425,7 +475,7 @@ struct DFSLineupBuilderView: View {
                                             .background(Color.green)
                                             .clipShape(RoundedRectangle(cornerRadius: 3))
                                     }
-                                    if player.isConfirmedActive && (viewModel.sport == "EPL" || viewModel.sport == "UCL") {
+                                    if player.isConfirmedActive && (viewModel.sport == "EPL" || viewModel.sport == "UCL" || viewModel.sport == "WC") {
                                         Text("CS")
                                             .font(.system(size: 9, weight: .bold))
                                             .foregroundStyle(.white)
@@ -556,6 +606,16 @@ struct DFSLineupBuilderView: View {
                 dismiss()
             } label: {
                 Text({
+                    // Routing to a private contest? Use a clearer label that
+                    // mentions the private contest rather than a public
+                    // "Lineup #N" — the two flows store entries separately.
+                    if let priv = viewModel.activePrivateContest {
+                        let hasExisting: Bool = {
+                            guard let me = viewModel.userID.flatMap(UUID.init(uuidString:)) else { return false }
+                            return (viewModel.privateContestEntries[priv.id] ?? []).contains(where: { $0.userID == me })
+                        }()
+                        return hasExisting ? "Save Private Lineup" : "Submit Private Lineup"
+                    }
                     if let editNum = viewModel.editingLineupNumber {
                         return "Save Lineup #\(editNum)"
                     }

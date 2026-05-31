@@ -8,6 +8,12 @@ struct GolfTiersSettledDetailView: View {
     @State private var userResult: DFSTournamentResultRecord?
     @State private var isLoading = true
     @State private var visibleCount = 25
+    /// Final score-to-par per golfer ID, populated from ESPN when we recompute.
+    @State private var golferScores: [String: Int] = [:]
+    /// Final status per golfer (cut/withdrawn/active) for display badges.
+    @State private var golferStatuses: [String: GolfTiersGolfer.GolferStatus] = [:]
+    /// Currently expanded leaderboard row — taps open this in a sheet.
+    @State private var selectedEntry: GolfTiersEntryRecord?
 
     private var darkGreen: Color {
         Color(red: 0.05, green: 0.45, blue: 0.25)
@@ -49,6 +55,68 @@ struct GolfTiersSettledDetailView: View {
         .navigationTitle(tournamentRecord.title)
         .navigationBarTitleDisplayMode(.inline)
         .task { await loadData() }
+        .sheet(item: $selectedEntry) { entry in
+            entryDetailSheet(entry)
+        }
+    }
+
+    // MARK: - Entry Detail Sheet (bot/user roster view)
+
+    @ViewBuilder
+    private func entryDetailSheet(_ entry: GolfTiersEntryRecord) -> some View {
+        let sortedPicks = entry.picks.sorted { $0.tier < $1.tier }
+        // Same Best 4 of 6 highlighting as the user's own picks card.
+        let scoredOnly = sortedPicks.compactMap { p -> (pickID: String, score: Int)? in
+            guard let s = golferScores[p.playerID] else { return nil }
+            return (p.playerID, s)
+        }.sorted { $0.score < $1.score }
+        let countingIDs = Set(scoredOnly.prefix(4).map { $0.pickID })
+
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack {
+                        Text(entry.entryName)
+                            .font(.title3.weight(.bold))
+                        Spacer()
+                        Text(GolfTiersEngine.scoreToParDisplay(Int(entry.totalPoints)))
+                            .font(.title3.weight(.heavy).monospacedDigit())
+                            .foregroundStyle(golferScoreColor(Int(entry.totalPoints)))
+                    }
+                    HStack {
+                        if entry.rank > 0 {
+                            Text("Rank #\(entry.rank)")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Text("Best 4 of 6 count")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Divider()
+
+                    ForEach(sortedPicks, id: \.tier) { pick in
+                        pickRow(
+                            pick: pick,
+                            tier: pick.tier,
+                            score: golferScores[pick.playerID],
+                            status: golferStatuses[pick.playerID],
+                            isCounting: countingIDs.contains(pick.playerID)
+                        )
+                    }
+                }
+                .padding(16)
+            }
+            .navigationTitle("Lineup")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { selectedEntry = nil }
+                }
+            }
+        }
     }
 
     // MARK: - Data Loading
@@ -71,6 +139,149 @@ struct GolfTiersSettledDetailView: View {
             userResult = try? await SupabaseService.shared.fetchUserGolfTiersResult(
                 tournamentID: tournamentRecord.id, userID: uid, accessToken: token
             )
+        }
+
+        let placeholderCount = entries.filter { $0.totalPoints == 0 }.count
+        let zeroScoreFraction = entries.isEmpty ? 0.0 : Double(placeholderCount) / Double(entries.count)
+        print("[GolfTiers Detail] placeholderCount=\(placeholderCount)/\(entries.count) (\(Int(zeroScoreFraction * 100))%), espnEventID=\(tournamentRecord.espnEventID ?? "nil"), lockTime=\(tournamentRecord.lockTime?.description ?? "nil")")
+
+        // Phase 1: ALWAYS fetch ESPN snapshot so we have per-golfer scores for the YOUR
+        // PICKS card and the bot-roster sheet, even when entries already have proper
+        // totals stored in Supabase (no full recompute needed).
+        var espnSnapshot: GolfTiersScoreSnapshot?
+        if !entries.isEmpty, let eventID = tournamentRecord.espnEventID {
+            let center = tournamentRecord.lockTime ?? tournamentRecord.createdAt
+            espnSnapshot = try? await ESPNGolfTiersDataProvider().fetchLiveScores(
+                espnEventID: eventID, searchAroundDate: center
+            )
+            if let snap = espnSnapshot {
+                golferScores = snap.golferScoresToPar
+                golferStatuses = snap.golferStatuses
+                print("[GolfTiers Detail] Populated golferScores: \(snap.golferScoresToPar.count) scores")
+            }
+        }
+
+        // Phase 2: if dfs_tournament_results was empty for this user, synthesize a
+        // userResult from the user's entry row so the hero card has data to render.
+        if userResult == nil, let uid = viewModel.userID,
+           let userEntryRec = entries.first(where: { $0.userID == uid && !$0.isBot }),
+           userEntryRec.rank > 0 || userEntryRec.totalPoints != 0 {
+            let rrDelta = GolfTiersEngine.rrDelta(forRank: userEntryRec.rank, totalEntries: entries.count)
+            userResult = DFSTournamentResultRecord(
+                id: userEntryRec.id, tournamentID: tournamentRecord.id, userID: uid,
+                entryName: userEntryRec.entryName,
+                lineupPlayerIDs: userEntryRec.picks.map { $0.playerID },
+                lineupPlayerNames: userEntryRec.picks.map { $0.playerName },
+                totalPoints: userEntryRec.totalPoints,
+                playerPoints: nil, playerSalaries: nil,
+                rank: userEntryRec.rank, rrDelta: rrDelta,
+                isCurrentUser: true, isBot: false, createdAt: userEntryRec.createdAt
+            )
+            print("[GolfTiers Detail] Synthesized userResult from entry: rank=\(userEntryRec.rank), pts=\(userEntryRec.totalPoints)")
+        }
+
+        // Phase 3: full leaderboard recompute when entries still look placeholder-y.
+        if !entries.isEmpty, zeroScoreFraction > 0.25,
+           let eventID = tournamentRecord.espnEventID {
+            let center = tournamentRecord.lockTime ?? tournamentRecord.createdAt
+            print("[GolfTiers Detail] Attempting recompute via ESPN event=\(eventID) center=\(center?.description ?? "nil")")
+            let snapshot: GolfTiersScoreSnapshot?
+            if let prefetched = espnSnapshot {
+                snapshot = prefetched
+            } else {
+                snapshot = try? await ESPNGolfTiersDataProvider().fetchLiveScores(
+                    espnEventID: eventID, searchAroundDate: center
+                )
+            }
+            if let snapshot {
+                print("[GolfTiers Detail] ESPN returned snapshot with \(snapshot.golferScoresToPar.count) golfer scores")
+                golferScores = snapshot.golferScoresToPar
+                golferStatuses = snapshot.golferStatuses
+            let modelEntries: [GolfTiersEntry] = entries.map { rec in
+                GolfTiersEntry(
+                    id: UUID(uuidString: rec.id) ?? UUID(),
+                    tournamentID: rec.tournamentID, userID: rec.userID,
+                    entryName: rec.entryName, picks: rec.picks.map { $0.toModel() },
+                    totalScore: Int(rec.totalPoints), rank: rec.rank,
+                    isBot: rec.isBot, isCurrentUser: rec.userID == viewModel.userID
+                )
+            }
+            let board = GolfTiersEngine.computeLeaderboard(
+                entries: modelEntries,
+                golferScores: snapshot.golferScoresToPar,
+                golferStatuses: snapshot.golferStatuses,
+                golferRoundScores: snapshot.golferRoundScores,
+                currentUserID: viewModel.userID
+            )
+            // Key by lowercase UUID so Supabase's lowercase ids match (Swift UUID.uuidString
+            // is uppercase). Without this, every overlay lookup missed and bots stayed at 0.
+            var scoreByID: [String: (Int, Double)] = [:]
+            for entry in board {
+                scoreByID[entry.id.uuidString.lowercased()] = (entry.rank, Double(entry.totalScore))
+            }
+            entries = entries.map { rec in
+                guard let recomputed = scoreByID[rec.id.lowercased()] else { return rec }
+                return GolfTiersEntryRecord(
+                    id: rec.id, tournamentID: rec.tournamentID, userID: rec.userID,
+                    entryName: rec.entryName, picks: rec.picks,
+                    totalPoints: recomputed.1, rank: recomputed.0,
+                    isBot: rec.isBot, createdAt: rec.createdAt
+                )
+            }
+            // Populate the userResult so the hero card shows real RANK/SCORE even if the
+            // dfs_tournament_results upsert hasn't completed yet.
+            if let userBoard = board.first(where: { $0.isCurrentUser }),
+               let uid = viewModel.userID {
+                let totalEntries = board.count
+                let rrDelta = GolfTiersEngine.rrDelta(forRank: userBoard.rank, totalEntries: totalEntries)
+                // Overwrite the locally-loaded userResult unconditionally so the hero card
+                // matches the freshly recomputed leaderboard (the stored result might be
+                // from an earlier partial settle with a different rank/score).
+                userResult = DFSTournamentResultRecord(
+                    id: userResult?.id ?? UUID().uuidString,
+                    tournamentID: tournamentRecord.id, userID: uid,
+                    entryName: userBoard.entryName,
+                    lineupPlayerIDs: userBoard.picks.map { $0.playerID },
+                    lineupPlayerNames: userBoard.picks.map { $0.playerName },
+                    totalPoints: Double(userBoard.totalScore),
+                    playerPoints: nil, playerSalaries: nil,
+                    rank: userBoard.rank, rrDelta: rrDelta,
+                    isCurrentUser: true, isBot: false, createdAt: Date()
+                )
+                // Persist the recomputed values so the lobby's MAJOR RESULTS row matches
+                // this detail view. Without this, the history cell keeps showing the stale
+                // partial-settle values forever.
+                let token = viewModel.accessToken
+                if let token {
+                    let updates = board.map { entry in
+                        (id: entry.id.uuidString.lowercased(), totalPoints: Double(entry.totalScore), rank: entry.rank)
+                    }
+                    Task.detached {
+                        try? await SupabaseService.shared.updateGolfTiersEntryScores(
+                            entries: updates, accessToken: token
+                        )
+                    }
+                    let supabaseResult = DFSTournamentResultRecord(
+                        id: UUID().uuidString, tournamentID: tournamentRecord.id, userID: uid,
+                        entryName: userBoard.entryName,
+                        lineupPlayerIDs: userBoard.picks.map { $0.playerID },
+                        lineupPlayerNames: userBoard.picks.map { $0.playerName },
+                        totalPoints: Double(userBoard.totalScore),
+                        playerPoints: nil, playerSalaries: nil,
+                        rank: userBoard.rank, rrDelta: rrDelta,
+                        isCurrentUser: true, isBot: false, createdAt: Date()
+                    )
+                    let resultTid = tournamentRecord.id
+                    Task.detached {
+                        try? await SupabaseService.shared.upsertTournamentResults(
+                            tournamentID: resultTid, results: [supabaseResult], accessToken: token
+                        )
+                    }
+                }
+            }
+            } else {
+                print("[GolfTiers Detail] ESPN snapshot was nil — recompute skipped")
+            }
         }
 
         isLoading = false
@@ -192,8 +403,24 @@ struct GolfTiersSettledDetailView: View {
 
             if let entry = userEntry {
                 let sortedPicks = entry.picks.sorted { $0.tier < $1.tier }
+                // Best 4 of 6: the 4 lowest scores count. Highlight them so the user
+                // can see which picks carried the lineup.
+                let scoredPicks = sortedPicks.map { p -> (pick: GolfTiersPickData, score: Int?) in
+                    (p, golferScores[p.playerID])
+                }
+                let scoredOnly = scoredPicks.compactMap { item -> (pickID: String, score: Int)? in
+                    guard let s = item.score else { return nil }
+                    return (item.pick.playerID, s)
+                }.sorted { $0.score < $1.score }
+                let countingIDs = Set(scoredOnly.prefix(4).map { $0.pickID })
                 ForEach(sortedPicks, id: \.tier) { pick in
-                    pickRow(pick: pick, tier: pick.tier)
+                    pickRow(
+                        pick: pick,
+                        tier: pick.tier,
+                        score: golferScores[pick.playerID],
+                        status: golferStatuses[pick.playerID],
+                        isCounting: countingIDs.contains(pick.playerID)
+                    )
                 }
             } else if let result = userResult {
                 // Fall back to result data if entry not found
@@ -234,8 +461,18 @@ struct GolfTiersSettledDetailView: View {
         .shadow(color: .black.opacity(0.05), radius: 4, y: 2)
     }
 
-    private func pickRow(pick: GolfTiersPickData, tier: Int) -> some View {
-        HStack(spacing: 10) {
+    private func pickRow(
+        pick: GolfTiersPickData,
+        tier: Int,
+        score: Int? = nil,
+        status: GolfTiersGolfer.GolferStatus? = nil,
+        isCounting: Bool = false
+    ) -> some View {
+        // Whole row dims when the pick doesn't count (Best 4 of 6) so the name reads
+        // as "didn't help" too — not just the score.
+        let dimOpacity: Double = (score != nil && !isCounting) ? 0.4 : 1.0
+
+        return HStack(spacing: 10) {
             Text("T\(tier)")
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(.white)
@@ -258,8 +495,40 @@ struct GolfTiersSettledDetailView: View {
             }
 
             Spacer()
+
+            // Cut / withdrawn badges
+            if status == .cut {
+                Text("CUT")
+                    .font(.system(size: 9, weight: .heavy))
+                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    .background(Color.red.opacity(0.15))
+                    .foregroundStyle(.red)
+                    .clipShape(Capsule())
+            } else if status == .withdrawn {
+                Text("WD")
+                    .font(.system(size: 9, weight: .heavy))
+                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    .background(Color.orange.opacity(0.15))
+                    .foregroundStyle(.orange)
+                    .clipShape(Capsule())
+            }
+
+            // Score-to-par display
+            if let score {
+                Text(GolfTiersEngine.scoreToParDisplay(score))
+                    .font(.subheadline.weight(.bold).monospacedDigit())
+                    .foregroundStyle(golferScoreColor(score))
+                    .frame(minWidth: 36, alignment: .trailing)
+            }
         }
         .padding(.vertical, 4)
+        .opacity(dimOpacity)
+    }
+
+    private func golferScoreColor(_ score: Int) -> Color {
+        if score < 0 { return darkGreen }
+        if score == 0 { return .primary }
+        return Color.red.opacity(0.85)
     }
 
     // MARK: - Leaderboard
@@ -313,7 +582,10 @@ struct GolfTiersSettledDetailView: View {
                     let userInVisible = userEntry.map { u in visible.contains(where: { $0.id == u.id }) } ?? true
 
                     ForEach(Array(visible.enumerated()), id: \.element.id) { index, entry in
-                        leaderboardRow(entry, displayRank: entry.rank > 0 ? entry.rank : index + 1)
+                        Button { selectedEntry = entry } label: {
+                            leaderboardRow(entry, displayRank: entry.rank > 0 ? entry.rank : index + 1)
+                        }
+                        .buttonStyle(.plain)
                         if index < visible.count - 1 {
                             Divider().padding(.leading, 42)
                         }
@@ -330,7 +602,10 @@ struct GolfTiersSettledDetailView: View {
                         }
                         .padding(.vertical, 4)
                         Divider()
-                        leaderboardRow(user, displayRank: user.rank > 0 ? user.rank : sorted.count)
+                        Button { selectedEntry = user } label: {
+                            leaderboardRow(user, displayRank: user.rank > 0 ? user.rank : sorted.count)
+                        }
+                        .buttonStyle(.plain)
                     }
 
                     // Load More

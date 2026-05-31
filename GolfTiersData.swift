@@ -349,7 +349,9 @@ struct ESPNGolfTiersDataProvider: Sendable {
     // MARK: Live Scores
 
     /// Fetch live scores for all golfers in the tournament field.
-    func fetchLiveScores(espnEventID: String) async throws -> GolfTiersScoreSnapshot {
+    /// `searchAroundDate` lets us look up past majors via the dates-based scoreboard
+    /// query (ESPN's current scoreboard only carries the active week's event).
+    func fetchLiveScores(espnEventID: String, searchAroundDate: Date? = nil) async throws -> GolfTiersScoreSnapshot {
         // Try main scoreboard first
         guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard") else {
             throw NSError(domain: "GolfTiers", code: 1)
@@ -362,10 +364,80 @@ struct ESPNGolfTiersDataProvider: Sendable {
 
         let scoreboard = try JSONDecoder().decode(ESPNPGAScoreboardResponse.self, from: data)
 
-        // Find matching event by ID — only fall back to first event if IDs are unknown
-        guard let event = scoreboard.events.first(where: { $0.id == espnEventID })
-                ?? (espnEventID.isEmpty ? scoreboard.events.first : nil),
-              let competition = event.competitions.first else {
+        var resolvedEvent: ESPNPGAEvent? = scoreboard.events.first(where: { $0.id == espnEventID })
+            ?? (espnEventID.isEmpty ? scoreboard.events.first : nil)
+
+        // Fallback A: direct event URL (works for any past event without needing the date).
+        if resolvedEvent == nil, !espnEventID.isEmpty {
+            print("[GolfTiers ESPN] enter fallback for event \(espnEventID) — trying direct URLs")
+            for candidateURL in [
+                "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard/\(espnEventID)",
+                "https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard?event=\(espnEventID)",
+                "https://site.web.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard?event=\(espnEventID)"
+            ] {
+                guard let url = URL(string: candidateURL) else { continue }
+                do {
+                    let (dData, dResp) = try await session.data(from: url)
+                    let status = (dResp as? HTTPURLResponse)?.statusCode ?? -1
+                    print("[GolfTiers ESPN] \(candidateURL) → status=\(status) bytes=\(dData.count)")
+                    guard (200..<300).contains(status) else { continue }
+                    // Only accept the response if it actually contains our event ID.
+                    // Falling back to the first event was wrong — that's the current
+                    // week's event (different golfers) and produces 0 scores against
+                    // historical picks.
+                    if let dBoard = try? JSONDecoder().decode(ESPNPGAScoreboardResponse.self, from: dData),
+                       let match = dBoard.events.first(where: { $0.id == espnEventID }) {
+                        resolvedEvent = match
+                        break
+                    }
+                    // Try alternate shape: response with the event at the root level.
+                    if let rootEvent = try? JSONDecoder().decode(ESPNPGAEvent.self, from: dData),
+                       rootEvent.id == espnEventID {
+                        resolvedEvent = rootEvent
+                        break
+                    }
+                    struct SingleEventResponse: Codable { let events: [ESPNPGAEvent]? }
+                    if let single = try? JSONDecoder().decode(SingleEventResponse.self, from: dData),
+                       let match = single.events?.first(where: { $0.id == espnEventID }) {
+                        resolvedEvent = match
+                        break
+                    }
+                } catch {
+                    print("[GolfTiers ESPN] \(candidateURL) → error=\(error.localizedDescription)")
+                }
+            }
+        }
+
+        // Fallback B: dates-based scoreboard for past majors. ESPN's scoreboard supports
+        // `dates=YYYYMMDD`; we walk a wide window around the tournament's lockTime AND
+        // around the same week one year earlier (in case the stored event ID maps to a
+        // real-world year that doesn't match the simulator/test date).
+        if resolvedEvent == nil, !espnEventID.isEmpty, let centerDate = searchAroundDate {
+            let cal = Calendar.current
+            let fmt = DateFormatter()
+            fmt.dateFormat = "yyyyMMdd"
+            fmt.timeZone = TimeZone(identifier: "America/New_York")
+            let candidateCenters: [Date] = [
+                centerDate,
+                cal.date(byAdding: .year, value: -1, to: centerDate),
+                cal.date(byAdding: .year, value: -2, to: centerDate)
+            ].compactMap { $0 }
+            outer: for center in candidateCenters {
+                for offset in -3...7 {
+                    guard let date = cal.date(byAdding: .day, value: offset, to: center) else { continue }
+                    let dateKey = fmt.string(from: date)
+                    guard let dateURL = URL(string: "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard?dates=\(dateKey)"),
+                          let (dData, dResp) = try? await session.data(from: dateURL),
+                          let dHttp = dResp as? HTTPURLResponse, (200..<300).contains(dHttp.statusCode),
+                          let dBoard = try? JSONDecoder().decode(ESPNPGAScoreboardResponse.self, from: dData) else { continue }
+                    if let match = dBoard.events.first(where: { $0.id == espnEventID }) {
+                        resolvedEvent = match
+                        break outer
+                    }
+                }
+            }
+        }
+        guard let event = resolvedEvent, let competition = event.competitions.first else {
             throw NSError(domain: "GolfTiers", code: 3, userInfo: [NSLocalizedDescriptionKey: "Event \(espnEventID) not found on ESPN scoreboard"])
         }
 
@@ -751,30 +823,57 @@ extension JSONDecoder {
 // MARK: - Tournament ID Helper
 
 extension GolfTiersTournament {
-    /// Detect current/next major based on calendar date
+    /// Detect current/next major based on calendar date.
+    /// Cutoffs are the Sunday of each major's final round — once we pass that,
+    /// we roll forward to the next upcoming major.
     static func currentMajorID() -> String {
         let calendar = Calendar.current
         let year = calendar.component(.year, from: Date())
         let month = calendar.component(.month, from: Date())
         let day = calendar.component(.day, from: Date())
+        // Combined MMDD key for easy single-axis comparison. Previous logic used
+        // `month <= 5` which would always select PGA Championship for ANY date in May,
+        // including May 26+ when PGA is already settled.
+        let mmdd = month * 100 + day
 
-        // Masters: April (typically first full week)
-        // PGA Championship: May (third week)
-        // US Open: June (third week)
-        // The Open: July (third week)
+        if mmdd <= 420 { return "masters-\(year)" }            // Masters: ~April 2nd full week, Sun = ~Apr 12-20
+        if mmdd <= 525 { return "pga-championship-\(year)" }   // PGA Championship: ~May 3rd week, Sun = ~May 18-25
+        if mmdd <= 625 { return "us-open-\(year)" }            // US Open: ~June 3rd week, Sun = ~Jun 18-22
+        if mmdd <= 725 { return "the-open-\(year)" }           // The Open: ~July 3rd week, Sun = ~Jul 19-22
+        // Off-season: show next year's Masters
+        return "masters-\(year + 1)"
+    }
 
-        if month <= 4 || (month == 4 && day <= 20) {
-            return "masters-\(year)"
-        } else if month <= 5 || (month == 5 && day <= 25) {
-            return "pga-championship-\(year)"
-        } else if month <= 6 || (month == 6 && day <= 25) {
-            return "us-open-\(year)"
-        } else if month <= 7 || (month == 7 && day <= 25) {
-            return "the-open-\(year)"
-        } else {
-            // Off-season: show next year's Masters
-            return "masters-\(year + 1)"
+    /// Window-based predicate: returns the major ID **only** when today falls
+    /// inside that major's pick/play/results window. Outside of any window
+    /// (e.g. May 29 — between PGA Championship and US Open), returns nil so
+    /// the lobby can render a "no active major this week" state instead of
+    /// running golf tiers against a regular PGA Tour event.
+    ///
+    /// Windows: roughly 1 week of pre-pick time + 4 days of play + a few days
+    /// of result review. Major weeks are seeded to the actual PGA calendar
+    /// week-of so we don't accidentally label, e.g., the Charles Schwab
+    /// Challenge as "US Open".
+    static func activeMajorID(now: Date = Date()) -> String? {
+        let calendar = Calendar.current
+        let year = calendar.component(.year, from: now)
+        let month = calendar.component(.month, from: now)
+        let day = calendar.component(.day, from: now)
+        let mmdd = month * 100 + day
+
+        // (id, opens, closes) — MMDD bounds. Pick window opens about a week
+        // before play; results window stays open ~3 days post-finish. Outside
+        // any window, no major is active.
+        let windows: [(id: String, opens: Int, closes: Int)] = [
+            ("masters-\(year)",          402, 418),  // Masters: Thu-Sun ~Apr 9-12
+            ("pga-championship-\(year)", 507, 523),  // PGA: Thu-Sun ~May 14-17
+            ("us-open-\(year)",          611, 627),  // US Open: Thu-Sun ~Jun 18-21
+            ("the-open-\(year)",         709, 725)   // The Open: Thu-Sun ~Jul 16-19
+        ]
+        for w in windows where mmdd >= w.opens && mmdd <= w.closes {
+            return w.id
         }
+        return nil
     }
 
     static func majorTitle(for id: String) -> String {

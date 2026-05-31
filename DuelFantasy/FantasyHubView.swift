@@ -102,7 +102,66 @@ struct FantasyHubView: View {
                     .buttonStyle(.plain)
                 }
 
-                if hasActiveTennisBracket {
+                // Show ATP and WTA brackets as separate cards when the user has submitted
+                // both. Tapping switches the viewModel's draw type, then navigates.
+                if tennisBracketViewModel.hasSubmittedATP {
+                    NavigationLink {
+                        if tennisBracketViewModel.isLocked {
+                            TennisBracketLiveView(viewModel: tennisBracketViewModel)
+                        } else {
+                            TennisBracketLobbyView(viewModel: tennisBracketViewModel)
+                        }
+                    } label: {
+                        let isAtpLoaded = tennisBracketViewModel.selectedDrawType == .atp
+                        let live = isAtpLoaded ? tennisBracketViewModel.isLive : tennisBracketViewModel.atpIsLive
+                        let rank = isAtpLoaded ? tennisBracketViewModel.userRank : tennisBracketViewModel.atpUserRank
+                        activeContestCard(
+                            title: "\(Calendar.current.component(.year, from: Date())) \(tennisBracketViewModel.selectedGrandSlam.displayName) — ATP",
+                            subtitle: live ? "LIVE" : "PICKS SUBMITTED",
+                            icon: "tennisball.fill",
+                            isLive: live,
+                            detail: rank.map { "Rank #\($0)" }
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .simultaneousGesture(TapGesture().onEnded {
+                        if tennisBracketViewModel.selectedDrawType != .atp {
+                            tennisBracketViewModel.selectedDrawType = .atp
+                            tennisBracketViewModel.hasAttemptedLoad = false
+                            Task { await tennisBracketViewModel.loadTournament() }
+                        }
+                    })
+                }
+                if tennisBracketViewModel.hasSubmittedWTA {
+                    NavigationLink {
+                        if tennisBracketViewModel.isLocked {
+                            TennisBracketLiveView(viewModel: tennisBracketViewModel)
+                        } else {
+                            TennisBracketLobbyView(viewModel: tennisBracketViewModel)
+                        }
+                    } label: {
+                        let isWtaLoaded = tennisBracketViewModel.selectedDrawType == .wta
+                        let live = isWtaLoaded ? tennisBracketViewModel.isLive : tennisBracketViewModel.wtaIsLive
+                        let rank = isWtaLoaded ? tennisBracketViewModel.userRank : tennisBracketViewModel.wtaUserRank
+                        activeContestCard(
+                            title: "\(Calendar.current.component(.year, from: Date())) \(tennisBracketViewModel.selectedGrandSlam.displayName) — WTA",
+                            subtitle: live ? "LIVE" : "PICKS SUBMITTED",
+                            icon: "tennisball.fill",
+                            isLive: live,
+                            detail: rank.map { "Rank #\($0)" }
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .simultaneousGesture(TapGesture().onEnded {
+                        if tennisBracketViewModel.selectedDrawType != .wta {
+                            tennisBracketViewModel.selectedDrawType = .wta
+                            tennisBracketViewModel.hasAttemptedLoad = false
+                            Task { await tennisBracketViewModel.loadTournament() }
+                        }
+                    })
+                }
+                // Fallback: if neither dual flag is set but the active flag says yes, show one card.
+                if !tennisBracketViewModel.hasSubmittedATP && !tennisBracketViewModel.hasSubmittedWTA && hasActiveTennisBracket {
                     NavigationLink {
                         if tennisBracketViewModel.isLocked {
                             TennisBracketLiveView(viewModel: tennisBracketViewModel)
@@ -432,7 +491,6 @@ struct FantasyHubView: View {
                 .foregroundStyle(.secondary)
                 .padding(.leading, 4)
 
-            comingSoonCard(title: "NBA Bracket Challenge", icon: "chart.bar.doc.horizontal", sport: "NBA")
             comingSoonCard(title: "NFL Survivor Pool", icon: "football.fill", sport: "NFL")
         }
     }

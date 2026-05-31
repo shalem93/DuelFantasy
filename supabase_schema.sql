@@ -1080,5 +1080,152 @@ drop policy if exists "st_group_members_delete_own" on public.soccer_tiers_group
 create policy "st_group_members_delete_own" on public.soccer_tiers_group_members
 for delete using (auth.uid() = user_id);
 
+-- One-shot cleanup: delete duplicate soccer_tiers_groups rows where the same
+-- creator made two groups with the same name (caused by transient retries on
+-- create). Keep the earliest row; FK cascade drops orphaned memberships.
+delete from public.soccer_tiers_groups g1
+where exists (
+    select 1 from public.soccer_tiers_groups g2
+    where g2.created_by = g1.created_by
+      and g2.name = g1.name
+      and g2.created_at < g1.created_at
+);
+
+-- Prevent a single user from creating two groups with the same name.
+alter table public.soccer_tiers_groups drop constraint if exists soccer_tiers_groups_creator_name_unique;
+alter table public.soccer_tiers_groups add constraint soccer_tiers_groups_creator_name_unique unique (created_by, name);
+
+-- ──────────────────────────────────────────────
+-- DFS PRIVATE CONTESTS (invite-code based, no bots)
+-- ──────────────────────────────────────────────
+
+create table if not exists public.dfs_private_contests (
+    id uuid primary key default gen_random_uuid(),
+    parent_tournament_id text not null references public.dfs_tournaments(id) on delete cascade,
+    name text not null,
+    created_by uuid not null references auth.users(id) on delete cascade,
+    invite_code text not null unique,
+    max_members integer not null default 20,
+    created_at timestamptz not null default now()
+);
+
+create table if not exists public.dfs_private_contest_members (
+    id uuid primary key default gen_random_uuid(),
+    contest_id uuid not null references public.dfs_private_contests(id) on delete cascade,
+    user_id uuid not null references auth.users(id) on delete cascade,
+    display_name text not null,
+    joined_at timestamptz not null default now(),
+    unique (contest_id, user_id)
+);
+
+create table if not exists public.dfs_private_contest_entries (
+    id uuid primary key default gen_random_uuid(),
+    contest_id uuid not null references public.dfs_private_contests(id) on delete cascade,
+    user_id uuid not null references auth.users(id) on delete cascade,
+    display_name text not null default 'Player',
+    lineup_player_ids text[] not null,
+    lineup_total_points double precision not null default 0,
+    submitted_at timestamptz not null default now(),
+    unique (contest_id, user_id)
+);
+
+-- Indexes
+create index if not exists idx_dfs_pc_parent on public.dfs_private_contests(parent_tournament_id);
+create index if not exists idx_dfs_pc_invite on public.dfs_private_contests(invite_code);
+create index if not exists idx_dfs_pc_members_contest on public.dfs_private_contest_members(contest_id);
+create index if not exists idx_dfs_pc_members_user on public.dfs_private_contest_members(user_id);
+create index if not exists idx_dfs_pc_entries_contest on public.dfs_private_contest_entries(contest_id);
+create index if not exists idx_dfs_pc_entries_user on public.dfs_private_contest_entries(user_id);
+
+-- Grants
+grant select, insert, update, delete on table public.dfs_private_contests to authenticated, service_role;
+grant select on table public.dfs_private_contests to anon;
+grant select, insert, update, delete on table public.dfs_private_contest_members to authenticated, service_role;
+grant select on table public.dfs_private_contest_members to anon;
+grant select, insert, update, delete on table public.dfs_private_contest_entries to authenticated, service_role;
+grant select on table public.dfs_private_contest_entries to anon;
+
+-- RLS
+alter table public.dfs_private_contests enable row level security;
+alter table public.dfs_private_contest_members enable row level security;
+alter table public.dfs_private_contest_entries enable row level security;
+
+drop policy if exists "dfs_pc_select_all" on public.dfs_private_contests;
+create policy "dfs_pc_select_all" on public.dfs_private_contests
+for select using (true);
+
+drop policy if exists "dfs_pc_insert_auth" on public.dfs_private_contests;
+create policy "dfs_pc_insert_auth" on public.dfs_private_contests
+for insert with check (auth.uid() = created_by);
+
+drop policy if exists "dfs_pc_update_owner" on public.dfs_private_contests;
+create policy "dfs_pc_update_owner" on public.dfs_private_contests
+for update using (auth.uid() = created_by);
+
+drop policy if exists "dfs_pc_delete_owner" on public.dfs_private_contests;
+create policy "dfs_pc_delete_owner" on public.dfs_private_contests
+for delete using (auth.uid() = created_by);
+
+drop policy if exists "dfs_pc_members_select_all" on public.dfs_private_contest_members;
+create policy "dfs_pc_members_select_all" on public.dfs_private_contest_members
+for select using (true);
+
+drop policy if exists "dfs_pc_members_insert_self" on public.dfs_private_contest_members;
+create policy "dfs_pc_members_insert_self" on public.dfs_private_contest_members
+for insert with check (auth.uid() = user_id);
+
+drop policy if exists "dfs_pc_members_delete_self" on public.dfs_private_contest_members;
+create policy "dfs_pc_members_delete_self" on public.dfs_private_contest_members
+for delete using (auth.uid() = user_id);
+
+drop policy if exists "dfs_pc_entries_select_all" on public.dfs_private_contest_entries;
+create policy "dfs_pc_entries_select_all" on public.dfs_private_contest_entries
+for select using (true);
+
+drop policy if exists "dfs_pc_entries_insert_self" on public.dfs_private_contest_entries;
+create policy "dfs_pc_entries_insert_self" on public.dfs_private_contest_entries
+for insert with check (auth.uid() = user_id);
+
+drop policy if exists "dfs_pc_entries_update_self" on public.dfs_private_contest_entries;
+create policy "dfs_pc_entries_update_self" on public.dfs_private_contest_entries
+for update using (auth.uid() = user_id);
+
+drop policy if exists "dfs_pc_entries_delete_self" on public.dfs_private_contest_entries;
+create policy "dfs_pc_entries_delete_self" on public.dfs_private_contest_entries
+for delete using (auth.uid() = user_id);
+
+-- ============================================================================
+-- Tennis Odds Cache
+-- ============================================================================
+-- Cached tennis moneylines fetched from Pinnacle (or fallback provider) by a
+-- Supabase Edge Function on a cron schedule. The iOS app reads from this
+-- table instead of hitting the Odds API directly — one external call every
+-- few minutes regardless of user count.
+-- ============================================================================
+
+create table if not exists public.tennis_odds (
+    id text primary key,                          -- pinnacle matchup id
+    league text not null,                         -- 'atp' | 'wta' | 'tennis'
+    home_team text not null,
+    away_team text not null,
+    home_moneyline integer,                       -- american odds, e.g. -150 / +120
+    away_moneyline integer,
+    starts_at timestamptz not null,
+    fetched_at timestamptz not null default now(),
+    source text not null default 'pinnacle'
+);
+
+create index if not exists tennis_odds_starts_at_idx on public.tennis_odds(starts_at);
+create index if not exists tennis_odds_league_idx on public.tennis_odds(league);
+
+alter table public.tennis_odds enable row level security;
+
+drop policy if exists "tennis_odds_select_all" on public.tennis_odds;
+create policy "tennis_odds_select_all" on public.tennis_odds
+for select using (true);
+
+-- Writes only via the edge function (service-role key), not from clients.
+-- No insert/update/delete policies → those are blocked for normal users.
+
 select pg_notify('pgrst', 'reload schema');
 

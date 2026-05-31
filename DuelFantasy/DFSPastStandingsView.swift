@@ -33,7 +33,9 @@ struct DFSPastStandingsView: View {
         result.tournamentId?.contains("-sg-") == true
     }
     private var isSoccer: Bool {
-        result.tournamentId?.hasPrefix("epl-") == true || result.tournamentId?.hasPrefix("ucl-") == true
+        result.tournamentId?.hasPrefix("epl-") == true
+            || result.tournamentId?.hasPrefix("ucl-") == true
+            || result.tournamentId?.hasPrefix("wc-") == true
     }
     private var sportLabel: String {
         if isGolf { return "PGA" }
@@ -42,6 +44,7 @@ struct DFSPastStandingsView: View {
         if result.tournamentId?.hasPrefix("ncaam-") == true { return "NCAAM" }
         if result.tournamentId?.hasPrefix("epl-") == true { return "EPL" }
         if result.tournamentId?.hasPrefix("ucl-") == true { return "UCL" }
+        if result.tournamentId?.hasPrefix("wc-") == true { return "WC" }
         return "NBA"
     }
 
@@ -1422,7 +1425,7 @@ struct DFSPastStandingsView: View {
     /// Resolve player name from stored name, falling back to box score stats
     /// and then to other result records that may have this player's name resolved.
     private func resolvePlayerName(storedName: String, playerID: String) -> String {
-        let rawPrefixes = ["nba-", "pga-", "ncaam-", "mlb-", "nhl-", "epl-", "ucl-"]
+        let rawPrefixes = ["nba-", "pga-", "ncaam-", "mlb-", "nhl-", "epl-", "ucl-", "wc-"]
         let needsResolution = rawPrefixes.contains(where: { storedName.hasPrefix($0) })
             || storedName == "Unknown" || storedName.isEmpty
 
@@ -1444,6 +1447,11 @@ struct DFSPastStandingsView: View {
                         return otherName
                     }
                 }
+            }
+            // Last chance: cached preloaded player info — survives pool refresh /
+            // DNP filtering, so a player who never played still has their name.
+            if let cached = viewModel.cachedPlayerName(for: playerID) {
+                return cached
             }
             return "Unknown"
         }

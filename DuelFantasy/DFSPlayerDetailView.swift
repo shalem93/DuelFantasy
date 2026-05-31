@@ -27,7 +27,7 @@ struct DFSPlayerDetailView: View {
 
     private var isUFC: Bool { player.id.hasPrefix("ufc-") }
 
-    private var isSoccer: Bool { player.id.hasPrefix("epl-") || player.id.hasPrefix("ucl-") }
+    private var isSoccer: Bool { player.id.hasPrefix("epl-") || player.id.hasPrefix("ucl-") || player.id.hasPrefix("wc-") }
     private var isSoccerGK: Bool {
         isSoccer && player.position.uppercased() == "GK"
     }
@@ -904,7 +904,10 @@ struct DFSPlayerDetailView: View {
 
     private var soccerOutfieldGameLogContent: some View {
         VStack(spacing: 0) {
-            // Header: DATE, OPP, MIN, G, A, SOT, SH, YC, FPTS
+            // Header: DATE, OPP, MIN, G, A, SOT, TK, DEF, YC, FPTS
+            // TK = tackles, DEF = total defensive actions (tackles + interceptions
+            // + blocked shots + clearances). Replaces the SH column — total shots
+            // duplicate the SOT signal and didn't help judge defenders.
             HStack(spacing: 0) {
                 Text("DATE")
                     .frame(width: 38, alignment: .leading)
@@ -918,10 +921,12 @@ struct DFSPlayerDetailView: View {
                     .frame(width: 22, alignment: .trailing)
                 Text("SOT")
                     .frame(width: 30, alignment: .trailing)
-                Text("SH")
-                    .frame(width: 26, alignment: .trailing)
-                Text("YC")
+                Text("TK")
                     .frame(width: 24, alignment: .trailing)
+                Text("DEF")
+                    .frame(width: 28, alignment: .trailing)
+                Text("YC")
+                    .frame(width: 22, alignment: .trailing)
                 Spacer()
                 Text("FPTS")
                     .frame(width: 42, alignment: .trailing)
@@ -937,7 +942,8 @@ struct DFSPlayerDetailView: View {
     }
 
     private func soccerOutfieldRow(_ log: DFSPlayerGameLog) -> some View {
-        // points=Goals, rebounds=SOT, assists=Assists, turnovers=TotalShots, fgm=YC, fga=RC
+        // points=Goals, rebounds=SOT, assists=Assists, threePM=tackles,
+        // threePA=defensive actions sum, fgm=YC, fga=RC
         HStack(spacing: 0) {
             Text(log.date)
                 .frame(width: 38, alignment: .leading)
@@ -956,10 +962,16 @@ struct DFSPlayerDetailView: View {
                 .foregroundStyle(log.assists > 0 ? brandPurple : .primary)
             Text("\(log.rebounds)")
                 .frame(width: 30, alignment: .trailing)
-            Text("\(log.turnovers)")
-                .frame(width: 26, alignment: .trailing)
-            Text("\(log.fgm)")
+            Text("\(log.threePM)")
                 .frame(width: 24, alignment: .trailing)
+                .fontWeight(log.threePM >= 3 ? .bold : .regular)
+                .foregroundStyle(log.threePM >= 3 ? brandPurple : .primary)
+            Text("\(log.threePA)")
+                .frame(width: 28, alignment: .trailing)
+                .fontWeight(log.threePA >= 6 ? .bold : .regular)
+                .foregroundStyle(log.threePA >= 6 ? brandPurple : .primary)
+            Text("\(log.fgm)")
+                .frame(width: 22, alignment: .trailing)
                 .foregroundStyle(log.fgm > 0 ? .yellow : .primary)
             Spacer()
             Text(String(format: "%.1f", log.fantasyPoints))

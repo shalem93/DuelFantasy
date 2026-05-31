@@ -272,6 +272,37 @@ final class BestBallViewModel {
             )
             await loadOpenLeagues()
             await loadMyLeagues()
+            // Refresh the detail view if it's currently showing this league —
+            // otherwise the Members list and Joined count stay stale until
+            // the user manually navigates away and back.
+            if currentLeague?.id == league.id {
+                await loadLeagueDetail(leagueID: league.id)
+            }
+            return true
+        } catch {
+            self.error = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Leave a Best Ball league. Only allowed when the league hasn't started
+    /// drafting yet (status == "open"). Refreshes the detail view inline so
+    /// the user's row disappears immediately.
+    func leaveLeague(_ league: BestBallLeague) async -> Bool {
+        guard let uid = userID, let token = accessToken else { return false }
+        guard league.status == "open" else {
+            self.error = "Can't leave a league that has already started drafting."
+            return false
+        }
+        do {
+            try await SupabaseService.shared.leaveLeague(
+                leagueID: league.id, userID: uid, accessToken: token
+            )
+            await loadOpenLeagues()
+            await loadMyLeagues()
+            if currentLeague?.id == league.id {
+                await loadLeagueDetail(leagueID: league.id)
+            }
             return true
         } catch {
             self.error = error.localizedDescription
