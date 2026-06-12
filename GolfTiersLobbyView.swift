@@ -5,6 +5,7 @@ struct GolfTiersLobbyView: View {
     @State private var selectedTier: Int = 1
     @State private var showCreateGroup = false
     @State private var showJoinGroup = false
+    @State private var showGroupsList = false
     @State private var newGroupName = ""
     @State private var joinCode = ""
 
@@ -56,6 +57,19 @@ struct GolfTiersLobbyView: View {
         )
         .navigationTitle("Golf Major Tiers")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            // Groups stay reachable after lock — the lobby swaps its body to
+            // the live view during the tournament, which used to strand the
+            // in-scroll groups section (same bug WC had).
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showGroupsList = true
+                } label: {
+                    Image(systemName: "person.3.fill")
+                        .foregroundStyle(darkGreen)
+                }
+            }
+        }
         .task {
             if !viewModel.hasAttemptedLoad {
                 await viewModel.loadTournament()
@@ -72,6 +86,103 @@ struct GolfTiersLobbyView: View {
         }
         .sheet(isPresented: $showJoinGroup) {
             joinGroupSheet
+        }
+        .sheet(isPresented: $showGroupsList) { groupsListSheet }
+    }
+
+    // MARK: - Groups List Sheet (toolbar-accessed quick view)
+
+    private var groupsListSheet: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if viewModel.myGroups.isEmpty {
+                        VStack(spacing: 10) {
+                            Image(systemName: "person.3")
+                                .font(.system(size: 40))
+                                .foregroundStyle(.secondary)
+                            Text("No private groups yet")
+                                .font(.headline)
+                            Text("Create or join a group to track standings against friends.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 32)
+                    } else {
+                        ForEach(viewModel.myGroups) { group in
+                            NavigationLink {
+                                GolfTiersGroupDetailView(viewModel: viewModel, group: group)
+                            } label: {
+                                HStack {
+                                    Image(systemName: "person.3.fill")
+                                        .foregroundStyle(darkGreen)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(group.name)
+                                            .font(.subheadline.weight(.semibold))
+                                            .foregroundStyle(.primary)
+                                        Text("Code \(group.inviteCode)")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption)
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .padding(12)
+                                .background(.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                                .shadow(color: .black.opacity(0.04), radius: 2, y: 1)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
+                    HStack(spacing: 10) {
+                        Button {
+                            showGroupsList = false
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                showCreateGroup = true
+                            }
+                        } label: {
+                            Label("Create", systemImage: "plus.circle.fill")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                                .background(darkGreen.opacity(0.1))
+                                .foregroundStyle(darkGreen)
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+
+                        Button {
+                            showGroupsList = false
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                showJoinGroup = true
+                            }
+                        } label: {
+                            Label("Join", systemImage: "link.circle.fill")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                                .background(Color.blue.opacity(0.1))
+                                .foregroundStyle(.blue)
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+                    }
+                    .padding(.top, 8)
+                }
+                .padding(16)
+            }
+            .background(Color(.systemGroupedBackground))
+            .navigationTitle("Private Groups")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { showGroupsList = false }
+                }
+            }
         }
     }
 

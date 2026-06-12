@@ -210,27 +210,69 @@ struct GolfTiersGroupDetailView: View {
             } else {
                 VStack(spacing: 0) {
                     ForEach(entries) { entry in
-                        HStack(spacing: 12) {
-                            Text("\(entry.rank)")
-                                .font(.subheadline.weight(.bold).monospacedDigit())
-                                .foregroundStyle(entry.rank <= 3 ? darkGreen : .secondary)
-                                .frame(width: 24, alignment: .center)
-
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(entry.entryName)
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(entry.isCurrentUser ? darkGreen : .primary)
-                                Text("\(entry.picks.count) picks")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                        DisclosureGroup {
+                            VStack(spacing: 4) {
+                                ForEach(entry.picks.sorted(by: { $0.tier < $1.tier }), id: \.playerID) { pick in
+                                    HStack(spacing: 10) {
+                                        Text("T\(pick.tier)")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .foregroundStyle(.white)
+                                            .frame(width: 26, height: 18)
+                                            .background(darkGreen.opacity(0.8))
+                                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            Text(pick.playerName)
+                                                .font(.caption.weight(.medium))
+                                                .lineLimit(1)
+                                            Text(pick.playerCountry)
+                                                .font(.system(size: 9))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        if entry.countingPicks.contains(pick.playerID) {
+                                            Text("✓")
+                                                .font(.system(size: 9, weight: .bold))
+                                                .foregroundStyle(darkGreen)
+                                        }
+                                        Spacer()
+                                        let score = entry.pickScores[pick.playerID] ?? 0
+                                        Text(GolfTiersEngine.scoreToParDisplay(score))
+                                            .font(.caption.weight(.semibold).monospacedDigit())
+                                            .foregroundStyle(score < 0 ? .red : .secondary)
+                                    }
+                                    .padding(.vertical, 2)
+                                }
+                                Text("✓ = counting toward best 4 of 6")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.tertiary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                             }
+                            .padding(.leading, 24)
+                            .padding(.bottom, 6)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Text("\(entry.rank)")
+                                    .font(.subheadline.weight(.bold).monospacedDigit())
+                                    .foregroundStyle(entry.rank <= 3 ? darkGreen : .secondary)
+                                    .frame(width: 24, alignment: .center)
 
-                            Spacer()
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(entry.entryName)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(entry.isCurrentUser ? darkGreen : .primary)
+                                    Text("\(entry.picks.count) picks")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
 
-                            Text(GolfTiersEngine.scoreToParDisplay(entry.totalScore))
-                                .font(.subheadline.weight(.bold).monospacedDigit())
-                                .foregroundStyle(.primary)
+                                Spacer()
+
+                                Text(GolfTiersEngine.scoreToParDisplay(entry.totalScore))
+                                    .font(.subheadline.weight(.bold).monospacedDigit())
+                                    .foregroundStyle(.primary)
+                            }
+                            .contentShape(Rectangle())
                         }
+                        .tint(.secondary)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 10)
                         .background(entry.isCurrentUser ? darkGreen.opacity(0.08) : .clear)
