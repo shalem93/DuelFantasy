@@ -876,6 +876,18 @@ extension GolfTiersTournament {
         return nil
     }
 
+    /// MMDD window bounds for a major ID — same table as `activeMajorID`.
+    /// Used to validate stored tournament rows: a major can only lock/settle
+    /// inside its own window, so a "settled" row whose lock time falls
+    /// outside it is corrupt (created against the wrong ESPN event).
+    static func windowBounds(for majorID: String) -> (opens: Int, closes: Int)? {
+        if majorID.contains("masters") { return (402, 418) }
+        if majorID.contains("pga-championship") { return (507, 523) }
+        if majorID.contains("us-open") { return (611, 627) }
+        if majorID.contains("the-open") { return (709, 725) }
+        return nil
+    }
+
     static func majorTitle(for id: String) -> String {
         if id.contains("masters") { return "Masters Tournament Tiers" }
         if id.contains("pga-championship") { return "PGA Championship Tiers" }

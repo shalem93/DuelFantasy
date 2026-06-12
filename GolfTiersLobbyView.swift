@@ -18,6 +18,8 @@ struct GolfTiersLobbyView: View {
                 loadingView
             } else if viewModel.noActiveMajor {
                 noActiveMajorView
+            } else if viewModel.awaitingField {
+                awaitingFieldView
             } else if viewModel.isSettled {
                 settledView
             } else if viewModel.isLocked {
@@ -372,6 +374,27 @@ struct GolfTiersLobbyView: View {
     /// Tells the user the next upcoming major and a rough countdown, without
     /// dragging them into a tiers UI for whichever regular Tour event ESPN
     /// happens to be running.
+    /// Inside a major's pick window, but ESPN hasn't published the field yet
+    /// (its scoreboard is still on the previous Tour event).
+    private var awaitingFieldView: some View {
+        let majorID = GolfTiersTournament.activeMajorID(now: Date()) ?? GolfTiersTournament.currentMajorID()
+        let title = GolfTiersTournament.majorTitle(for: majorID)
+        return VStack(spacing: 16) {
+            Image(systemName: "hourglass")
+                .font(.system(size: 44))
+                .foregroundStyle(darkGreen.opacity(0.7))
+            Text(title)
+                .font(.title3.weight(.semibold))
+            Text("Signups will open when the tournament field is announced. Check back closer to the event!")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+
     private var noActiveMajorView: some View {
         let upcomingID: String? = {
             let now = Date()

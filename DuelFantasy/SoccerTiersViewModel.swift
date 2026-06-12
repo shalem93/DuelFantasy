@@ -8,6 +8,31 @@ final class SoccerTiersViewModel {
     var userPicks: [Int: SoccerTiersPlayer] = [:]  // tier (1-6) → selected player
     var leaderboardEntries: [SoccerTiersLeaderboardEntry] = []
     var livePlayerPoints: [String: Double] = [:]  // accumulated WC FPTS per player
+
+    // MARK: - Score cache (kills the 0.0 flash between sessions/visits)
+
+    private var pointsCacheKey: String? {
+        guard let tid = tournament?.id else { return nil }
+        return "tiersPointsCache-\(tid)"
+    }
+
+    /// Load the last successfully fetched scores from disk when the in-memory
+    /// dict is empty (cold launch / VM reset) so standings render with real
+    /// numbers immediately instead of 0.0 until the next ESPN fetch lands.
+    func hydratePointsCacheIfNeeded() {
+        guard livePlayerPoints.isEmpty, let key = pointsCacheKey,
+              let data = UserDefaults.standard.data(forKey: key),
+              let cached = try? JSONDecoder().decode([String: Double].self, from: data),
+              !cached.isEmpty else { return }
+        livePlayerPoints = cached
+        print("[SoccerTiers] Hydrated \(cached.count) cached player scores")
+    }
+
+    func persistPointsCache() {
+        guard let key = pointsCacheKey, !livePlayerPoints.isEmpty,
+              let data = try? JSONEncoder().encode(livePlayerPoints) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
     var fieldEntries: [SoccerTiersEntry] = []
     var eliminatedNations: Set<String> = []
 
@@ -237,6 +262,53 @@ final class SoccerTiersViewModel {
         hasAttemptedLoad = true
     }
 
+    /// Re-fetch the user's submitted entry from Supabase if `userPicks` is
+    /// empty but auth is now available. The first `loadTournament` call
+    /// often happens before auth has propagated (it fires from
+    /// FantasyHubView's `.task` at app launch), so the entry-fetch inside
+    /// `loadTournament` gets skipped silently because `accessToken` is
+    /// nil at that moment. `hasAttemptedLoad` then gets force-set to true,
+    /// blocking any retry — so the user's submitted picks appear lost
+    /// even though they're still in Supabase. Call this from the lobby's
+    /// `.task` after auth has had time to settle.
+    func restoreUserPicksIfMissing() async {
+        guard userPicks.isEmpty, !hasSubmitted else { return }
+        guard let token = accessToken, let uid = userID else { return }
+        guard let tournamentID = tournament?.id ?? Optional(SoccerTiersTournament.currentTournamentID()) else { return }
+        // Surface a spinner while we late-bind fetch. Without this the
+        // lobby flashed empty content for ~1-2s before the picks popped in.
+        isLoading = true
+        defer { isLoading = false }
+        guard let record = try? await SupabaseService.shared.fetchUserSoccerTiersEntry(
+            tournamentID: tournamentID, userID: uid, accessToken: token
+        ) else { return }
+        hasSubmitted = true
+        for pickData in record.picks {
+            let pick = pickData.toModel()
+            var foundPlayer: SoccerTiersPlayer?
+            for tier in tiers {
+                if let player = tier.first(where: { $0.id == pick.playerID }) {
+                    foundPlayer = player
+                    break
+                }
+            }
+            if let player = foundPlayer {
+                userPicks[pick.tier] = player
+            } else {
+                // Player not in current tier pool (e.g. removed from squad
+                // after submission). Use the data we stored on the entry.
+                userPicks[pick.tier] = SoccerTiersPlayer(
+                    id: pick.playerID, name: pick.playerName,
+                    country: "", countryCode: pick.playerCountry,
+                    position: "", tier: pick.tier, projectedPoints: 0,
+                    matchesPlayed: 0, totalFantasyPoints: 0, perMatchAvg: 0,
+                    imageURL: nil, isEliminated: false
+                )
+            }
+        }
+        print("[SoccerTiers] Restored \(userPicks.count) picks via late-bind fetch")
+    }
+
     // MARK: - Pick Management
 
     func selectPlayer(tier: Int, player: SoccerTiersPlayer) {
@@ -388,9 +460,31 @@ final class SoccerTiersViewModel {
 
         guard !allPlayerIDs.isEmpty else { return }
 
-        // Fetch accumulated World Cup scores
-        let snapshot = await espnProvider.fetchWorldCupScores(playerIDs: allPlayerIDs)
-        livePlayerPoints = snapshot.playerFantasyPoints
+        // Show last-known scores instantly while the multi-match ESPN fetch
+        // runs — otherwise every cold open flashes 0.0 for every player.
+        hydratePointsCacheIfNeeded()
+        if leaderboardEntries.isEmpty && !livePlayerPoints.isEmpty && !fieldEntries.isEmpty {
+            leaderboardEntries = SoccerTiersEngine.computeLeaderboard(
+                entries: fieldEntries,
+                playerPoints: livePlayerPoints,
+                currentUserID: userID
+            )
+        }
+
+        // Fetch accumulated World Cup scores. We pass the full pool (flattened
+        // from `tiers`) so the provider can match ESPN athletes back to our
+        // pool IDs by name + country, and look up each player's position
+        // for the scoring formula.
+        // NEVER overwrite good scores with an empty result — a failed ESPN
+        // fetch was zeroing the standings while the screen sat open.
+        let poolPlayers = tiers.flatMap { $0 }
+        let snapshot = await espnProvider.fetchWorldCupScores(players: poolPlayers)
+        if !snapshot.playerFantasyPoints.isEmpty {
+            livePlayerPoints = snapshot.playerFantasyPoints
+            persistPointsCache()
+        } else if !livePlayerPoints.isEmpty {
+            print("[SoccerTiers] Score fetch returned empty — keeping \(livePlayerPoints.count) existing scores")
+        }
 
         // Fetch eliminated nations
         eliminatedNations = await espnProvider.fetchEliminatedNations()

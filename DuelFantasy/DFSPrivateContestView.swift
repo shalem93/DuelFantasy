@@ -120,6 +120,7 @@ struct DFSPrivateContestsSection: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+        .contentShape(Rectangle())
     }
 
     private func parentLabel(for contest: DFSPrivateContest) -> String {
@@ -439,6 +440,19 @@ struct DFSPrivateContestDetailView: View {
         return "\(kind) · \(date.formatted(date: .abbreviated, time: .omitted))"
     }
 
+    /// Just the formatted date for the parent slate (e.g. "May 31, 2026"),
+    /// shown under the matchup title in the live header so users always
+    /// know which slate the contest is on.
+    private var parentSlateDateOnly: String? {
+        let id = contest.parentTournamentID
+        let parts = id.split(separator: "-")
+        guard let dateStr = parts.first(where: { $0.count == 8 && Int($0) != nil }) else { return nil }
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyyMMdd"
+        guard let date = fmt.date(from: String(dateStr)) else { return nil }
+        return date.formatted(date: .abbreviated, time: .omitted)
+    }
+
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
@@ -497,14 +511,16 @@ struct DFSPrivateContestDetailView: View {
             }
         }
         .task {
-            // For a past contest, fetch the parent slate's box scores AND
-            // canonical salary snapshot BEFORE building the leaderboard so
-            // the standings show real FPTS and the roster sheet shows the
-            // same prices the public contest used (no drift).
+            // Past contests need box scores too; live locked contests just
+            // need the canonical salary snapshot so the expanded lineup
+            // shows the same prices that were on screen at submit time —
+            // not whichever live prices drifted in afterward.
             if isPastContest {
                 async let box: Void = viewModel.loadPastTournamentBoxScores(tournamentId: contest.parentTournamentID)
                 async let sals: Void = viewModel.loadParentTournamentSalariesIfNeeded(parentTournamentID: contest.parentTournamentID)
                 _ = await (box, sals)
+            } else if isLocked {
+                await viewModel.loadParentTournamentSalariesIfNeeded(parentTournamentID: contest.parentTournamentID)
             }
             await viewModel.loadPrivateContestMembers(contestID: contest.id)
             await viewModel.loadPrivateContestLeaderboard(contest)
@@ -514,6 +530,8 @@ struct DFSPrivateContestDetailView: View {
                 async let box: Void = viewModel.loadPastTournamentBoxScores(tournamentId: contest.parentTournamentID)
                 async let sals: Void = viewModel.loadParentTournamentSalariesIfNeeded(parentTournamentID: contest.parentTournamentID)
                 _ = await (box, sals)
+            } else if isLocked {
+                await viewModel.loadParentTournamentSalariesIfNeeded(parentTournamentID: contest.parentTournamentID)
             }
             await viewModel.loadPrivateContestMembers(contestID: contest.id)
             await viewModel.loadPrivateContestLeaderboard(contest)
@@ -571,6 +589,11 @@ struct DFSPrivateContestDetailView: View {
                 Text(t.title)
                     .font(.headline)
                     .foregroundStyle(.white)
+                if let dateOnly = parentSlateDateOnly {
+                    Text(dateOnly)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.85))
+                }
             } else if let dateLabel = parentSlateDateLabel {
                 Text(dateLabel)
                     .font(.headline)
@@ -746,7 +769,9 @@ struct DFSPrivateContestDetailView: View {
                 Text("Standings")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                if let t = parentTournament, viewModel.tournament?.id == t.id, !viewModel.livePlayerPoints.isEmpty {
+                if !isPastContest, isLocked,
+                   viewModel.livePointsBelongToSlate(ofParentTournamentID: contest.parentTournamentID),
+                   !viewModel.livePlayerPoints.isEmpty {
                     Text("LIVE")
                         .font(.caption2.weight(.bold))
                         .foregroundStyle(.white)
@@ -826,14 +851,27 @@ struct DFSPrivateContestDetailView: View {
             return fixed
         }
         let byID = Dictionary(uniqueKeysWithValues: pool.map { ($0.id, $0) })
+        // Live data is only trustworthy for THIS contest once its parent slate
+        // has locked AND the loaded scores were fetched for the same slate —
+        // player IDs are stable across days, so yesterday's points/box scores
+        // would otherwise show up here before today's games start.
+        let liveValid = isLocked && viewModel.livePointsBelongToSlate(ofParentTournamentID: contest.parentTournamentID)
 
         VStack(spacing: 4) {
             ForEach(Array(row.lineupPlayerIDs.enumerated()), id: \.element) { idx, pid in
                 let player = byID[pid]
                 let isMVP = isSG && idx == 0
                 let rawPts: Double = {
-                    if let p = viewModel.livePlayerPoints[pid], p > 0 { return p }
-                    return viewModel.pastTournamentPlayerStats[pid]?.fantasyPoints ?? 0
+                    if isPastContest {
+                        return viewModel.pastTournamentPlayerStats[pid]?.fantasyPoints ?? 0
+                    }
+                    guard liveValid else { return 0 }
+                    return viewModel.livePlayerPoints[pid] ?? 0
+                }()
+                let playerStats: DFSPlayerLiveStats? = {
+                    if isPastContest { return viewModel.pastTournamentPlayerStats[pid] }
+                    guard liveValid else { return nil }
+                    return viewModel.livePlayerStats[pid]
                 }()
                 let displayPts = isMVP ? rawPts * 1.5 : rawPts
                 let displaySalary: Int = {
@@ -859,6 +897,14 @@ struct DFSPrivateContestDetailView: View {
                         Text(resolvedName)
                             .font(.subheadline.weight(.medium))
                             .lineLimit(1)
+                        if let stats = playerStats {
+                            Text(dfsCompactStatLine(stats: stats,
+                                                    position: player?.position ?? "",
+                                                    sport: viewModel.sport))
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
                         if displaySalary > 0 {
                             Text("$\(viewModel.formatSalary(displaySalary))")
                                 .font(.caption2)

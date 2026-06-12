@@ -32,10 +32,17 @@ struct BestBallStandingsView: View {
                     matchupsSection
                 }
 
-                // Score week button (for host)
-                if viewModel.isHost, let league = viewModel.currentLeague, league.status == "active" {
+                // Manual refresh button — kept as a fallback for the
+                // automatic catch-up flow (which runs on LeagueDetail
+                // view appearance). Available to any member: gives them
+                // a way to force-pull live scores mid-week without
+                // waiting for the next view re-mount, and lets the host
+                // force a redo if a previous compute hit transient ESPN
+                // errors. Idempotent — `batchUpsertWeeklyScores`
+                // converges multiple concurrent computes on the same
+                // canonical values.
+                if let league = viewModel.currentLeague, league.status == "active" {
                     let realWeek = BestBallSeasonHelper.currentWeekNumber(for: league.sport)
-                    let effectiveWeek = min(league.currentWeek, realWeek)
                     let weeksBehind = max(0, realWeek - league.currentWeek)
 
                     Button {
@@ -49,44 +56,29 @@ struct BestBallStandingsView: View {
                             }
                         }
                     } label: {
-                        VStack(spacing: 4) {
+                        HStack(spacing: 6) {
                             if !viewModel.catchUpProgress.isEmpty {
+                                ProgressView()
+                                    .scaleEffect(0.7)
                                 Text(viewModel.catchUpProgress)
-                                    .font(.subheadline.weight(.semibold))
-                            } else if league.isDingersOnly {
-                                if viewModel.isLoadingDingersHR {
-                                    HStack(spacing: 8) {
-                                        ProgressView()
-                                            .tint(.white)
-                                        Text("Loading HR Counts...")
-                                            .font(.subheadline.weight(.semibold))
-                                    }
-                                } else {
-                                    Text("Refresh HR Counts")
-                                        .font(.subheadline.weight(.semibold))
-                                    Text("Update home run totals for all teams")
-                                        .font(.caption)
-                                        .opacity(0.8)
-                                }
-                            } else if weeksBehind > 0 {
-                                Text("Catch Up (\(weeksBehind) weeks behind)")
-                                    .font(.subheadline.weight(.semibold))
-                                Text("Score weeks \(league.currentWeek)-\(realWeek)")
-                                    .font(.caption)
-                                    .opacity(0.8)
+                                    .font(.caption.weight(.medium))
+                            } else if league.isDingersOnly && viewModel.isLoadingDingersHR {
+                                ProgressView()
+                                    .scaleEffect(0.7)
+                                Text("Loading HR…")
+                                    .font(.caption.weight(.medium))
                             } else {
-                                Text("Score Week \(effectiveWeek) (Live)")
-                                    .font(.subheadline.weight(.semibold))
-                                Text("Refresh fantasy points for all teams")
-                                    .font(.caption)
-                                    .opacity(0.8)
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.caption.weight(.semibold))
+                                Text(league.isDingersOnly ? "Refresh HR Counts" : "Refresh Scores")
+                                    .font(.caption.weight(.medium))
                             }
                         }
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                        .background(brandPurple)
-                        .foregroundStyle(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .padding(.vertical, 8)
+                        .foregroundStyle(brandPurple)
+                        .background(brandPurple.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
                     }
                 }
             }

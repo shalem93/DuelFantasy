@@ -39,6 +39,8 @@ struct GameFixture {
     let homeWinPct: Double?
     let awayMoneyline: Double?
     let homeMoneyline: Double?
+    /// Soccer 3-way draw price, when the odds source provides one.
+    var drawMoneyline: Double? = nil
 }
 
 struct OddsQuote {
@@ -103,6 +105,24 @@ struct ConfiguredMatchProvider: MatchProvider {
     }
 }
 
+/// Strips the bookmaker's vig from a 3-way (soccer) market: convert each
+/// American price to an implied probability, normalize so the three sum to 1,
+/// and convert back to fair American odds. Pick'em quotes shouldn't carry the
+/// book's juice — a DK +205 draw is ~+240 fair.
+func devigThreeWayOdds(away: Double, draw: Double, home: Double) -> (away: Double, draw: Double, home: Double) {
+    func implied(_ odds: Double) -> Double {
+        odds > 0 ? 100.0 / (odds + 100.0) : abs(odds) / (abs(odds) + 100.0)
+    }
+    func american(_ p: Double) -> Double {
+        guard p > 0, p < 1 else { return 0 }
+        return p >= 0.5 ? -100.0 * p / (1.0 - p) : 100.0 * (1.0 - p) / p
+    }
+    let pA = implied(away), pD = implied(draw), pH = implied(home)
+    let total = pA + pD + pH
+    guard total > 0 else { return (away, draw, home) }
+    return (american(pA / total), american(pD / total), american(pH / total))
+}
+
 struct CompositeMatchProvider: MatchProvider {
     private let gameProvider: GameProvider
     private let oddsProvider: OddsProvider
@@ -137,14 +157,27 @@ struct CompositeMatchProvider: MatchProvider {
                     // Picking a team means you LOSE on both draw and opponent win.
                     // Use per-outcome RR (same as Odds API path) not 2-way swing.
                     if fixture.sportKey.hasPrefix("soccer_") {
-                        let pA = impliedProbability(from: awayML)
-                        let pB = impliedProbability(from: homeML)
-                        let totalVig = pA + pB
-                        let drawProb = max(0.15, min(0.35, 1.0 - (pA + pB) / totalVig * 0.72))
-                        let drawOdds = ((1.0 - drawProb) / drawProb) * 100.0
-                        let awayQuote = rrQuoteFromIndividualOdds(team: fixture.awayTeam, odds: awayML)
-                        let drawQuote = rrQuoteFromIndividualOdds(team: "Draw", odds: drawOdds)
-                        let homeQuote = rrQuoteFromIndividualOdds(team: fixture.homeTeam, odds: homeML)
+                        // Real draw price when the odds source has one. The old
+                        // synthetic formula reduced to a CONSTANT 28% draw
+                        // probability (the pA+pB terms cancelled), which is why
+                        // every soccer draw quoted +26. The estimate fallback
+                        // uses the 3-way residual: home/away prices come from
+                        // the same 3-way market, so 1 + vig − pA − pB ≈ pDraw.
+                        let drawOdds: Double
+                        if let realDraw = fixture.drawMoneyline {
+                            drawOdds = realDraw
+                        } else {
+                            let pA = impliedProbability(from: awayML)
+                            let pB = impliedProbability(from: homeML)
+                            let drawProb = max(0.10, min(0.40, 1.07 - (pA + pB)))
+                            drawOdds = ((1.0 - drawProb) / drawProb) * 100.0
+                        }
+                        // Strip the juice before quoting — picks shouldn't pay
+                        // the book's margin.
+                        let fair = devigThreeWayOdds(away: awayML, draw: drawOdds, home: homeML)
+                        let awayQuote = rrQuoteFromIndividualOdds(team: fixture.awayTeam, odds: fair.away)
+                        let drawQuote = rrQuoteFromIndividualOdds(team: "Draw", odds: fair.draw)
+                        let homeQuote = rrQuoteFromIndividualOdds(team: fixture.homeTeam, odds: fair.home)
                         quotes = [awayQuote, drawQuote, homeQuote]
                     } else {
                         let espnQuotes = rrQuotesFromTwoWayAmericanOdds(
@@ -258,62 +291,90 @@ struct ESPNTodayGameProvider: GameProvider {
     /// a detached Task that is immune to parent-task cancellation.
     private static func fetchGamesImpl(session: URLSession) async throws -> [GameFixture] {
         let dateKeys = ESPNDateKeys.todayAndTomorrow
-        var fixtures: [GameFixture] = []
 
+        // Build the full request matrix (sport × date) and fan out in parallel.
+        // The previous sequential loop made one slow ESPN endpoint stall the
+        // entire Pick'em load behind it (9 sports × 2 dates = 18 sequential
+        // round-trips), which the user saw as an indefinite "Loading games..."
+        // spinner. Per-request timeout caps the worst case at ~12s no matter
+        // what ESPN's regional CDN is doing.
+        struct Job { let sport: ESPSportDefinition; let dateKey: String }
+        var jobs: [Job] = []
         for sport in ESPSportDefinition.majorSports {
             for dateKey in dateKeys {
-                guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/\(sport.sportPath)/\(sport.leaguePath)/scoreboard?dates=\(dateKey)") else {
-                    continue
-                }
-
-                guard let (data, response) = try? await session.data(from: url) else {
-                    print("[Pick'em] ESPN API failed for \(sport.displayName) on \(dateKey) — skipping")
-                    continue
-                }
-                guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
-                    continue
-                }
-
-                let scoreboard: ESPNScoreboardResponse
-                do {
-                    scoreboard = try JSONDecoder.espnDecoder.decode(ESPNScoreboardResponse.self, from: data)
-                } catch {
-                    print("[Pick'em] Decode failed for \(sport.displayName) on \(dateKey): \(error)")
-                    continue
-                }
-
-                let leagueLabel = sport.displayName
-                for event in scoreboard.events {
-                    guard let competition = event.competitions.first else { continue }
-                    let state = competition.status.type.state
-                    // Show pre (upcoming), in (live), and post (final) games
-                    guard state == "pre" || state == "in" || state == "post" else { continue }
-                    guard let awayCompetitor = competition.competitors.first(where: { $0.homeAway == "away" }) else { continue }
-                    guard let homeCompetitor = competition.competitors.first(where: { $0.homeAway == "home" }) else { continue }
-                    let awayMoneyline = parseAmericanOdds(from: competition.odds?.first?.moneyline?.away?.close?.odds)
-                    let homeMoneyline = parseAmericanOdds(from: competition.odds?.first?.moneyline?.home?.close?.odds)
-
-                    fixtures.append(
-                        GameFixture(
-                            id: "espn-\(sport.oddsSportKey)-\(event.id)",
-                            sportKey: sport.oddsSportKey,
-                            league: leagueLabel,
-                            awayTeam: awayCompetitor.team.displayName,
-                            homeTeam: homeCompetitor.team.displayName,
-                            startsAt: event.date,
-                            state: state,
-                            statusDetail: competition.status.type.shortDetail ?? competition.status.type.detail ?? state.uppercased(),
-                            awayScore: Int(awayCompetitor.score ?? ""),
-                            homeScore: Int(homeCompetitor.score ?? ""),
-                            awayWinPct: awayCompetitor.records?.compactMap({ $0.summary }).compactMap(parseWinPercentage(from:)).first,
-                            homeWinPct: homeCompetitor.records?.compactMap({ $0.summary }).compactMap(parseWinPercentage(from:)).first,
-                            awayMoneyline: awayMoneyline,
-                            homeMoneyline: homeMoneyline
-                        )
-                    )
-                }
+                jobs.append(Job(sport: sport, dateKey: dateKey))
             }
         }
+
+        // Per-request URLSession with a short timeout. The default URLSession
+        // timeout (60s) is way too generous for a spinner-blocking load — if
+        // ESPN doesn't answer in ~12s, treat it as a soft failure and move on.
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 12
+        config.timeoutIntervalForResource = 15
+        let timedSession = URLSession(configuration: config)
+
+        let fixturesByJob: [[GameFixture]] = await withTaskGroup(of: [GameFixture].self) { group in
+            for job in jobs {
+                group.addTask {
+                    let sport = job.sport
+                    let dateKey = job.dateKey
+                    guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/\(sport.sportPath)/\(sport.leaguePath)/scoreboard?dates=\(dateKey)") else {
+                        return []
+                    }
+                    guard let (data, response) = try? await timedSession.data(from: url) else {
+                        print("[Pick'em] ESPN API failed for \(sport.displayName) on \(dateKey) — skipping")
+                        return []
+                    }
+                    guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
+                        return []
+                    }
+                    let scoreboard: ESPNScoreboardResponse
+                    do {
+                        scoreboard = try JSONDecoder.espnDecoder.decode(ESPNScoreboardResponse.self, from: data)
+                    } catch {
+                        print("[Pick'em] Decode failed for \(sport.displayName) on \(dateKey): \(error)")
+                        return []
+                    }
+                    let leagueLabel = sport.displayName
+                    var out: [GameFixture] = []
+                    for event in scoreboard.events {
+                        guard let competition = event.competitions.first else { continue }
+                        let state = competition.status.type.state
+                        guard state == "pre" || state == "in" || state == "post" else { continue }
+                        guard let awayCompetitor = competition.competitors.first(where: { $0.homeAway == "away" }) else { continue }
+                        guard let homeCompetitor = competition.competitors.first(where: { $0.homeAway == "home" }) else { continue }
+                        let awayMoneyline = parseAmericanOdds(from: competition.odds?.first?.moneyline?.away?.close?.odds)
+                        let homeMoneyline = parseAmericanOdds(from: competition.odds?.first?.moneyline?.home?.close?.odds)
+                        let drawMoneyline = parseAmericanOdds(from: competition.odds?.first?.moneyline?.draw?.close?.odds)
+                        out.append(
+                            GameFixture(
+                                id: "espn-\(sport.oddsSportKey)-\(event.id)",
+                                sportKey: sport.oddsSportKey,
+                                league: leagueLabel,
+                                awayTeam: awayCompetitor.team.displayName,
+                                homeTeam: homeCompetitor.team.displayName,
+                                startsAt: event.date,
+                                state: state,
+                                statusDetail: competition.status.type.shortDetail ?? competition.status.type.detail ?? state.uppercased(),
+                                awayScore: Int(awayCompetitor.score ?? ""),
+                                homeScore: Int(homeCompetitor.score ?? ""),
+                                awayWinPct: awayCompetitor.records?.compactMap({ $0.summary }).compactMap(parseWinPercentage(from:)).first,
+                                homeWinPct: homeCompetitor.records?.compactMap({ $0.summary }).compactMap(parseWinPercentage(from:)).first,
+                                awayMoneyline: awayMoneyline,
+                                homeMoneyline: homeMoneyline,
+                                drawMoneyline: drawMoneyline
+                            )
+                        )
+                    }
+                    return out
+                }
+            }
+            var all: [[GameFixture]] = []
+            for await batch in group { all.append(batch) }
+            return all
+        }
+        var fixtures: [GameFixture] = fixturesByJob.flatMap { $0 }
 
         // Also fetch tennis matches
         if let tennisFixtures = try? await ESPNTennisGameProvider(session: session).fetchGames() {
@@ -386,7 +447,7 @@ struct ESPNTodayGameProvider: GameProvider {
         guard !requests.isEmpty else { return updated }
 
         // Fetch odds in parallel (Core API is free, no rate limit concerns)
-        let fetched: [(Int, String, Double, Double)] = await withTaskGroup(of: (Int, String, Double, Double)?.self) { group in
+        let fetched: [(Int, String, Double, Double, Double?)] = await withTaskGroup(of: (Int, String, Double, Double, Double?)?.self) { group in
             for req in requests {
                 group.addTask {
                     let urlStr = "https://sports.core.api.espn.com/v2/sports/\(req.sportPath)/leagues/\(req.leaguePath)/events/\(req.eventID)/competitions/\(req.eventID)/odds"
@@ -401,18 +462,23 @@ struct ESPNTodayGameProvider: GameProvider {
                           let homeTeamOdds = first["homeTeamOdds"] as? [String: Any] else { return nil }
                     let awayML: Double? = (awayTeamOdds["moneyLine"] as? Double) ?? (awayTeamOdds["moneyLine"] as? Int).map(Double.init)
                     let homeML: Double? = (homeTeamOdds["moneyLine"] as? Double) ?? (homeTeamOdds["moneyLine"] as? Int).map(Double.init)
+                    // Soccer 3-way: Core API carries the draw under "drawOdds"
+                    let drawML: Double? = {
+                        guard let drawOdds = first["drawOdds"] as? [String: Any] else { return nil }
+                        return (drawOdds["moneyLine"] as? Double) ?? (drawOdds["moneyLine"] as? Int).map(Double.init)
+                    }()
                     guard let awayOdds = awayML, let homeOdds = homeML else { return nil }
-                    return (req.index, req.eventID, awayOdds, homeOdds)
+                    return (req.index, req.eventID, awayOdds, homeOdds, drawML)
                 }
             }
-            var results: [(Int, String, Double, Double)] = []
+            var results: [(Int, String, Double, Double, Double?)] = []
             for await result in group {
                 if let r = result { results.append(r) }
             }
             return results
         }
 
-        for (index, eventID, awayML, homeML) in fetched {
+        for (index, eventID, awayML, homeML, drawML) in fetched {
             // Cache for future refreshes
             CoreAPIOddsCache.shared.set(eventID, away: awayML, home: homeML)
 
@@ -423,7 +489,8 @@ struct ESPNTodayGameProvider: GameProvider {
                 startsAt: f.startsAt, state: f.state, statusDetail: f.statusDetail,
                 awayScore: f.awayScore, homeScore: f.homeScore,
                 awayWinPct: f.awayWinPct, homeWinPct: f.homeWinPct,
-                awayMoneyline: awayML, homeMoneyline: homeML
+                awayMoneyline: awayML, homeMoneyline: homeML,
+                drawMoneyline: drawML
             )
         }
         return updated
@@ -1122,9 +1189,11 @@ struct TheOddsAPIProvider: OddsProvider {
         // Positive odds = underdog for that outcome → +swing / -10
         // Swing = |odds| / 10, clamped [12, 80]
         if isSoccer, let dPrice = drawPrice {
-            let awayQuote = rrQuoteFromIndividualOdds(team: awayTeam, odds: aPrice)
-            let homeQuote = rrQuoteFromIndividualOdds(team: homeTeam, odds: hPrice)
-            let drawQuote = rrQuoteFromIndividualOdds(team: "Draw", odds: dPrice)
+            // De-vig the book's 3-way prices so picks quote fair odds.
+            let fair = devigThreeWayOdds(away: aPrice, draw: dPrice, home: hPrice)
+            let awayQuote = rrQuoteFromIndividualOdds(team: awayTeam, odds: fair.away)
+            let homeQuote = rrQuoteFromIndividualOdds(team: homeTeam, odds: fair.home)
+            let drawQuote = rrQuoteFromIndividualOdds(team: "Draw", odds: fair.draw)
             return [awayQuote, drawQuote, homeQuote]
         }
 
@@ -1582,6 +1651,8 @@ private struct ESPNCompetitionOdds: Codable {
 private struct ESPNMoneyline: Codable {
     let away: ESPNOddsSide?
     let home: ESPNOddsSide?
+    /// Present for soccer 3-way markets.
+    let draw: ESPNOddsSide?
 }
 
 private struct ESPNOddsSide: Codable {

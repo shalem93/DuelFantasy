@@ -9,7 +9,22 @@ struct UserProfileView: View {
     @State private var activePicks: [ActivePickRecord] = []
     @State private var dfsResults: [DFSTournamentResultRecord] = []
     @State private var dfsTournaments: [String: DFSTournamentRecord] = [:]
+    @State private var bestBallResults: [BestBallProfileRow] = []
     @State private var isLoading: Bool = true
+
+    /// Flattened Best Ball entry for the profile section. Built from a
+    /// (membership, league, standing) triple so the row has everything it
+    /// needs to render placement without further VM lookups.
+    struct BestBallProfileRow: Identifiable {
+        let id: String           // league ID
+        let title: String        // league title
+        let sport: String        // e.g. "NFL", "MLB"
+        let rank: Int            // user's final rank
+        let totalMembers: Int    // field size for "X of N"
+        let totalPoints: Double  // total fantasy points
+        let isCompleted: Bool    // league.status == "completed"
+        let endedAt: Date?       // updated_at on standing → proxy for "ended"
+    }
 
     private var brandPurple: Color {
         Color(red: 0.48, green: 0.23, blue: 0.93)
@@ -205,13 +220,18 @@ struct UserProfileView: View {
                         .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
                     }
 
-                    // DFS Results
-                    if !dfsResults.isEmpty {
+                    // Split into DFS Results vs Fantasy Results (Tiers, Brackets).
+                    // Both read from dfs_tournament_results — partition by tid.
+                    let dfsTabResults = dfsResults.filter { !isFantasyTabResult($0.tournamentID) }
+                    let fantasyTabResults = dfsResults.filter { isFantasyTabResult($0.tournamentID) }
+
+                    // DFS Results (with RR delta — DFS uses RR mechanics)
+                    if !dfsTabResults.isEmpty {
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("Fantasy Results")
+                            Text("DFS Results")
                                 .font(.headline)
 
-                            ForEach(dfsResults.prefix(20)) { result in
+                            ForEach(dfsTabResults.prefix(20)) { result in
                                 let sport = dfsResultSport(result.tournamentID)
                                 let tournament = dfsTournaments[result.tournamentID]
                                 let totalEntries = tournament?.totalEntries ?? 500
@@ -261,11 +281,11 @@ struct UserProfileView: View {
                                 .padding(.vertical, 2)
                             }
 
-                            if dfsResults.count > 3 {
+                            if dfsTabResults.count > 3 {
                                 NavigationLink {
                                     AnalyticsView(userID: profile.id, accessToken: accessToken, initialTab: 1)
                                 } label: {
-                                    Text("See All Fantasy Results")
+                                    Text("See All DFS Results")
                                         .font(.subheadline.weight(.semibold))
                                         .foregroundStyle(brandPurple)
                                         .frame(maxWidth: .infinity)
@@ -279,7 +299,129 @@ struct UserProfileView: View {
                         .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
                     }
 
-                    if activePicks.isEmpty && settledPicks.isEmpty && dfsResults.isEmpty {
+                    // Fantasy Results (Tiers + Brackets + Best Ball — placement only, no RR)
+                    if !fantasyTabResults.isEmpty || !bestBallResults.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Fantasy Results")
+                                .font(.headline)
+
+                            // Best Ball leagues first — completed go on top.
+                            ForEach(bestBallResults.prefix(20)) { row in
+                                HStack {
+                                    Image(systemName: "trophy.fill")
+                                        .font(.caption)
+                                        .foregroundStyle(brandPurple)
+                                        .frame(width: 20)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack(spacing: 4) {
+                                            Text("BB \(row.sport)")
+                                                .font(.system(size: 9, weight: .bold))
+                                                .padding(.horizontal, 5)
+                                                .padding(.vertical, 1)
+                                                .background(brandPurple.opacity(0.15))
+                                                .foregroundStyle(brandPurple)
+                                                .clipShape(Capsule())
+                                            Text(row.title)
+                                                .font(.caption.weight(.medium))
+                                                .lineLimit(1)
+                                            if !row.isCompleted {
+                                                Text("Active")
+                                                    .font(.system(size: 9, weight: .bold))
+                                                    .padding(.horizontal, 5)
+                                                    .padding(.vertical, 1)
+                                                    .background(Color.green.opacity(0.15))
+                                                    .foregroundStyle(.green)
+                                                    .clipShape(Capsule())
+                                            }
+                                        }
+                                        HStack(spacing: 4) {
+                                            if row.totalMembers > 0 {
+                                                Text("#\(row.rank) of \(row.totalMembers)")
+                                                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                                            } else {
+                                                Text("#\(row.rank)")
+                                                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                                            }
+                                            if row.totalPoints > 0 {
+                                                Text("•")
+                                                    .foregroundStyle(.tertiary)
+                                                Text(String(format: "%.1f pts", row.totalPoints))
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                        if let date = row.endedAt {
+                                            Text(date.formatted(date: .abbreviated, time: .omitted))
+                                                .font(.system(size: 10))
+                                                .foregroundStyle(.tertiary)
+                                        }
+                                    }
+                                    Spacer()
+                                }
+                                .padding(.vertical, 2)
+                            }
+
+                            ForEach(fantasyTabResults.prefix(20)) { result in
+                                let sport = dfsResultSport(result.tournamentID)
+                                let tournament = dfsTournaments[result.tournamentID]
+                                let totalEntries = tournament?.totalEntries ?? 0
+                                let title = tournament?.title
+                                let date = result.createdAt ?? tournament?.lockTime
+
+                                HStack {
+                                    Image(systemName: dfsResultIcon(sport))
+                                        .font(.caption)
+                                        .foregroundStyle(dfsResultColor(sport))
+                                        .frame(width: 20)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack(spacing: 4) {
+                                            Text(sport)
+                                                .font(.system(size: 9, weight: .bold))
+                                                .padding(.horizontal, 5)
+                                                .padding(.vertical, 1)
+                                                .background(dfsResultColor(sport).opacity(0.15))
+                                                .foregroundStyle(dfsResultColor(sport))
+                                                .clipShape(Capsule())
+                                            if let title {
+                                                Text(title)
+                                                    .font(.caption.weight(.medium))
+                                                    .lineLimit(1)
+                                            }
+                                        }
+                                        HStack(spacing: 4) {
+                                            if totalEntries > 0 {
+                                                Text("#\(result.rank) of \(totalEntries)")
+                                                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                                            } else {
+                                                Text("#\(result.rank)")
+                                                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                                            }
+                                            if result.totalPoints > 0 {
+                                                Text("•")
+                                                    .foregroundStyle(.tertiary)
+                                                Text(String(format: "%.1f pts", result.totalPoints))
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                        if let date {
+                                            Text(date.formatted(date: .abbreviated, time: .omitted))
+                                                .font(.system(size: 10))
+                                                .foregroundStyle(.tertiary)
+                                        }
+                                    }
+                                    Spacer()
+                                }
+                                .padding(.vertical, 2)
+                            }
+                        }
+                        .padding(16)
+                        .background(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
+                    }
+
+                    if activePicks.isEmpty && settledPicks.isEmpty && dfsResults.isEmpty && bestBallResults.isEmpty {
                         VStack(spacing: 8) {
                             Image(systemName: "sportscourt")
                                 .font(.title2)
@@ -327,6 +469,27 @@ struct UserProfileView: View {
         .background(.white)
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
+    }
+
+    /// True when this `dfs_tournament_results` row originated from the
+    /// Fantasy tab (tier games, brackets) rather than the DFS tab (daily
+    /// salary-cap lineups). Tier/bracket tids carry distinct slugs —
+    /// "playoffs", grand-slam names, major names, etc. — instead of the
+    /// `<sport>-<YYYYMMDD>-...` date pattern that DFS tids use.
+    private func isFantasyTabResult(_ tournamentID: String) -> Bool {
+        if tournamentID.contains("playoffs") { return true }
+        if tournamentID.contains("masters") { return true }
+        if tournamentID.contains("pga-championship") { return true }
+        if tournamentID.contains("us-open") { return true }
+        if tournamentID.contains("the-open") { return true }
+        if tournamentID.contains("french-open") { return true }
+        if tournamentID.contains("wimbledon") { return true }
+        if tournamentID.contains("us-open-tennis") { return true }
+        if tournamentID.contains("australian-open") { return true }
+        if tournamentID.contains("tennis") { return true }
+        if tournamentID.contains("tiers") { return true }
+        if tournamentID.contains("bracket") { return true }
+        return false
     }
 
     private func dfsResultSport(_ tournamentID: String) -> String {
@@ -391,8 +554,11 @@ struct UserProfileView: View {
         async let fetchedTournaments = SupabaseService.shared.fetchRecentTournaments(
             accessToken: accessToken
         )
+        async let fetchedMemberships = SupabaseService.shared.fetchUserMemberships(
+            userID: profile.id, accessToken: accessToken
+        )
         do {
-            let (settled, active, dfs, tournaments) = try await (fetchedSettled, fetchedActive, fetchedDFS, fetchedTournaments)
+            let (settled, active, dfs, tournaments, memberships) = try await (fetchedSettled, fetchedActive, fetchedDFS, fetchedTournaments, fetchedMemberships)
             settledPicks = settled
             // Filter out stale active picks older than 7 days — these are unsettleable
             // (the ESPN lookback is 7 days, so they'll never resolve).
@@ -404,6 +570,56 @@ struct UserProfileView: View {
             }
             dfsResults = dfs
             dfsTournaments = Dictionary(uniqueKeysWithValues: tournaments.map { ($0.id, $0) })
+
+            // Best Ball placements: take every league the user is a member of,
+            // batch-fetch league metadata + standings, build profile rows.
+            let leagueIDs = Array(Set(memberships.map(\.leagueId)))
+            if !leagueIDs.isEmpty {
+                async let fetchedLeagues = SupabaseService.shared.fetchLeaguesByIDs(leagueIDs, accessToken: accessToken)
+                async let fetchedStandings = SupabaseService.shared.fetchStandingsBulk(leagueIDs: leagueIDs, accessToken: accessToken)
+                do {
+                    let (leagues, standings) = try await (fetchedLeagues, fetchedStandings)
+                    let leaguesByID = Dictionary(uniqueKeysWithValues: leagues.map { ($0.id, $0) })
+                    // Count members per league for the "X of N" denominator,
+                    // and locate the user's standing within each league.
+                    let standingsByLeague = Dictionary(grouping: standings, by: \.leagueId)
+                    let myMembershipsByLeague = Dictionary(uniqueKeysWithValues: memberships.map { ($0.leagueId, $0.id) })
+
+                    var rows: [BestBallProfileRow] = []
+                    for leagueID in leagueIDs {
+                        guard let league = leaguesByID[leagueID] else { continue }
+                        let leagueStandings = standingsByLeague[leagueID] ?? []
+                        let totalMembers = leagueStandings.count
+                        // Match by member_id (the user's row in this league)
+                        guard let myMemberID = myMembershipsByLeague[leagueID],
+                              let myStanding = leagueStandings.first(where: { $0.memberId == myMemberID }) else {
+                            continue
+                        }
+                        rows.append(BestBallProfileRow(
+                            id: leagueID,
+                            title: league.title,
+                            sport: league.sport.uppercased(),
+                            rank: myStanding.rank,
+                            totalMembers: totalMembers,
+                            totalPoints: myStanding.totalPoints,
+                            isCompleted: league.status == "completed",
+                            endedAt: myStanding.updatedAt
+                        ))
+                    }
+                    // Show completed leagues first (placement history), then
+                    // active leagues. Within each group, newest first.
+                    bestBallResults = rows.sorted { a, b in
+                        if a.isCompleted != b.isCompleted { return a.isCompleted }
+                        let aDate = a.endedAt ?? .distantPast
+                        let bDate = b.endedAt ?? .distantPast
+                        return aDate > bDate
+                    }
+                } catch {
+                    print("[UserProfile] Failed to load Best Ball results: \(error.localizedDescription)")
+                }
+            } else {
+                bestBallResults = []
+            }
         } catch {
             print("[UserProfile] Failed to load picks: \(error.localizedDescription)")
         }

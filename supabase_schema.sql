@@ -271,6 +271,24 @@ drop policy if exists "bb_leagues_update_auth" on public.bestball_leagues;
 create policy "bb_leagues_update_auth" on public.bestball_leagues
 for update using (auth.uid() is not null);
 
+-- Only the league's creator can delete it. Without this policy Postgres
+-- silently rejects every DELETE (PostgREST still returns 204) so the
+-- client thinks the delete worked while the row persists.
+drop policy if exists "bb_leagues_delete_creator" on public.bestball_leagues;
+create policy "bb_leagues_delete_creator" on public.bestball_leagues
+for delete using (auth.uid() = created_by);
+
+-- NFL starting-lineup configuration. Commissioner picks how many of
+-- each position score each week. Defaults match the prior hardcoded
+-- lineup (QB×1, RB×2, WR×2, TE×1, FLEX×2 — total 8 starters).
+alter table public.bestball_leagues
+    add column if not exists nfl_qb_starters integer default 1,
+    add column if not exists nfl_rb_starters integer default 2,
+    add column if not exists nfl_wr_starters integer default 2,
+    add column if not exists nfl_te_starters integer default 1,
+    add column if not exists nfl_flex_starters integer default 2,
+    add column if not exists nfl_sflex_starters integer default 0;
+
 -- Members: readable by all, users manage own membership
 drop policy if exists "bb_members_select_all" on public.bestball_members;
 create policy "bb_members_select_all" on public.bestball_members
@@ -287,6 +305,19 @@ for update using (auth.uid() is not null);
 drop policy if exists "bb_members_delete_own" on public.bestball_members;
 create policy "bb_members_delete_own" on public.bestball_members
 for delete using (auth.uid() = user_id);
+
+-- League creator can delete ANY member row (including bot rows which
+-- have a null user_id and so don't match the "delete_own" policy).
+-- Needed both for the standalone delete-league flow's pre-cascade
+-- cleanup and for kicking bots out of an open league.
+drop policy if exists "bb_members_delete_by_creator" on public.bestball_members;
+create policy "bb_members_delete_by_creator" on public.bestball_members
+for delete using (
+  exists (
+    select 1 from public.bestball_leagues l
+    where l.id = league_id and l.created_by = auth.uid()
+  )
+);
 
 -- Picks: readable by all, insertable by authenticated
 drop policy if exists "bb_picks_select_all" on public.bestball_picks;
@@ -862,6 +893,69 @@ select pg_notify('pgrst', 'reload schema');
 alter table public.chat_messages add column if not exists league_id text;
 create index if not exists idx_chat_messages_league on public.chat_messages(league_id);
 
+-- Explicit RLS policies for chat_messages so every authenticated user can
+-- read all messages in a chat room and insert their own. Without these,
+-- earlier-migration policies (if any) could restrict SELECT to your own
+-- messages and other users' messages in a private group chat would
+-- silently never appear.
+alter table public.chat_messages enable row level security;
+
+drop policy if exists "chat_messages_select_all_auth" on public.chat_messages;
+create policy "chat_messages_select_all_auth" on public.chat_messages
+    for select to authenticated using (true);
+
+drop policy if exists "chat_messages_insert_self" on public.chat_messages;
+create policy "chat_messages_insert_self" on public.chat_messages
+    for insert to authenticated with check (auth.uid()::text = user_id);
+
+drop policy if exists "chat_messages_update_self" on public.chat_messages;
+create policy "chat_messages_update_self" on public.chat_messages
+    for update to authenticated using (auth.uid()::text = user_id);
+
+drop policy if exists "chat_messages_delete_self" on public.chat_messages;
+create policy "chat_messages_delete_self" on public.chat_messages
+    for delete to authenticated using (auth.uid()::text = user_id);
+
+-- ============================================================
+-- Disk IO optimization: hot-path indexes
+-- ============================================================
+-- These cover the queries the iOS app fires most frequently. Each one
+-- below was previously a sequential scan (or worse) once the table grew
+-- past a few thousand rows. Adding them is the single biggest IO win
+-- before scaling past a handful of users.
+
+-- Pick'em: settlement and stat-restore paths
+create index if not exists idx_pickem_picks_result_isnull
+    on public.pickem_picks(result) where result is null;
+create index if not exists idx_pickem_picks_user_settled
+    on public.pickem_picks(user_id, settled_at desc);
+create index if not exists idx_pickem_picks_user_result
+    on public.pickem_picks(user_id, result);
+
+-- DFS: per-tournament results and user entries
+create index if not exists idx_dfs_results_tournament
+    on public.dfs_tournament_results(tournament_id);
+create index if not exists idx_dfs_results_tournament_user
+    on public.dfs_tournament_results(tournament_id, user_id);
+create index if not exists idx_dfs_entries_user_submitted
+    on public.dfs_entries(user_id, submitted_at desc);
+create index if not exists idx_dfs_entries_tournament_user
+    on public.dfs_entries(tournament_id, user_id);
+
+-- Tier games + tennis brackets: per-user entry lookup
+create index if not exists idx_st_entries_tid_user
+    on public.soccer_tiers_entries(tournament_id, user_id);
+create index if not exists idx_pt_entries_tid_user
+    on public.playoff_tiers_entries(tournament_id, user_id);
+create index if not exists idx_tb_entries_tid_user
+    on public.tennis_bracket_entries(tournament_id, user_id);
+create index if not exists idx_gt_entries_tid_user
+    on public.golf_tiers_entries(tournament_id, user_id);
+
+-- Chat: per-room recent messages
+create index if not exists idx_chat_messages_league_created
+    on public.chat_messages(league_id, created_at desc);
+
 select pg_notify('pgrst', 'reload schema');
 
 -- ============================================================
@@ -1226,6 +1320,83 @@ for select using (true);
 
 -- Writes only via the edge function (service-role key), not from clients.
 -- No insert/update/delete policies → those are blocked for normal users.
+
+-- ============================================================
+-- Profile avatars (chat + profile screens)
+-- Adds avatar_url to profiles and creates a public storage bucket with
+-- per-user RLS so users can only overwrite their own avatar path.
+-- ============================================================
+alter table public.profiles add column if not exists avatar_url text;
+
+insert into storage.buckets (id, name, public)
+values ('avatars', 'avatars', true)
+on conflict (id) do nothing;
+
+create policy "Avatars are publicly readable"
+  on storage.objects for select using (bucket_id = 'avatars');
+
+create policy "Users can upload their own avatar"
+  on storage.objects for insert with check (
+    bucket_id = 'avatars' and auth.uid()::text = (storage.foldername(name))[1]
+  );
+
+create policy "Users can update their own avatar"
+  on storage.objects for update using (
+    bucket_id = 'avatars' and auth.uid()::text = (storage.foldername(name))[1]
+  );
+
+-- ============================================================
+-- Chat reactions
+-- (message_id, user_id, emoji) is unique so a user can react with the
+-- same emoji at most once per message. Cascade-deletes ensure stale
+-- reactions clear when the original message is deleted.
+-- ============================================================
+create table if not exists public.chat_reactions (
+    id uuid primary key default gen_random_uuid(),
+    message_id uuid not null references public.chat_messages(id) on delete cascade,
+    user_id uuid not null,
+    emoji text not null,
+    created_at timestamptz not null default now(),
+    unique (message_id, user_id, emoji)
+);
+
+create index if not exists idx_chat_reactions_message on public.chat_reactions(message_id);
+
+alter table public.chat_reactions enable row level security;
+
+create policy "reactions_select_all" on public.chat_reactions
+for select using (true);
+
+create policy "reactions_insert_own" on public.chat_reactions
+for insert with check (auth.uid() = user_id);
+
+create policy "reactions_delete_own" on public.chat_reactions
+for delete using (auth.uid() = user_id);
+
+-- Account deletion RPC (Apple App Review 5.1.1(v) compliance).
+-- The client cannot delete from `auth.users` directly; this function runs
+-- with SECURITY DEFINER so it can. It deletes only the CALLER's row, and
+-- the ON DELETE CASCADE on `profiles.id` (plus every other FK referencing
+-- `auth.users(id)`) cascades through every piece of user-owned data.
+create or replace function public.delete_current_user()
+returns void
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+    caller uuid;
+begin
+    caller := auth.uid();
+    if caller is null then
+        raise exception 'Not authenticated';
+    end if;
+    delete from auth.users where id = caller;
+end;
+$$;
+
+revoke all on function public.delete_current_user() from public;
+grant execute on function public.delete_current_user() to authenticated;
 
 select pg_notify('pgrst', 'reload schema');
 

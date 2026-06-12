@@ -103,11 +103,13 @@ struct DFSProfileRecord: Codable, Identifiable {
     let rrScore: Int?
     let wins: Int?
     let losses: Int?
+    let avatarUrl: String?
 
     enum CodingKeys: String, CodingKey {
         case id, username
         case rrScore = "rr_score"
         case wins, losses
+        case avatarUrl = "avatar_url"
     }
 }
 
@@ -151,10 +153,12 @@ struct LeaderboardProfile: Codable, Identifiable {
     let rrScore: Int
     let wins: Int
     let losses: Int
+    let avatarUrl: String?
 
     enum CodingKeys: String, CodingKey {
         case id, username, wins, losses
         case rrScore = "rr_score"
+        case avatarUrl = "avatar_url"
     }
 }
 
@@ -288,6 +292,12 @@ struct BestBallLeagueRecord: Codable, Identifiable {
     let pitcherSlots: Int?
     let batterSlots: Int?
     let scoringMode: String?
+    let nflQbStarters: Int?
+    let nflRbStarters: Int?
+    let nflWrStarters: Int?
+    let nflTeStarters: Int?
+    let nflFlexStarters: Int?
+    let nflSflexStarters: Int?
 
     enum CodingKeys: String, CodingKey {
         case id, title, sport, season, status, schedule
@@ -308,10 +318,16 @@ struct BestBallLeagueRecord: Codable, Identifiable {
         case pitcherSlots = "pitcher_slots"
         case batterSlots = "batter_slots"
         case scoringMode = "scoring_mode"
+        case nflQbStarters = "nfl_qb_starters"
+        case nflRbStarters = "nfl_rb_starters"
+        case nflWrStarters = "nfl_wr_starters"
+        case nflTeStarters = "nfl_te_starters"
+        case nflFlexStarters = "nfl_flex_starters"
+        case nflSflexStarters = "nfl_sflex_starters"
     }
 
     func toModel() -> BestBallLeague {
-        BestBallLeague(
+        var league = BestBallLeague(
             id: id, title: title, sport: sport, season: season,
             status: status, draftStartTime: draftStartTime,
             draftOrder: draftOrder, currentPickNumber: currentPickNumber,
@@ -328,6 +344,13 @@ struct BestBallLeagueRecord: Codable, Identifiable {
             batterSlots: batterSlots ?? 6,
             scoringMode: BestBallScoringMode(rawValue: scoringMode ?? "normal") ?? .normal
         )
+        league.nflQbStarters = nflQbStarters ?? 1
+        league.nflRbStarters = nflRbStarters ?? 2
+        league.nflWrStarters = nflWrStarters ?? 2
+        league.nflTeStarters = nflTeStarters ?? 1
+        league.nflFlexStarters = nflFlexStarters ?? 2
+        league.nflSflexStarters = nflSflexStarters ?? 0
+        return league
     }
 }
 
@@ -512,6 +535,22 @@ struct ChatMessageRecord: Codable, Identifiable {
         case body
         case createdAt = "created_at"
         case leagueId = "league_id"
+    }
+}
+
+struct ChatReactionRecord: Codable, Identifiable {
+    let id: String
+    let messageId: String
+    let userId: String
+    let emoji: String
+    let createdAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case messageId = "message_id"
+        case userId = "user_id"
+        case emoji
+        case createdAt = "created_at"
     }
 }
 
@@ -1747,7 +1786,7 @@ final class SupabaseService {
         var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/profiles"), resolvingAgainstBaseURL: false)
         components?.queryItems = [
             URLQueryItem(name: "id", value: "in.(\(joined))"),
-            URLQueryItem(name: "select", value: "id,username,rr_score,wins,losses")
+            URLQueryItem(name: "select", value: "id,username,rr_score,wins,losses,avatar_url")
         ]
         guard let url = components?.url else { throw URLError(.badURL) }
         return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
@@ -1758,12 +1797,58 @@ final class SupabaseService {
     func fetchTopProfiles(limit: Int = 100, accessToken: String) async throws -> [LeaderboardProfile] {
         var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/profiles"), resolvingAgainstBaseURL: false)
         components?.queryItems = [
-            URLQueryItem(name: "select", value: "id,username,rr_score,wins,losses"),
+            URLQueryItem(name: "select", value: "id,username,rr_score,wins,losses,avatar_url"),
             URLQueryItem(name: "order", value: "rr_score.desc"),
             URLQueryItem(name: "limit", value: "\(limit)")
         ]
         guard let url = components?.url else { throw URLError(.badURL) }
         return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+    }
+
+    // MARK: - Avatars
+
+    /// Uploads JPEG image data to the `avatars` Supabase storage bucket
+    /// under `{userID}/avatar.jpg` and returns the public URL. The RLS
+    /// policies on the bucket require the path's first folder to match
+    /// the authenticated user's ID — see supabase_schema.sql.
+    func uploadAvatar(userID: String, jpegData: Data, accessToken: String) async throws -> String {
+        let path = "\(userID)/avatar.jpg"
+        let url = SupabaseConfig.url.appending(path: "/storage/v1/object/avatars/\(path)")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(SupabaseConfig.publishableKey, forHTTPHeaderField: "apikey")
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        // `x-upsert: true` lets us overwrite the same path each time the
+        // user changes their avatar without first deleting the old object.
+        request.setValue("true", forHTTPHeaderField: "x-upsert")
+        request.httpBody = jpegData
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let message = String(data: data, encoding: .utf8) ?? "unknown"
+            throw NSError(domain: "Supabase", code: (response as? HTTPURLResponse)?.statusCode ?? -1,
+                          userInfo: [NSLocalizedDescriptionKey: "avatar upload failed: \(message)"])
+        }
+        // Public URL — bucket is public, no signing needed. Append a cache
+        // buster so the new image shows immediately after replacing the
+        // old one at the same path.
+        let cacheBuster = String(Int(Date().timeIntervalSince1970))
+        return "\(SupabaseConfig.url.absoluteString)/storage/v1/object/public/avatars/\(path)?t=\(cacheBuster)"
+    }
+
+    /// Persists an avatar URL onto the user's profile row.
+    func updateProfileAvatarURL(userID: String, avatarURL: String, accessToken: String) async throws {
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/profiles"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "id", value: "eq.\(userID)")]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        struct Payload: Codable {
+            let avatarUrl: String
+            enum CodingKeys: String, CodingKey { case avatarUrl = "avatar_url" }
+        }
+        try await requestNoResponse(
+            url: url, method: "PATCH",
+            body: Payload(avatarUrl: avatarURL), bearerToken: accessToken
+        )
     }
 
     /// Fetch all users' settled picks since a given date (for time-filtered leaderboard).
@@ -1908,6 +1993,23 @@ final class SupabaseService {
         try await requestNoResponse(url: url, method: "PATCH", body: Payload(rrScore: rrScore, wins: wins, losses: losses), bearerToken: accessToken)
     }
 
+    /// Permanently delete the calling user's account and all associated data.
+    /// Calls the `delete_current_user` RPC which runs `SECURITY DEFINER` so
+    /// it can remove the row from `auth.users`; every FK with ON DELETE
+    /// CASCADE handles the rest (profile, dfs entries/results, picks,
+    /// friendships, chat messages, etc.). Required for Apple App Review
+    /// guideline 5.1.1(v) — apps that support account creation must also
+    /// support in-app account deletion.
+    func deleteCurrentUser(accessToken: String) async throws {
+        let url = SupabaseConfig.url.appending(path: "/rest/v1/rpc/delete_current_user")
+        struct Empty: Codable {}
+        try await requestNoResponse(
+            url: url, method: "POST",
+            body: Empty(),
+            bearerToken: accessToken
+        )
+    }
+
     /// Atomically adjust another user's profile stats via Postgres RPC (for global pick settlement)
     func adjustProfileStats(userID: String, rrDelta: Int, winsDelta: Int, lossesDelta: Int, accessToken: String) async throws {
         let url = SupabaseConfig.url.appending(path: "/rest/v1/rpc/adjust_profile_stats")
@@ -1960,11 +2062,38 @@ final class SupabaseService {
         return results.first
     }
 
+    /// Batch fetch leagues by ID — used by the profile screen to display
+    /// every Best Ball league the user belongs to in one round trip rather
+    /// than N sequential GETs.
+    func fetchLeaguesByIDs(_ ids: [String], accessToken: String) async throws -> [BestBallLeagueRecord] {
+        guard !ids.isEmpty else { return [] }
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/bestball_leagues"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "id", value: "in.(\(ids.joined(separator: ",")))"),
+            URLQueryItem(name: "select", value: "*")
+        ]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+    }
+
+    /// Batch fetch standings rows across multiple leagues at once.
+    func fetchStandingsBulk(leagueIDs: [String], accessToken: String) async throws -> [BestBallStandingRecord] {
+        guard !leagueIDs.isEmpty else { return [] }
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/bestball_standings"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "league_id", value: "in.(\(leagueIDs.joined(separator: ",")))"),
+            URLQueryItem(name: "select", value: "*")
+        ]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+    }
+
     func createLeague(
         title: String, sport: String, season: String,
         isPrivate: Bool = false, maxMembers: Int = 12, rosterSize: Int = 12,
         pitcherSlots: Int = 2, batterSlots: Int = 6,
         scoringMode: String = "normal",
+        nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0,
         createdBy: String, accessToken: String
     ) async throws -> BestBallLeagueRecord {
         var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/bestball_leagues"), resolvingAgainstBaseURL: false)
@@ -1987,6 +2116,12 @@ final class SupabaseService {
             let pitcherSlots: Int
             let batterSlots: Int
             let scoringMode: String
+            let nflQbStarters: Int
+            let nflRbStarters: Int
+            let nflWrStarters: Int
+            let nflTeStarters: Int
+            let nflFlexStarters: Int
+            let nflSflexStarters: Int
             enum CodingKeys: String, CodingKey {
                 case title, sport, season
                 case totalWeeks = "total_weeks"
@@ -1998,6 +2133,12 @@ final class SupabaseService {
                 case pitcherSlots = "pitcher_slots"
                 case batterSlots = "batter_slots"
                 case scoringMode = "scoring_mode"
+                case nflQbStarters = "nfl_qb_starters"
+                case nflRbStarters = "nfl_rb_starters"
+                case nflWrStarters = "nfl_wr_starters"
+                case nflTeStarters = "nfl_te_starters"
+                case nflFlexStarters = "nfl_flex_starters"
+                case nflSflexStarters = "nfl_sflex_starters"
             }
         }
         let payload = Payload(
@@ -2007,7 +2148,10 @@ final class SupabaseService {
             maxMembers: maxMembers, rosterSize: rosterSize,
             inviteCode: inviteCode,
             pitcherSlots: pitcherSlots, batterSlots: batterSlots,
-            scoringMode: scoringMode
+            scoringMode: scoringMode,
+            nflQbStarters: nflQB, nflRbStarters: nflRB,
+            nflWrStarters: nflWR, nflTeStarters: nflTE, nflFlexStarters: nflFLEX,
+            nflSflexStarters: nflSFLEX
         )
         let results: [BestBallLeagueRecord] = try await request(url: url, method: "POST", body: payload, bearerToken: accessToken, preferReturn: "representation")
         guard let league = results.first else { throw URLError(.badServerResponse) }
@@ -2023,6 +2167,7 @@ final class SupabaseService {
         leagueID: String, title: String, maxMembers: Int, rosterSize: Int, isPrivate: Bool,
         pitcherSlots: Int = 2, batterSlots: Int = 6,
         scoringMode: String = "normal",
+        nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0,
         accessToken: String
     ) async throws {
         var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/bestball_leagues"), resolvingAgainstBaseURL: false)
@@ -2037,6 +2182,12 @@ final class SupabaseService {
             let pitcherSlots: Int
             let batterSlots: Int
             let scoringMode: String
+            let nflQbStarters: Int
+            let nflRbStarters: Int
+            let nflWrStarters: Int
+            let nflTeStarters: Int
+            let nflFlexStarters: Int
+            let nflSflexStarters: Int
             enum CodingKeys: String, CodingKey {
                 case title
                 case maxMembers = "max_members"
@@ -2046,13 +2197,27 @@ final class SupabaseService {
                 case pitcherSlots = "pitcher_slots"
                 case batterSlots = "batter_slots"
                 case scoringMode = "scoring_mode"
+                case nflQbStarters = "nfl_qb_starters"
+                case nflRbStarters = "nfl_rb_starters"
+                case nflWrStarters = "nfl_wr_starters"
+                case nflTeStarters = "nfl_te_starters"
+                case nflFlexStarters = "nfl_flex_starters"
+                case nflSflexStarters = "nfl_sflex_starters"
             }
         }
         // Generate invite code if switching to private and none exists
         let inviteCode: String? = isPrivate ? Self.generateInviteCode() : nil
         try await requestNoResponse(
             url: url, method: "PATCH",
-            body: Payload(title: title, maxMembers: maxMembers, rosterSize: rosterSize, isPrivate: isPrivate, inviteCode: inviteCode, pitcherSlots: pitcherSlots, batterSlots: batterSlots, scoringMode: scoringMode),
+            body: Payload(
+                title: title, maxMembers: maxMembers, rosterSize: rosterSize,
+                isPrivate: isPrivate, inviteCode: inviteCode,
+                pitcherSlots: pitcherSlots, batterSlots: batterSlots,
+                scoringMode: scoringMode,
+                nflQbStarters: nflQB, nflRbStarters: nflRB,
+                nflWrStarters: nflWR, nflTeStarters: nflTE, nflFlexStarters: nflFLEX,
+                nflSflexStarters: nflSFLEX
+            ),
             bearerToken: accessToken
         )
     }
@@ -2166,6 +2331,59 @@ final class SupabaseService {
         ]
         guard let url = components?.url else { throw URLError(.badURL) }
         try await requestNoResponse(url: url, method: "DELETE", body: Optional<String>.none, bearerToken: accessToken)
+    }
+
+    /// Delete a Best Ball league and every dependent row. We rely on
+    /// the `bb_leagues_delete_creator` RLS policy + the `ON DELETE
+    /// CASCADE` foreign keys on the child tables — the league row's
+    /// removal cleans up members/picks/scores/standings server-side.
+    /// We also pre-delete the member rows so that the `bb_members_delete_by_creator`
+    /// policy fires and clears bot rows in environments where cascade
+    /// isn't configured.
+    ///
+    /// Verifies the league row was actually removed via PostgREST's
+    /// `Prefer: return=representation` so we throw an error if RLS
+    /// silently rejected the DELETE (otherwise PostgREST returns 204
+    /// either way and the client thinks the delete worked).
+    func deleteLeague(leagueID: String, accessToken: String) async throws {
+        // Step 1: best-effort delete child member rows (covers stale
+        // schemas without cascade). Failures here are non-fatal —
+        // cascade should pick up any leftovers when the league row is
+        // removed below.
+        var memberComponents = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/bestball_members"), resolvingAgainstBaseURL: false)
+        memberComponents?.queryItems = [URLQueryItem(name: "league_id", value: "eq.\(leagueID)")]
+        if let url = memberComponents?.url {
+            try? await requestNoResponse(url: url, method: "DELETE", body: Optional<String>.none, bearerToken: accessToken)
+        }
+        // Step 2: delete the league row and verify at least one row came
+        // back in the representation. Empty array = RLS-blocked silently.
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/bestball_leagues"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "id", value: "eq.\(leagueID)"),
+            URLQueryItem(name: "select", value: "id")
+        ]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        var req = URLRequest(url: url)
+        req.httpMethod = "DELETE"
+        req.setValue(SupabaseConfig.publishableKey, forHTTPHeaderField: "apikey")
+        req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("return=representation", forHTTPHeaderField: "Prefer")
+        let (data, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw NSError(domain: "Supabase", code: (response as? HTTPURLResponse)?.statusCode ?? -1,
+                          userInfo: [NSLocalizedDescriptionKey: "Failed to delete league"])
+        }
+        // 204 No Content (no rows returned) OR empty array → RLS denied.
+        if http.statusCode == 204 {
+            throw NSError(domain: "Supabase", code: 403,
+                          userInfo: [NSLocalizedDescriptionKey: "League delete was blocked. Make sure the `bb_leagues_delete_creator` RLS policy is applied in Supabase."])
+        }
+        let deletedRows = (try? JSONSerialization.jsonObject(with: data) as? [Any]) ?? []
+        if deletedRows.isEmpty {
+            throw NSError(domain: "Supabase", code: 403,
+                          userInfo: [NSLocalizedDescriptionKey: "League delete was blocked. Make sure the `bb_leagues_delete_creator` RLS policy is applied in Supabase."])
+        }
     }
 
     func joinLeague(leagueID: String, userID: String, displayName: String, slotIndex: Int, accessToken: String) async throws -> BestBallMemberRecord {
@@ -2897,6 +3115,52 @@ final class SupabaseService {
         }
         let payload = Payload(userId: userId, username: username, body: body, leagueId: leagueId)
         try await requestNoResponse(url: url, method: "POST", body: payload, bearerToken: accessToken)
+    }
+
+    // MARK: - Chat Reactions
+
+    /// Fetches reactions for a batch of message IDs.
+    func fetchChatReactions(messageIDs: [String], accessToken: String) async throws -> [ChatReactionRecord] {
+        guard !messageIDs.isEmpty else { return [] }
+        let joined = messageIDs.joined(separator: ",")
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/chat_reactions"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "message_id", value: "in.(\(joined))"),
+            URLQueryItem(name: "select", value: "id,message_id,user_id,emoji,created_at")
+        ]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+    }
+
+    /// Adds a reaction. Unique constraint (message_id, user_id, emoji) makes
+    /// double-taps a no-op so we don't need to check existence client-side.
+    func addChatReaction(messageID: String, userID: String, emoji: String, accessToken: String) async throws {
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/chat_reactions"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "on_conflict", value: "message_id,user_id,emoji")]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        struct Payload: Codable {
+            let messageId: String
+            let userId: String
+            let emoji: String
+            enum CodingKeys: String, CodingKey {
+                case messageId = "message_id"
+                case userId = "user_id"
+                case emoji
+            }
+        }
+        let payload = [Payload(messageId: messageID, userId: userID, emoji: emoji)]
+        try await requestNoResponse(url: url, method: "POST", body: payload, bearerToken: accessToken, preferUpsert: true)
+    }
+
+    func removeChatReaction(messageID: String, userID: String, emoji: String, accessToken: String) async throws {
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/chat_reactions"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "message_id", value: "eq.\(messageID)"),
+            URLQueryItem(name: "user_id", value: "eq.\(userID)"),
+            URLQueryItem(name: "emoji", value: "eq.\(emoji)")
+        ]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        try await requestNoResponse(url: url, method: "DELETE", body: Optional<String>.none, bearerToken: accessToken)
     }
 
     // MARK: - Playoff Tiers CRUD
@@ -4180,6 +4444,33 @@ final class SupabaseService {
         guard let url = components?.url else { throw URLError(.badURL) }
         struct Payload: Codable { let status: String }
         try await requestNoResponse(url: url, method: "PATCH", body: Payload(status: status), bearerToken: accessToken)
+    }
+
+    /// Resets a golf tiers tournament back to a clean pre-signup state.
+    /// Used by the corrupt-row self-heal: a major that was created+settled
+    /// outside its own calendar window (e.g. "us-open-2026" settled in May
+    /// against the Memorial) gets its status/settled flag/lock time wiped so
+    /// the real event can run when its window arrives.
+    func resetGolfTiersTournamentToOpen(tournamentID: String, accessToken: String) async throws {
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/golf_tiers_tournaments"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "id", value: "eq.\(tournamentID)")]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        struct Payload: Encodable {
+            enum CodingKeys: String, CodingKey {
+                case status
+                case isSettled = "is_settled"
+                case lockTime = "lock_time"
+                case espnEventID = "espn_event_id"
+            }
+            func encode(to encoder: Encoder) throws {
+                var c = encoder.container(keyedBy: CodingKeys.self)
+                try c.encode("open", forKey: .status)
+                try c.encode(false, forKey: .isSettled)
+                try c.encodeNil(forKey: .lockTime)
+                try c.encodeNil(forKey: .espnEventID)
+            }
+        }
+        try await requestNoResponse(url: url, method: "PATCH", body: Payload(), bearerToken: accessToken)
     }
 
     func markGolfTiersTournamentSettled(tournamentID: String, accessToken: String) async throws {

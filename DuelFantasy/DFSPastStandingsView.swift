@@ -37,14 +37,20 @@ struct DFSPastStandingsView: View {
             || result.tournamentId?.hasPrefix("ucl-") == true
             || result.tournamentId?.hasPrefix("wc-") == true
     }
+    private var isUFC: Bool {
+        result.tournamentId?.hasPrefix("ufc-") == true
+    }
     private var sportLabel: String {
         if isGolf { return "PGA" }
         if isMLB { return "MLB" }
         if isNHL { return "NHL" }
+        if isUFC { return "UFC" }
         if result.tournamentId?.hasPrefix("ncaam-") == true { return "NCAAM" }
         if result.tournamentId?.hasPrefix("epl-") == true { return "EPL" }
         if result.tournamentId?.hasPrefix("ucl-") == true { return "UCL" }
         if result.tournamentId?.hasPrefix("wc-") == true { return "WC" }
+        if result.tournamentId?.hasPrefix("nfl-") == true { return "NFL" }
+        if result.tournamentId?.hasPrefix("cfb-") == true { return "CFB" }
         return "NBA"
     }
 
@@ -291,10 +297,20 @@ struct DFSPastStandingsView: View {
 
     /// Rebuild cached maps only when leaderboard/result data actually changes
     private func rebuildCachesIfNeeded() {
+        // Include the first record's id hash in the version — without it,
+        // a regen that replaces the bot field but keeps the same entry
+        // count (2000 in, 2000 out) leaves the version unchanged and the
+        // entry-id→record map keeps stale UUIDs, breaking row expansion.
+        let firstIDHash = viewModel.pastTournamentResultRecords.first?.id.hashValue ?? 0
+        let lastIDHash = viewModel.pastTournamentResultRecords.last?.id.hashValue ?? 0
         let version = viewModel.pastTournamentLeaderboard.count
             + viewModel.pastTournamentResultRecords.count * 1000
+            &+ firstIDHash &+ lastIDHash
         guard version != cachedDataVersion else { return }
         cachedDataVersion = version
+        // New data means the previously-expanded row's UUID no longer
+        // matches; clear so the next tap re-expands cleanly.
+        expandedEntryID = nil
 
         var map: [UUID: DFSTournamentResultRecord] = [:]
         for (index, entry) in viewModel.pastTournamentLeaderboard.enumerated() {
@@ -549,6 +565,8 @@ struct DFSPastStandingsView: View {
                         nhlExpandedLineup(record: record)
                     } else if isSoccer {
                         soccerExpandedLineup(record: record)
+                    } else if isUFC {
+                        ufcExpandedLineup(record: record)
                     } else {
                         basketballExpandedLineup(record: record)
                     }
@@ -645,6 +663,102 @@ struct DFSPastStandingsView: View {
                     Text("-").frame(width: 30, alignment: .trailing)
                     Text("-").frame(width: 28, alignment: .trailing)
                     Text("-").frame(width: 28, alignment: .trailing)
+                }
+
+                Text(String(format: "%.1f", fpts))
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(brandPurple)
+                    .frame(width: 38, alignment: .trailing)
+            }
+            .font(.caption.monospacedDigit())
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+        }
+
+        lineupTotalsRow(record: record)
+    }
+
+    // MARK: - UFC Expanded Lineup
+
+    /// MMA box-score columns: SIG / TD / KD / SUB / CTRL. Same DFSPlayerLiveStats
+    /// field mapping the live view uses (points=sig strikes, rebounds=takedowns,
+    /// assists=knockdowns, steals=sub attempts, blocks=time-in-control seconds).
+    @ViewBuilder
+    private func ufcExpandedLineup(record: DFSTournamentResultRecord) -> some View {
+        HStack(spacing: 0) {
+            Text("FIGHTER")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("SIG")
+                .frame(width: 28, alignment: .trailing)
+            Text("TD")
+                .frame(width: 24, alignment: .trailing)
+            Text("KD")
+                .frame(width: 24, alignment: .trailing)
+            Text("SUB")
+                .frame(width: 28, alignment: .trailing)
+            Text("CTRL")
+                .frame(width: 36, alignment: .trailing)
+            Text("FPTS")
+                .frame(width: 38, alignment: .trailing)
+        }
+        .font(.system(size: 9, weight: .bold))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+
+        let playerIDs = record.lineupPlayerIDs
+        let playerNames = record.lineupPlayerNames
+        let perPlayerPts = resolvePlayerPoints(for: record)
+
+        ForEach(Array(playerIDs.enumerated()), id: \.offset) { index, playerID in
+            let storedName = index < playerNames.count ? playerNames[index] : playerID
+            let name = resolvePlayerName(storedName: storedName, playerID: playerID)
+            let fpts = perPlayerPts[playerID] ?? 0
+            let stats = viewModel.pastTournamentPlayerStats[playerID]
+
+            HStack(spacing: 0) {
+                HStack(spacing: 4) {
+                    Text("F")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 18, height: 18)
+                        .background(Color(red: 0.6, green: 0.1, blue: 0.1))
+                        .clipShape(Circle())
+                    Text(lastName(name))
+                        .font(.caption.weight(.medium))
+                        .lineLimit(1)
+                    if let sal = salaryForPlayer(playerID, in: record) {
+                        Text("$\(viewModel.formatSalary(sal))")
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    if let pct = ownershipByPlayerID[playerID] {
+                        Text("\(pct)%")
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundStyle(.orange)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                if let stats {
+                    Text("\(stats.points)")
+                        .frame(width: 28, alignment: .trailing)
+                    Text("\(stats.rebounds)")
+                        .frame(width: 24, alignment: .trailing)
+                    Text("\(stats.assists)")
+                        .frame(width: 24, alignment: .trailing)
+                    Text("\(stats.steals)")
+                        .frame(width: 28, alignment: .trailing)
+                    let ctrlMin = stats.blocks / 60
+                    let ctrlSec = stats.blocks % 60
+                    Text("\(ctrlMin):\(String(format: "%02d", ctrlSec))")
+                        .frame(width: 36, alignment: .trailing)
+                } else {
+                    Text("-").frame(width: 28, alignment: .trailing)
+                    Text("-").frame(width: 24, alignment: .trailing)
+                    Text("-").frame(width: 24, alignment: .trailing)
+                    Text("-").frame(width: 28, alignment: .trailing)
+                    Text("-").frame(width: 36, alignment: .trailing)
                 }
 
                 Text(String(format: "%.1f", fpts))
@@ -1351,12 +1465,16 @@ struct DFSPastStandingsView: View {
     @ViewBuilder
     private func lineupTotalsRow(record: DFSTournamentResultRecord) -> some View {
         let playerIDs = record.lineupPlayerIDs
-        let rawTotalSalary = playerIDs.reduce(0) { sum, pid in
+        let totalSalary = playerIDs.reduce(0) { sum, pid in
             sum + (salaryForPlayer(pid, in: record) ?? 0)
         }
-        // Cap displayed salary at the sport's salary cap
+        // Show the REAL salary sum, not a `min(sum, cap)`. The cap was being
+        // used to hide over-cap bot lineups in the UI, which masked a real
+        // bug in the bot field (stale prices, cross-session showdown
+        // conversion drift). When a lineup actually exceeds the cap, color
+        // the total red so the bug is visible.
         let capLimit = 50000
-        let totalSalary = min(rawTotalSalary, capLimit)
+        let isOverCap = totalSalary > capLimit
         Divider().padding(.horizontal, 12)
         HStack(spacing: 0) {
             Text("TOTAL")
@@ -1365,7 +1483,7 @@ struct DFSPastStandingsView: View {
             if totalSalary > 0 {
                 Text("$\(viewModel.formatSalary(totalSalary))")
                     .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isOverCap ? .red : .secondary)
                     .padding(.leading, 4)
             }
             Spacer()

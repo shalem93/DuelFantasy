@@ -151,11 +151,15 @@ struct SoccerTiersEngine {
         return tiers
     }
 
-    /// Soccer fantasy scoring (FanDuel-style)
+    /// Soccer fantasy scoring (FanDuel-style). Identical to the DFS soccer
+    /// scoring in SoccerDFSData.swift — includes the defensive-stats fix
+    /// (interceptions/blocks/clearances) so CBs like Marquinhos aren't
+    /// stuck averaging ~1.7 FPTS per match.
     static func soccerFantasyPoints(
         position: String,
         goals: Int, assists: Int, shotsOnTarget: Int, totalShots: Int,
-        tackles: Int, saves: Int, yellowCards: Int, redCards: Int,
+        tackles: Int, interceptions: Int, blockedShots: Int, clearances: Int,
+        saves: Int, yellowCards: Int, redCards: Int,
         foulsDrawn: Int, goalsAgainst: Int,
         cleanSheet: Bool, gameFinal: Bool, teamWon: Bool
     ) -> Double {
@@ -169,6 +173,11 @@ struct SoccerTiersEngine {
         pts += Double(foulsDrawn) * 1.0
         pts -= Double(yellowCards) * 1.0
         pts -= Double(redCards) * 3.0
+        // Defensive actions — applied to every position but disproportionately
+        // benefit DEF/CDM players who rack these up without scoring goals.
+        pts += Double(interceptions) * 1.0
+        pts += Double(blockedShots) * 1.5
+        pts += Double(clearances) * 0.3
         if position == "DEF" {
             if cleanSheet && gameFinal { pts += 5.0 }
             pts -= Double(goalsAgainst) * 0.6
@@ -246,10 +255,14 @@ struct SoccerTiersEngine {
 
 struct SoccerTiersSquadData {
 
-    /// Composite score: (marketValue × 0.6) + (fifaRankWeight × 0.4)
-    /// Higher score = higher tier placement
+    /// Composite score: (marketValue × 0.85) + (fifaRankWeight × 0.15)
+    /// Higher score = higher tier placement. Individual ability is the
+    /// dominant factor — team strength is only a small tiebreaker. The
+    /// previous 60/40 split dragged elite individual stars down too far
+    /// when their nation's rank was middling (e.g. Haaland with Norway
+    /// at FRW 70 ended up in T4 instead of T1).
     private static func composite(_ marketValue: Double, _ fifaRankWeight: Double) -> Double {
-        marketValue * 0.6 + fifaRankWeight * 0.4
+        marketValue * 0.85 + fifaRankWeight * 0.15
     }
 
     /// Generate the full player pool for World Cup 2026 Tiers
@@ -307,7 +320,6 @@ struct SoccerTiersSquadData {
         add("Harry Kane",           "England", "ENG", "FWD", 85, 94)
         add("Declan Rice",          "England", "ENG", "MID", 82, 94)
         add("Trent Alexander-Arnold", "England", "ENG", "DEF", 80, 94)
-        add("Cole Palmer",          "England", "ENG", "FWD", 86, 94)
         add("Kobbie Mainoo",        "England", "ENG", "MID", 74, 94)
         add("Marc Guehi",           "England", "ENG", "DEF", 72, 94)
         add("Jordan Pickford",      "England", "ENG", "GK",  68, 94)
@@ -724,8 +736,22 @@ struct ESPNSoccerTiersDataProvider: Sendable {
 
     // MARK: - Fetch Accumulated Scores
 
-    /// Fetch accumulated fantasy points across ALL World Cup matches.
-    func fetchWorldCupScores(playerIDs: Set<String>) async -> SoccerTiersScoreSnapshot {
+    /// Fetch accumulated fantasy points for the player pool across every
+    /// completed or in-progress World Cup match. Mirrors the DFS soccer
+    /// scoring pipeline (`ESPNSoccerDFSLiveScoringProvider`) but
+    /// accumulates per-player FPTS across the whole tournament instead
+    /// of a single slate.
+    ///
+    /// Match flow per event:
+    ///   1. Fetch the `/summary?event=` payload for goals/assists/shots/cards
+    ///   2. Fetch each picked player's core-API stats line for defensive
+    ///      actions (tackles / interceptions / blocks / clearances) — the
+    ///      `/summary` response intentionally omits those stats
+    ///   3. Pass everything into `SoccerTiersEngine.soccerFantasyPoints`
+    ///      (the updated formula that gives defenders credit for the
+    ///      defensive actions Marquinhos-style)
+    ///   4. Sum per playerID across every event
+    func fetchWorldCupScores(players: [SoccerTiersPlayer]) async -> SoccerTiersScoreSnapshot {
         let events = await fetchWorldCupMatches()
 
         // Filter to completed or in-progress matches
@@ -749,14 +775,274 @@ struct ESPNSoccerTiersDataProvider: Sendable {
             )
         }
 
-        // TODO: Fetch per-match player stats from ESPN summaries and accumulate
-        // This will be implemented closer to the tournament start.
-        // Pattern follows SoccerDFSData.swift ESPNSoccerDFSLiveScoringProvider.
+        // Build a name → SoccerTiersPlayer lookup so we can map ESPN's
+        // athlete payloads back to our pool. Names are lowercased and
+        // accent-folded so "Vinícius Júnior" matches "Vinicius Junior".
+        func normalize(_ s: String) -> String {
+            s.lowercased().folding(options: .diacriticInsensitive, locale: .current)
+        }
+        var playerByName: [String: SoccerTiersPlayer] = [:]
+        for p in players {
+            playerByName[normalize(p.name)] = p
+        }
+        let allowedCountryCodes: Set<String> = Set(players.map { $0.countryCode.uppercased() })
+
+        // Accumulators (concurrent-safe via TaskGroup serialization at receive)
+        var fantasyPointsByID: [String: Double] = [:]
+        var matchesPlayedByID: [String: Int] = [:]
+
+        // Batch the per-match work so we don't open hundreds of sockets
+        // at once on a tournament with 60+ completed matches.
+        let batchSize = 8
+        for batchStart in stride(from: 0, to: matchIDs.count, by: batchSize) {
+            let batchEnd = min(batchStart + batchSize, matchIDs.count)
+            let batch = Array(matchIDs[batchStart..<batchEnd])
+
+            let batchResults = await withTaskGroup(of: [(String, Double)].self) { group in
+                for matchID in batch {
+                    group.addTask {
+                        await self.scoreMatchForPool(
+                            matchID: matchID,
+                            playerByName: playerByName,
+                            allowedCountryCodes: allowedCountryCodes
+                        )
+                    }
+                }
+                var all: [(String, Double)] = []
+                for await partial in group { all.append(contentsOf: partial) }
+                return all
+            }
+            for (playerID, fpts) in batchResults {
+                fantasyPointsByID[playerID, default: 0] += fpts
+                matchesPlayedByID[playerID, default: 0] += 1
+            }
+        }
 
         return SoccerTiersScoreSnapshot(
-            playerFantasyPoints: [:], playerMatchesPlayed: [:],
-            eliminatedNations: [], isTournamentComplete: false
+            playerFantasyPoints: fantasyPointsByID,
+            playerMatchesPlayed: matchesPlayedByID,
+            eliminatedNations: [],
+            isTournamentComplete: false
         )
+    }
+
+    /// Score a single WC match against our pool. Returns one (playerID, fpts)
+    /// tuple for each pool player who participated in this match. Players
+    /// not in our pool are silently skipped — the goal is per-pool scoring,
+    /// not a full leaderboard for the match.
+    private func scoreMatchForPool(
+        matchID: String,
+        playerByName: [String: SoccerTiersPlayer],
+        allowedCountryCodes: Set<String>
+    ) async -> [(String, Double)] {
+        let urlString = "https://site.api.espn.com/apis/site/v2/sports/soccer/\(self.leagueSlug)/summary?event=\(matchID)"
+        guard let url = URL(string: urlString) else { return [] }
+        guard let (data, response) = try? await self.session.data(from: url),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return []
+        }
+
+        // Pull match-level context: state, teams, scores, clean sheets
+        let header = json["header"] as? [String: Any]
+        let headerCompetitions = header?["competitions"] as? [[String: Any]]
+        let headerCompetition = headerCompetitions?.first
+        let status = headerCompetition?["status"] as? [String: Any]
+        let statusType = status?["type"] as? [String: Any]
+        let state = statusType?["state"] as? String ?? "in"
+        let gameFinal = (statusType?["completed"] as? Bool) ?? (state == "post")
+
+        // Map teamID → (score, country abbreviation)
+        struct TeamInfo {
+            let score: Int
+            let abbr: String
+        }
+        var teamInfoByID: [String: TeamInfo] = [:]
+        let competitors = (headerCompetition?["competitors"] as? [[String: Any]]) ?? []
+        for comp in competitors {
+            guard let team = comp["team"] as? [String: Any],
+                  let teamID = team["id"] as? String else { continue }
+            let abbr = (team["abbreviation"] as? String)?.uppercased() ?? ""
+            let scoreStr = (comp["score"] as? String) ?? "0"
+            teamInfoByID[teamID] = TeamInfo(score: Int(scoreStr) ?? 0, abbr: abbr)
+        }
+
+        // First pass: collect every (athlete, team) we need stats for,
+        // then fan out defensive-stats fetches in parallel.
+        struct PendingPlayer {
+            let poolPlayer: SoccerTiersPlayer
+            let athleteID: String
+            let teamID: String
+            let goals: Int
+            let assists: Int
+            let shotsOnTarget: Int
+            let totalShots: Int
+            let saves: Int
+            let yellowCards: Int
+            let redCards: Int
+            let foulsDrawn: Int
+        }
+        var pending: [PendingPlayer] = []
+
+        func parseStatMap(_ statsArr: [[String: Any]]) -> [String: Double] {
+            var statMap: [String: Double] = [:]
+            for stat in statsArr {
+                if let name = stat["name"] as? String {
+                    let value = stat["value"] as? Double
+                        ?? (stat["displayValue"] as? String).flatMap { Double($0) }
+                        ?? 0
+                    statMap[name] = value
+                }
+            }
+            return statMap
+        }
+        func appendCandidate(athlete: [String: Any], teamID: String, teamAbbr: String, statMap: [String: Double]) {
+            guard let athleteID = athlete["id"] as? String,
+                  let displayName = athlete["displayName"] as? String else { return }
+            let normName = displayName.lowercased()
+                .folding(options: .diacriticInsensitive, locale: .current)
+            guard let poolPlayer = playerByName[normName],
+                  poolPlayer.countryCode.uppercased() == teamAbbr else { return }
+            pending.append(PendingPlayer(
+                poolPlayer: poolPlayer,
+                athleteID: athleteID,
+                teamID: teamID,
+                goals: Int(statMap["totalGoals"] ?? 0),
+                assists: Int(statMap["goalAssists"] ?? 0),
+                shotsOnTarget: Int(statMap["shotsOnTarget"] ?? 0),
+                totalShots: Int(statMap["totalShots"] ?? 0),
+                saves: Int(statMap["saves"] ?? 0),
+                yellowCards: Int(statMap["yellowCards"] ?? 0),
+                redCards: Int(statMap["redCards"] ?? 0),
+                foulsDrawn: Int(statMap["foulsSuffered"] ?? 0)
+            ))
+        }
+
+        // ESPN does NOT publish `boxscore.players` for fifa.world — it's an
+        // empty array even for finished matches, which left every tiers
+        // entry at 0.0 all matchday. Per-player stats live in the summary's
+        // `rosters[].roster[].stats` (the structure the soccer DFS scorer
+        // reads). Parse rosters first; keep the boxscore path as a fallback
+        // for any competition that publishes it.
+        let rostersArr = json["rosters"] as? [[String: Any]] ?? []
+        for teamRoster in rostersArr {
+            guard let team = teamRoster["team"] as? [String: Any],
+                  let teamID = team["id"] as? String,
+                  let teamInfo = teamInfoByID[teamID],
+                  allowedCountryCodes.contains(teamInfo.abbr) else { continue }
+            let entries = teamRoster["roster"] as? [[String: Any]] ?? []
+            for entry in entries {
+                guard let athlete = entry["athlete"] as? [String: Any] else { continue }
+                let statMap = parseStatMap(entry["stats"] as? [[String: Any]] ?? [])
+                // Only players who actually appeared — unused subs must not
+                // bank clean-sheet/win bonuses.
+                let appeared = (statMap["appearances"] ?? 0) > 0
+                    || (entry["starter"] as? Bool ?? false)
+                    || (entry["subbedIn"] as? Bool ?? false)
+                guard appeared else { continue }
+                appendCandidate(athlete: athlete, teamID: teamID, teamAbbr: teamInfo.abbr, statMap: statMap)
+            }
+        }
+
+        if pending.isEmpty {
+            let boxscore = json["boxscore"] as? [String: Any]
+            let boxPlayers = boxscore?["players"] as? [[String: Any]] ?? []
+            for teamGroup in boxPlayers {
+                guard let team = teamGroup["team"] as? [String: Any],
+                      let teamID = team["id"] as? String,
+                      let teamInfo = teamInfoByID[teamID],
+                      allowedCountryCodes.contains(teamInfo.abbr) else { continue }
+                let statistics = teamGroup["statistics"] as? [[String: Any]] ?? []
+                for statCat in statistics {
+                    let athletes = statCat["athletes"] as? [[String: Any]] ?? []
+                    for entry in athletes {
+                        guard let athlete = entry["athlete"] as? [String: Any] else { continue }
+                        let statMap = parseStatMap(entry["stats"] as? [[String: Any]] ?? [])
+                        appendCandidate(athlete: athlete, teamID: teamID, teamAbbr: teamInfo.abbr, statMap: statMap)
+                    }
+                }
+            }
+        }
+
+        // Fan-out defensive-stats fetches per player (one extra core-API
+        // request each). For ~6 picked players per match this is cheap;
+        // we only iterate athletes that matched our pool above.
+        let defStatsByAthleteID: [String: (tackles: Int, interceptions: Int, blockedShots: Int, clearances: Int)] = await withTaskGroup(of: (String, (Int, Int, Int, Int)).self) { group in
+            for p in pending {
+                let aid = p.athleteID
+                let tid = p.teamID
+                group.addTask {
+                    let stats = await self.fetchTiersDefensiveStats(
+                        eventID: matchID, teamID: tid, athleteID: aid
+                    )
+                    return (aid, stats)
+                }
+            }
+            var dict: [String: (Int, Int, Int, Int)] = [:]
+            for await (id, stats) in group { dict[id] = stats }
+            return dict.mapValues { (tackles: $0.0, interceptions: $0.1, blockedShots: $0.2, clearances: $0.3) }
+        }
+
+        // Final compute pass
+        var output: [(String, Double)] = []
+        for p in pending {
+            let teamInfo = teamInfoByID[p.teamID]!
+            let opponent = teamInfoByID.first(where: { $0.key != p.teamID })?.value
+            let opponentScore = opponent?.score ?? 0
+            let cleanSheet = opponentScore == 0
+            let teamWon = teamInfo.score > opponentScore
+            let def = defStatsByAthleteID[p.athleteID] ?? (0, 0, 0, 0)
+
+            let fpts = SoccerTiersEngine.soccerFantasyPoints(
+                position: p.poolPlayer.position,
+                goals: p.goals, assists: p.assists,
+                shotsOnTarget: p.shotsOnTarget, totalShots: p.totalShots,
+                tackles: def.tackles, interceptions: def.interceptions,
+                blockedShots: def.blockedShots, clearances: def.clearances,
+                saves: p.saves, yellowCards: p.yellowCards, redCards: p.redCards,
+                foulsDrawn: p.foulsDrawn, goalsAgainst: opponentScore,
+                cleanSheet: cleanSheet, gameFinal: gameFinal, teamWon: teamWon
+            )
+            output.append((p.poolPlayer.id, fpts))
+        }
+        return output
+    }
+
+    /// Per-player core-API defensive-stats fetch. Identical to the DFS
+    /// version but namespaced to avoid the actor-isolation requirements
+    /// of the DFS provider — this struct already runs Sendable so it's
+    /// safe to call from a TaskGroup.
+    private func fetchTiersDefensiveStats(
+        eventID: String, teamID: String, athleteID: String
+    ) async -> (tackles: Int, interceptions: Int, blockedShots: Int, clearances: Int) {
+        let urlString = "https://sports.core.api.espn.com/v2/sports/soccer/leagues/\(self.leagueSlug)/events/\(eventID)/competitions/\(eventID)/competitors/\(teamID)/roster/\(athleteID)/statistics/0"
+        guard let url = URL(string: urlString) else { return (0, 0, 0, 0) }
+        var request = URLRequest(url: url)
+        request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+        guard let (data, response) = try? await self.session.data(for: request),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let splits = json["splits"] as? [String: Any],
+              let categories = splits["categories"] as? [[String: Any]] else {
+            return (0, 0, 0, 0)
+        }
+        var values: [String: Double] = [:]
+        for cat in categories {
+            guard let stats = cat["stats"] as? [[String: Any]] else { continue }
+            for s in stats {
+                guard let name = s["name"] as? String else { continue }
+                if let v = s["value"] as? Double {
+                    values[name] = v
+                } else if let v = s["value"] as? Int {
+                    values[name] = Double(v)
+                }
+            }
+        }
+        let tackles = Int(values["totalTackles"] ?? values["effectiveTackles"] ?? 0)
+        let interceptions = Int(values["interceptions"] ?? 0)
+        let blockedShots = Int(values["blockedShots"] ?? 0)
+        let clearances = Int(values["totalClearance"] ?? values["effectiveClearance"] ?? 0)
+        return (tackles, interceptions, blockedShots, clearances)
     }
 
     /// Has any World Cup match started? (for locked → live transition)
@@ -788,11 +1074,133 @@ struct ESPNSoccerTiersDataProvider: Sendable {
         return completedCount >= 100
     }
 
-    /// Detect which nations have been eliminated
+    /// Detect which nations have been eliminated from the World Cup.
+    /// Two sources:
+    ///   1. **Knockout losses** — once the tournament reaches Round of 32,
+    ///      every completed match's loser is eliminated. ESPN flags the
+    ///      winner explicitly via `competitor.winner=true`, which handles
+    ///      penalty shootout outcomes correctly (the loser of regulation
+    ///      vs. losing on PKs both surface the same way).
+    ///   2. **Group-stage elimination** — after a team has played all 3 of
+    ///      its group matches AND they're all "post", the team is
+    ///      eliminated if they're in the bottom 2 of the group by points
+    ///      (with goal-diff and goals-scored tiebreakers). The top 2
+    ///      advance and 8 of 12 third-place teams also advance, so the
+    ///      strict "guaranteed eliminated" set is: any 3-game team that
+    ///      finished 4th (last) in their group. We don't try to compute
+    ///      best-third tiebreakers here — those teams stay non-eliminated
+    ///      until they lose their knockout match.
     func fetchEliminatedNations() async -> Set<String> {
-        // TODO: Parse knockout results from ESPN to determine eliminated teams
-        // Will be implemented when the tournament reaches knockout stage
-        return []
+        let events = await fetchWorldCupMatches()
+        var eliminated = Set<String>()
+
+        // Group-stage tracking: per group, per team → (played, points, GF, GA)
+        struct GroupStanding {
+            var played: Int = 0
+            var points: Int = 0
+            var goalsFor: Int = 0
+            var goalsAgainst: Int = 0
+        }
+        var groupStandings: [String: [String: GroupStanding]] = [:]
+
+        for event in events {
+            guard let competitions = event["competitions"] as? [[String: Any]],
+                  let competition = competitions.first,
+                  let status = competition["status"] as? [String: Any],
+                  let statusType = status["type"] as? [String: Any],
+                  let completed = statusType["completed"] as? Bool, completed,
+                  let competitors = competition["competitors"] as? [[String: Any]],
+                  competitors.count == 2 else { continue }
+
+            // Determine the stage/round of this match from the season slug,
+            // event notes, or competition type. ESPN tags WC matches with
+            // headlines like "FIFA World Cup - Group A" or "FIFA World Cup -
+            // Round of 32".
+            let notes = (competition["notes"] as? [[String: Any]] ?? [])
+            let noteText = notes.compactMap { $0["headline"] as? String }
+                .joined(separator: " ").lowercased()
+            let seasonType = (event["season"] as? [String: Any])?["slug"] as? String ?? ""
+            let combined = (noteText + " " + seasonType).lowercased()
+
+            let isKnockout = combined.contains("round of 32")
+                || combined.contains("round of 16")
+                || combined.contains("quarterfinal")
+                || combined.contains("semifinal")
+                || combined.contains("final")
+                || combined.contains("knockout")
+
+            let isGroupStage = combined.contains("group ")
+                || combined.contains("group-stage")
+
+            if isKnockout {
+                // The team flagged winner=false (or whose score is lower
+                // with no winner flag) is eliminated.
+                for c in competitors {
+                    let team = c["team"] as? [String: Any]
+                    guard let abbr = team?["abbreviation"] as? String else { continue }
+                    if let winner = c["winner"] as? Bool {
+                        if !winner { eliminated.insert(abbr.uppercased()) }
+                    }
+                }
+                continue
+            }
+
+            if isGroupStage {
+                // Extract the group letter ("Group A" → "A").
+                let groupKey: String = {
+                    let lc = noteText
+                    if let range = lc.range(of: "group ") {
+                        let after = lc[range.upperBound...]
+                        return String(after.prefix(1)).uppercased()
+                    }
+                    return ""
+                }()
+                guard !groupKey.isEmpty else { continue }
+
+                // Parse scores
+                let score0 = Int((competitors[0]["score"] as? String) ?? "0") ?? 0
+                let score1 = Int((competitors[1]["score"] as? String) ?? "0") ?? 0
+                let abbr0 = ((competitors[0]["team"] as? [String: Any])?["abbreviation"] as? String)?.uppercased() ?? ""
+                let abbr1 = ((competitors[1]["team"] as? [String: Any])?["abbreviation"] as? String)?.uppercased() ?? ""
+                guard !abbr0.isEmpty, !abbr1.isEmpty else { continue }
+
+                var standings = groupStandings[groupKey] ?? [:]
+                var s0 = standings[abbr0] ?? GroupStanding()
+                var s1 = standings[abbr1] ?? GroupStanding()
+                s0.played += 1
+                s1.played += 1
+                s0.goalsFor += score0; s0.goalsAgainst += score1
+                s1.goalsFor += score1; s1.goalsAgainst += score0
+                if score0 > score1 { s0.points += 3 }
+                else if score1 > score0 { s1.points += 3 }
+                else { s0.points += 1; s1.points += 1 }
+                standings[abbr0] = s0
+                standings[abbr1] = s1
+                groupStandings[groupKey] = standings
+            }
+        }
+
+        // For each group where every team has played 3 matches, eliminate
+        // the LAST-placed team (4th by points → GD → GF tiebreak). The
+        // 3rd-place teams stay alive because 8 of 12 advance; we'd need
+        // cross-group comparisons to identify the bottom 4 thirds, which
+        // ESPN's `/standings` endpoint would provide cleaner. Keep it
+        // conservative for now — guaranteed-out teams only.
+        for (_, teams) in groupStandings {
+            guard teams.values.allSatisfy({ $0.played >= 3 }) else { continue }
+            let sorted = teams.sorted { a, b in
+                if a.value.points != b.value.points { return a.value.points > b.value.points }
+                let aDiff = a.value.goalsFor - a.value.goalsAgainst
+                let bDiff = b.value.goalsFor - b.value.goalsAgainst
+                if aDiff != bDiff { return aDiff > bDiff }
+                return a.value.goalsFor > b.value.goalsFor
+            }
+            if let last = sorted.last {
+                eliminated.insert(last.key)
+            }
+        }
+
+        return eliminated
     }
 }
 

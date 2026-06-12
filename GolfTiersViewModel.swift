@@ -23,6 +23,10 @@ final class GolfTiersViewModel {
     /// i.e. we're in between majors. The lobby shows a quiet "next major in
     /// X" state instead of running the tiers UI against a regular PGA event.
     var noActiveMajor: Bool = false
+    /// True when we're inside a major's pick window but ESPN's scoreboard is
+    /// still on the previous Tour event — i.e. the major's field hasn't been
+    /// published yet. The lobby shows a "signups open soon" state.
+    var awaitingField: Bool = false
 
     // MARK: - Persisted History (synced from ContentView)
     var dfsHistoryData: Data = Data()
@@ -171,6 +175,7 @@ final class GolfTiersViewModel {
         guard !isLoading else { return }
         isLoading = true
         error = nil
+        awaitingField = false
 
         // Off-major-week guard: if we're not inside any major's window, don't
         // load whatever ESPN is currently playing — that's a regular Tour
@@ -217,6 +222,32 @@ final class GolfTiersViewModel {
                         isSettled: record.isSettled ?? false,
                         createdAt: record.createdAt ?? Date()
                     )
+                }
+            }
+
+            // Self-heal corrupt rows: a major can only settle inside its own
+            // calendar window. Old code (date-range `currentMajorID` with no
+            // window check) created+settled "us-open-2026" in late MAY against
+            // a regular Tour event — that row then made the lobby show the
+            // US Open as a finished result weeks before it tees off. Reset
+            // such rows to a clean pre-signup state and clear the bogus bots.
+            if let existing = loadedTournament,
+               existing.isSettled || existing.status == "settled",
+               let bounds = GolfTiersTournament.windowBounds(for: existing.id) {
+                let refDate = existing.lockTime ?? existing.createdAt
+                let cal = Calendar.current
+                let mmdd = cal.component(.month, from: refDate) * 100 + cal.component(.day, from: refDate)
+                if mmdd < bounds.opens || mmdd > bounds.closes {
+                    print("[GolfTiers] Settled record \(existing.id) locked at \(refDate) — OUTSIDE its major window (\(bounds.opens)-\(bounds.closes)). Corrupt row from between-majors bug; resetting to open.")
+                    if let token = accessToken {
+                        try? await SupabaseService.shared.resetGolfTiersTournamentToOpen(
+                            tournamentID: existing.id, accessToken: token
+                        )
+                        try? await SupabaseService.shared.deleteGolfTiersBotEntries(
+                            tournamentID: existing.id, accessToken: token
+                        )
+                    }
+                    loadedTournament = nil // fall through to the fresh-load path
                 }
             }
 
@@ -410,6 +441,38 @@ final class GolfTiersViewModel {
                 let (fetchedGolfers, fetchedEvent) = try await espnProvider.fetchMajorField()
                 golfers = fetchedGolfers
                 event = fetchedEvent
+            }
+
+            // CRITICAL: verify the ESPN event we're about to adopt actually IS
+            // this major. The scoreboard shows whatever Tour event is current —
+            // inside the US Open's pick window that can still be the previous
+            // week's event (RBC Canadian Open), which used to get adopted,
+            // locked, and graded as "U.S. Open Tiers".
+            if let ev = event {
+                let year = Calendar.current.component(.year, from: Date())
+                let matched = GolfTiersTournament.matchEventToMajor(eventName: ev.name, year: year)
+                if matched != tournamentID {
+                    print("[GolfTiers] ESPN current event '\(ev.name)' is NOT \(tournamentID) — field not announced yet")
+                    // If a stored row already adopted the wrong event, heal it:
+                    // reset to pre-signup and clear the bogus bot field.
+                    if let existing = loadedTournament, existing.espnEventID == ev.id, let token = accessToken {
+                        print("[GolfTiers] Stored row \(existing.id) was bound to the wrong event — resetting")
+                        try? await SupabaseService.shared.resetGolfTiersTournamentToOpen(
+                            tournamentID: existing.id, accessToken: token
+                        )
+                        try? await SupabaseService.shared.deleteGolfTiersBotEntries(
+                            tournamentID: existing.id, accessToken: token
+                        )
+                    }
+                    tournament = nil
+                    tiers = []
+                    leaderboardEntries = []
+                    fieldEntries = []
+                    awaitingField = true
+                    isLoading = false
+                    hasAttemptedLoad = true
+                    return
+                }
             }
 
             self.espnEvent = event
@@ -675,9 +738,15 @@ final class GolfTiersViewModel {
         if let eventID = tournament.espnEventID ?? espnEvent?.id {
             do {
                 let snapshot = try await espnProvider.fetchLiveScores(espnEventID: eventID)
-                liveGolferScores = snapshot.golferScoresToPar
-                liveGolferRounds = snapshot.golferRoundScores
-                liveGolferStatuses = snapshot.golferStatuses
+                // Don't wipe good scores with an empty snapshot (transient
+                // ESPN failure) — keep showing the last-known leaderboard.
+                if !snapshot.golferScoresToPar.isEmpty {
+                    liveGolferScores = snapshot.golferScoresToPar
+                    liveGolferRounds = snapshot.golferRoundScores
+                    liveGolferStatuses = snapshot.golferStatuses
+                } else if !liveGolferScores.isEmpty {
+                    print("[GolfTiers] Live score fetch returned empty — keeping \(liveGolferScores.count) existing scores")
+                }
                 currentRound = snapshot.currentRound
 
                 // Update tier golfer data with live scores
@@ -1273,6 +1342,23 @@ final class GolfTiersViewModel {
                 accessToken: token
             )
             print("[GolfTiers] loadSettledHistory: server returned \(tournaments.count) settled tournament(s)")
+
+            // Drop corrupt rows: a settled major whose lock time falls outside
+            // its own calendar window was settled against the wrong event
+            // (between-majors bug) and isn't a real result. The loadTournament
+            // self-heal resets these server-side; this filter keeps them out
+            // of MAJOR RESULTS even before that runs.
+            tournaments = tournaments.filter { record in
+                guard let bounds = GolfTiersTournament.windowBounds(for: record.id) else { return true }
+                let refDate = record.lockTime ?? record.createdAt ?? Date()
+                let cal = Calendar.current
+                let mmdd = cal.component(.month, from: refDate) * 100 + cal.component(.day, from: refDate)
+                let inWindow = mmdd >= bounds.opens && mmdd <= bounds.closes
+                if !inWindow {
+                    print("[GolfTiers] Excluding corrupt settled row \(record.id) (locked \(refDate), window \(bounds.opens)-\(bounds.closes))")
+                }
+                return inWindow
+            }
 
             // Self-heal: if the current tournament is settled locally but missing from the
             // server-returned list, the markGolfTiersTournamentSettled PATCH must have

@@ -23,6 +23,7 @@ final class BestBallViewModel {
     var wonLeagueIDs: Set<String> = []
     var leagueMatchupPreviews: [String: LeagueMatchupPreview] = [:]
     var isLoading: Bool = false
+    var isStartingDraft: Bool = false
     var error: String?
 
     // League Detail
@@ -210,15 +211,16 @@ final class BestBallViewModel {
 
     // MARK: - Create & Join
 
-    func createLeague(title: String, sport: String, isPrivate: Bool = false, maxMembers: Int = 12, rosterSize: Int = 12, pitcherSlots: Int = 2, batterSlots: Int = 6, scoringMode: BestBallScoringMode = .normal) async -> BestBallLeague? {
+    func createLeague(title: String, sport: String, isPrivate: Bool = false, maxMembers: Int = 12, rosterSize: Int = 12, pitcherSlots: Int = 2, batterSlots: Int = 6, scoringMode: BestBallScoringMode = .normal, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0) async -> BestBallLeague? {
         guard let uid = userID, let token = accessToken else { return nil }
         do {
-            let season = BestBallSeasonHelper.currentSeason()
+            let season = BestBallSeasonHelper.currentSeason(sport: sport)
             let record = try await SupabaseService.shared.createLeague(
                 title: title, sport: sport, season: season,
                 isPrivate: isPrivate, maxMembers: maxMembers, rosterSize: rosterSize,
                 pitcherSlots: pitcherSlots, batterSlots: batterSlots,
                 scoringMode: scoringMode.rawValue,
+                nflQB: nflQB, nflRB: nflRB, nflWR: nflWR, nflTE: nflTE, nflFLEX: nflFLEX, nflSFLEX: nflSFLEX,
                 createdBy: uid, accessToken: token
             )
             var league = record.toModel()
@@ -231,6 +233,12 @@ final class BestBallViewModel {
             league.pitcherSlots = pitcherSlots
             league.batterSlots = batterSlots
             league.scoringMode = scoringMode
+            league.nflQbStarters = nflQB
+            league.nflRbStarters = nflRB
+            league.nflWrStarters = nflWR
+            league.nflTeStarters = nflTE
+            league.nflFlexStarters = nflFLEX
+            league.nflSflexStarters = nflSFLEX
 
             // Cache so the detail view has the correct values right away
             currentLeague = league
@@ -303,6 +311,49 @@ final class BestBallViewModel {
             if currentLeague?.id == league.id {
                 await loadLeagueDetail(leagueID: league.id)
             }
+            return true
+        } catch {
+            self.error = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Delete a Best Ball league. Restricted to the commissioner
+    /// (`createdBy == userID`) AND only while the league is solo —
+    /// before anyone else has joined — so we don't ever yank an active
+    /// contest out from under the rest of the members. Once another
+    /// human has signed up the only escape hatch is to leave (or wait
+    /// for the season to finish).
+    func deleteLeague(_ league: BestBallLeague) async -> Bool {
+        guard let uid = userID, let token = accessToken else { return false }
+        guard league.createdBy == uid else {
+            self.error = "Only the league commissioner can delete this league."
+            return false
+        }
+        let humanMembers = currentMembers.filter { !$0.isBot }
+        let onlyMember = humanMembers.count <= 1 && humanMembers.allSatisfy { $0.userID == uid }
+        guard onlyMember else {
+            self.error = "Can't delete: other players have already joined this league."
+            return false
+        }
+        guard league.status == "open" || league.status == "drafting" else {
+            self.error = "Can't delete a league that has already started."
+            return false
+        }
+        do {
+            try await SupabaseService.shared.deleteLeague(
+                leagueID: league.id, accessToken: token
+            )
+            // Clear local state for this league and refresh listings.
+            if currentLeague?.id == league.id {
+                currentLeague = nil
+                currentMembers = []
+                draftState = nil
+                weeklyScores = []
+                standings = []
+            }
+            await loadOpenLeagues()
+            await loadMyLeagues()
             return true
         } catch {
             self.error = error.localizedDescription
@@ -484,6 +535,8 @@ final class BestBallViewModel {
 
     func startDraft(leagueID: String) async {
         guard let token = accessToken else { return }
+        isStartingDraft = true
+        defer { isStartingDraft = false }
         do {
             // Fetch current members
             let memberRecords = try await SupabaseService.shared.fetchLeagueMembers(leagueID: leagueID, accessToken: token)
@@ -611,7 +664,13 @@ final class BestBallViewModel {
                 sport: sport, rosterSize: rosterSize,
                 scoringMode: currentLeague?.scoringMode ?? .normal,
                 pitcherSlots: currentLeague?.pitcherSlots ?? 2,
-                batterSlots: currentLeague?.batterSlots ?? 6
+                batterSlots: currentLeague?.batterSlots ?? 6,
+                nflQB: currentLeague?.nflQbStarters ?? 1,
+                nflRB: currentLeague?.nflRbStarters ?? 2,
+                nflWR: currentLeague?.nflWrStarters ?? 2,
+                nflTE: currentLeague?.nflTeStarters ?? 1,
+                nflFLEX: currentLeague?.nflFlexStarters ?? 2,
+                nflSFLEX: currentLeague?.nflSflexStarters ?? 0
             ) else { break }
 
             let pickNumber = currentState.currentPickNumber
@@ -635,6 +694,17 @@ final class BestBallViewModel {
                 await loadLeagueDetail(leagueID: currentState.league.id)
                 guard let updated = draftState else { break }
                 currentState = updated
+
+                // Pace bot picks so the user can follow the ticker
+                // instead of the draft blurring past in milliseconds.
+                // Humans still get the full 30s timer; bots intentionally
+                // move quickly but not instantly.
+                if !currentState.isDraftComplete,
+                   let nextID = currentState.onTheClockMemberID,
+                   let nextMember = currentMembers.first(where: { $0.id == nextID }),
+                   nextMember.isBot {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)   // 3s between bot picks
+                }
             } catch {
                 break
             }
@@ -787,7 +857,13 @@ final class BestBallViewModel {
                     scoringSlots: league.scoringSlots,
                     pitcherSlots: league.pitcherSlots,
                     batterSlots: league.batterSlots,
-                    scoringMode: league.scoringMode
+                    scoringMode: league.scoringMode,
+                    nflQB: league.nflQbStarters,
+                    nflRB: league.nflRbStarters,
+                    nflWR: league.nflWrStarters,
+                    nflTE: league.nflTeStarters,
+                    nflFLEX: league.nflFlexStarters,
+                    nflSFLEX: league.nflSflexStarters
                 )
 
                 memberData[member.id] = MemberScoringData(
@@ -1005,7 +1081,13 @@ final class BestBallViewModel {
                     scoringSlots: league.scoringSlots,
                     pitcherSlots: league.pitcherSlots,
                     batterSlots: league.batterSlots,
-                    scoringMode: league.scoringMode
+                    scoringMode: league.scoringMode,
+                    nflQB: league.nflQbStarters,
+                    nflRB: league.nflRbStarters,
+                    nflWR: league.nflWrStarters,
+                    nflTE: league.nflTeStarters,
+                    nflFLEX: league.nflFlexStarters,
+                    nflSFLEX: league.nflSflexStarters
                 )
 
                 // Find opponent (skip for dingers-only)
@@ -1147,13 +1229,14 @@ final class BestBallViewModel {
 
     // MARK: - Commissioner Settings
 
-    func updateLeagueSettings(leagueID: String, title: String, maxMembers: Int, rosterSize: Int, isPrivate: Bool, pitcherSlots: Int = 2, batterSlots: Int = 6) async {
+    func updateLeagueSettings(leagueID: String, title: String, maxMembers: Int, rosterSize: Int, isPrivate: Bool, pitcherSlots: Int = 2, batterSlots: Int = 6, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0) async {
         guard let token = accessToken else { return }
         do {
             try await SupabaseService.shared.updateLeagueSettings(
                 leagueID: leagueID, title: title, maxMembers: maxMembers,
                 rosterSize: rosterSize, isPrivate: isPrivate,
                 pitcherSlots: pitcherSlots, batterSlots: batterSlots,
+                nflQB: nflQB, nflRB: nflRB, nflWR: nflWR, nflTE: nflTE, nflFLEX: nflFLEX, nflSFLEX: nflSFLEX,
                 accessToken: token
             )
             await loadLeagueDetail(leagueID: leagueID)
@@ -1195,7 +1278,16 @@ final class BestBallViewModel {
     func positionsNeeded(for memberID: String, sport: String) -> [String: Int] {
         guard let state = draftState else { return [:] }
         let roster = state.roster(for: memberID)
-        let minimums = BestBallLineupConfig.draftMinimums(for: sport)
+        let league = currentLeague
+        let minimums = BestBallLineupConfig.draftMinimums(
+            for: sport,
+            pitcherSlots: league?.pitcherSlots ?? 2,
+            batterSlots: league?.batterSlots ?? 6,
+            nflQB: league?.nflQbStarters ?? 1,
+            nflRB: league?.nflRbStarters ?? 2,
+            nflWR: league?.nflWrStarters ?? 2,
+            nflTE: league?.nflTeStarters ?? 1
+        )
         let pickedPositions = Dictionary(grouping: roster, by: \.playerPosition)
             .mapValues { $0.count }
 

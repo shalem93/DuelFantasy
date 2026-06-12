@@ -12,44 +12,68 @@ struct DFSLobbyView: View {
         Color(red: 0.48, green: 0.23, blue: 0.93)
     }
 
+    /// True when the slate's underlying event has already finished — i.e.
+    /// the prior tournament went `post` and the next event hasn't yet
+    /// materialized in ESPN's scoreboard (typically Sunday night → Tuesday
+    /// for PGA). In this window nothing in the lobby is actionable, so we
+    /// collapse it to a friendly empty state instead of advertising a
+    /// completed tournament as if it were live.
+    ///
+    /// Every game must be `post` — checking only the FIRST game broke
+    /// multi-game slates (MLB): once the 1pm game finished, the lobby
+    /// collapsed even though the evening slate and 6:35pm+ single-game
+    /// contests were still open for entry.
+    private var slateEventFinished: Bool {
+        !viewModel.slateGames.isEmpty && viewModel.slateGames.allSatisfy { $0.state == "post" }
+    }
+
     var body: some View {
-        ScrollView {
-            VStack(spacing: 20) {
-                // Lineup counter
-                lineupCounterBanner
+        Group {
+            if slateEventFinished {
+                // Standalone (non-scrolling) container so `maxHeight: .infinity`
+                // actually centers the empty state vertically — matching the
+                // EPL/MLB "No Fixtures Today" view in DFSContestView.
+                betweenEventsEmptyState
+            } else {
+                ScrollView {
+                    VStack(spacing: 20) {
+                        // Lineup counter
+                        lineupCounterBanner
 
-                // Pending tournament invites from friends
-                if !viewModel.pendingInvites.isEmpty {
-                    pendingInvitesSection
+                        // Pending tournament invites from friends
+                        if !viewModel.pendingInvites.isEmpty {
+                            pendingInvitesSection
+                        }
+
+                        // Main Slate section
+                        mainSlateSection
+
+                        // Evening Slate section
+                        eveningSlateSection
+
+                        // Single Game section
+                        singleGameSection
+
+                        if !viewModel.enteredTournamentIDs.isEmpty {
+                            enteredLineupsSection
+                        }
+
+                        // Private contests (invite-code only, no bots)
+                        DFSPrivateContestsSection(viewModel: viewModel)
+
+                        slateGamesSection
+                        scoringSection
+                        payoutTiersSection
+                        if let error = viewModel.error {
+                            errorBanner(error)
+                        }
+                        recentResultsSection
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 24)
                 }
-
-                // Main Slate section
-                mainSlateSection
-
-                // Evening Slate section
-                eveningSlateSection
-
-                // Single Game section
-                singleGameSection
-
-                if !viewModel.enteredTournamentIDs.isEmpty {
-                    enteredLineupsSection
-                }
-
-                // Private contests (invite-code only, no bots)
-                DFSPrivateContestsSection(viewModel: viewModel)
-
-                slateGamesSection
-                scoringSection
-                payoutTiersSection
-                if let error = viewModel.error {
-                    errorBanner(error)
-                }
-                recentResultsSection
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 8)
-            .padding(.bottom, 24)
         }
         .background(
             LinearGradient(
@@ -80,6 +104,43 @@ struct DFSLobbyView: View {
             // at submission time.
             await viewModel.loadAllPrivateContestFinalScores()
         }
+    }
+
+    // MARK: - Between-Events Empty State
+
+    /// Matches the `noEntriesTodayView` style in DFSContestView so PGA's
+    /// between-events state looks identical to NHL/MLB's "games have locked"
+    /// view instead of introducing a separate UI dialect.
+    private var betweenEventsEmptyState: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "sportscourt")
+                .font(.system(size: 48))
+                .foregroundStyle(.secondary)
+
+            Text("No Active Entries")
+                .font(.title3.weight(.semibold))
+
+            Text(viewModel.sport == "PGA"
+                 ? "This week's PGA tournament has locked.\nCheck back for next week's event!"
+                 : "Today's \(viewModel.sport) games have locked.\nCheck back for tomorrow's slate!")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+
+            Button {
+                Task { await viewModel.loadSlate(force: true) }
+            } label: {
+                Text("Refresh Slate")
+                    .font(.headline)
+                    .padding(.horizontal, 32)
+                    .padding(.vertical, 12)
+                    .background(brandPurple)
+                    .foregroundStyle(.white)
+                    .clipShape(Capsule())
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Lineup Counter
@@ -183,10 +244,18 @@ struct DFSLobbyView: View {
 
     private var mainSlateSection: some View {
         let mainTournaments = viewModel.availableTournaments.filter { $0.tournamentType == .main }
+        // Lock time = first game start; show it like the Evening Slate card
+        // does so users know exactly when entries close.
+        let mainSubtitle: String? = {
+            guard let firstStart = viewModel.slateGames.map(\.startTime).min(),
+                  firstStart > Date() else { return nil }
+            return "Locks \(firstStart.formatted(date: .omitted, time: .shortened))"
+        }()
         return Group {
             if !mainTournaments.isEmpty {
                 slateCard(
                     title: "Main Slate",
+                    subtitle: mainSubtitle,
                     icon: "sportscourt.fill",
                     iconColor: brandPurple,
                     tournaments: mainTournaments,
@@ -200,11 +269,29 @@ struct DFSLobbyView: View {
 
     private var eveningSlateSection: some View {
         let eveningTournaments = viewModel.availableTournaments.filter { $0.tournamentType == .evening }
+        // First evening game's start time (6pm ET+ cutoff) for a more useful
+        // subtitle than the generic "6pm ET+" label.
+        let eveningSubtitle: String = {
+            let cal = Calendar(identifier: .gregorian)
+            let tz = TimeZone(identifier: "America/New_York")!
+            var comps = cal.dateComponents(in: tz, from: Date())
+            comps.hour = 18
+            comps.minute = 0
+            comps.second = 0
+            let cutoff = cal.date(from: comps) ?? .distantFuture
+            let firstEvening = viewModel.slateGames
+                .filter { $0.startTime >= cutoff }
+                .min(by: { $0.startTime < $1.startTime })
+            if let game = firstEvening {
+                return "First pitch \(game.startTime.formatted(date: .omitted, time: .shortened))"
+            }
+            return "6pm ET+"
+        }()
         return Group {
             if !eveningTournaments.isEmpty {
                 slateCard(
                     title: "Evening Slate",
-                    subtitle: "6pm ET+",
+                    subtitle: eveningSubtitle,
                     icon: "moon.stars.fill",
                     iconColor: .indigo,
                     tournaments: eveningTournaments,
@@ -218,11 +305,16 @@ struct DFSLobbyView: View {
 
     private var singleGameSection: some View {
         let sgTournaments = viewModel.availableTournaments.filter { $0.tournamentType == .singleGame }
-        // Group by gameID to show one card per matchup with size picker
+        // Group by gameID to show one card per matchup with size picker.
+        // Sort by start time, then by gameID for a stable tiebreak — without
+        // the secondary key, two games at the same start time (e.g. multiple
+        // 6:35pm MLB matchups) shuffled order on every re-render because
+        // `Set` iteration order is hash-randomized.
         let gameIDs = Array(Set(sgTournaments.compactMap(\.gameID))).sorted { a, b in
             let timeA = viewModel.slateGames.first(where: { $0.id == a })?.startTime ?? .distantFuture
             let timeB = viewModel.slateGames.first(where: { $0.id == b })?.startTime ?? .distantFuture
-            return timeA < timeB
+            if timeA != timeB { return timeA < timeB }
+            return a < b
         }
         return Group {
             if !gameIDs.isEmpty {
@@ -785,7 +877,7 @@ struct DFSLobbyView: View {
                     scoringRow(label: "3rd Place", value: "+18 FPTS")
                     scoringRow(label: "Top 10", value: "+7–16 FPTS")
                     scoringRow(label: "Top 50", value: "+1–6 FPTS")
-                case "EPL", "UCL":
+                case "EPL", "UCL", "WC":
                     Text("Outfield (DEF / MID / FWD)")
                         .font(.caption.weight(.bold))
                         .foregroundStyle(.secondary)

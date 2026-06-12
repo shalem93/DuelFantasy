@@ -228,6 +228,26 @@ final class AuthViewModel: ObservableObject {
         UserDefaults.standard.removeObject(forKey: sessionKey)
     }
 
+    /// Permanently deletes the user's account and all associated server data,
+    /// then clears the local session. Required for Apple App Review 5.1.1(v).
+    /// Returns true on success, false (with `error` set) on failure.
+    @discardableResult
+    func deleteAccount() async -> Bool {
+        guard let token = accessToken else {
+            errorMessage = "Not signed in"
+            return false
+        }
+        do {
+            try await SupabaseService.shared.deleteCurrentUser(accessToken: token)
+            session = nil
+            UserDefaults.standard.removeObject(forKey: sessionKey)
+            return true
+        } catch {
+            errorMessage = "Couldn't delete account: \(error.localizedDescription)"
+            return false
+        }
+    }
+
     private func ensureProfile(username: String) async throws {
         guard let userID, let accessToken else { return }
 

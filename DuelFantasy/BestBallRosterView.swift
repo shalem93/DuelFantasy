@@ -57,12 +57,20 @@ struct BestBallRosterView: View {
             .first(where: { $0.memberID == memberID && $0.week == viewModel.selectedWeek })
     }
 
-    // Sorted roster: starters first (by points desc), then bench (by points desc)
+    // Sorted roster: starters first, then bench. Within each group sort
+    // by POSITION first (QB → RB → WR → TE for NFL, etc.), then by
+    // points within the same position. Position-grouping matches what
+    // people expect from a fantasy roster screen — easier to scan than
+    // a flat points-descending list.
     private var sortedRoster: [BestBallPick] {
-        roster.sorted { a, b in
+        let sport = viewModel.currentLeague?.sport ?? "NFL"
+        return roster.sorted { a, b in
             let aScoring = scoringPlayerIDs.contains(a.playerID)
             let bScoring = scoringPlayerIDs.contains(b.playerID)
             if aScoring != bScoring { return aScoring }
+            let aRank = positionSortRank(a.playerPosition, sport: sport)
+            let bRank = positionSortRank(b.playerPosition, sport: sport)
+            if aRank != bRank { return aRank < bRank }
             if isDingersOnly {
                 let aHR = seasonHRTotals[a.playerID] ?? 0
                 let bHR = seasonHRTotals[b.playerID] ?? 0
@@ -72,6 +80,17 @@ struct BestBallRosterView: View {
             let bPts = weeklyPlayerPoints[b.playerID] ?? 0
             return aPts > bPts
         }
+    }
+
+    private func positionSortRank(_ position: String, sport: String) -> Int {
+        let order: [String]
+        switch sport {
+        case "NFL": order = ["QB", "RB", "FB", "WR", "TE", "K"]
+        case "NBA": order = ["PG", "SG", "SF", "PF", "C"]
+        case "MLB": order = ["SP", "RP", "P", "C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "OF", "DH"]
+        default:    order = []
+        }
+        return order.firstIndex(of: position) ?? Int.max
     }
 
     private var isDingersOnly: Bool {
@@ -133,20 +152,27 @@ struct BestBallRosterView: View {
                         statColumnHeader(isPitcher: false)
 
                         VStack(spacing: 0) {
-                            let starters = sortedRoster.filter { scoringPlayerIDs.contains($0.playerID) }
+                            // Slot-aware starter ordering for NFL: assign each
+                            // scoring player to QB/RB/WR/TE/FLEX in the league's
+                            // lineup config and render in that order. The slot
+                            // label shows what role they're filling — so a top
+                            // RB scoring into the FLEX spot reads "FLEX" rather
+                            // than "RB" again. Other sports keep the existing
+                            // position-rank sort.
+                            let starterEntries = sportSpecificStarterEntries()
                             let bench = sortedRoster.filter { !scoringPlayerIDs.contains($0.playerID) }
 
-                            ForEach(starters) { pick in
-                                playerRow(pick: pick, isScoring: true, isPitcher: false)
+                            ForEach(starterEntries, id: \.pick.id) { entry in
+                                playerRow(pick: entry.pick, isScoring: true, isPitcher: false, slotLabel: entry.slotLabel)
                                 Divider().padding(.leading, 44)
                             }
 
-                            if !bench.isEmpty && !starters.isEmpty {
+                            if !bench.isEmpty && !starterEntries.isEmpty {
                                 benchDivider
                             }
 
                             ForEach(bench) { pick in
-                                playerRow(pick: pick, isScoring: false, isPitcher: false)
+                                playerRow(pick: pick, isScoring: false, isPitcher: false, slotLabel: nil)
                                 if pick.id != bench.last?.id {
                                     Divider().padding(.leading, 44)
                                 }
@@ -487,22 +513,57 @@ struct BestBallRosterView: View {
         return weeklyPlayerPoints[playerID] ?? 0
     }
 
+    // MARK: - Slot Assignment
+
+    /// Returns starters in lineup-slot order, each tagged with the slot label
+    /// they're filling. For NFL this is the slot-aware QB/RB/WR/TE/FLEX
+    /// assignment; for other sports it falls back to the existing
+    /// position-rank sort with no override label.
+    private func sportSpecificStarterEntries() -> [(pick: BestBallPick, slotLabel: String?)] {
+        let scoringStarters = sortedRoster.filter { scoringPlayerIDs.contains($0.playerID) }
+        guard sport == "NFL", let league = viewModel.currentLeague else {
+            return scoringStarters.map { ($0, nil) }
+        }
+        let constraints = BestBallLineupConfig.requirements(for: league).constraints
+        let positions = Dictionary(uniqueKeysWithValues: scoringStarters.map { ($0.playerID, $0.playerPosition) })
+        let points = Dictionary(uniqueKeysWithValues: scoringStarters.map { ($0.playerID, weeklyPlayerPoints[$0.playerID] ?? 0) })
+        let pickByID = Dictionary(uniqueKeysWithValues: scoringStarters.map { ($0.playerID, $0) })
+        let assigned = BestBallLineupConfig.assignStartersToSlots(
+            scoringIDs: scoringStarters.map { $0.playerID },
+            positions: positions,
+            points: points,
+            constraints: constraints
+        )
+        return assigned.compactMap { slot in
+            guard let pick = pickByID[slot.playerID] else { return nil }
+            return (pick, slot.label)
+        }
+    }
+
     // MARK: - Player Row
 
-    private func playerRow(pick: BestBallPick, isScoring: Bool, isPitcher: Bool) -> some View {
+    private func playerRow(pick: BestBallPick, isScoring: Bool, isPitcher: Bool, slotLabel: String? = nil) -> some View {
         let pts = effectivePoints(for: pick.playerID)
         let weekPts = weeklyPlayerPoints[pick.playerID] ?? 0
         let stats = effectiveStats(for: pick.playerID)
         let labels = BestBallLineupConfig.statLabels(for: sport, isPitcher: isPitcher)
         let showingDaily = hasDailyDataForSelectedDate
+        // Use the slot label as the badge when the player is filling a
+        // role that differs from their actual position (the FLEX/SFLEX
+        // case for NFL). Position-specific slots stay color-coded by
+        // position; flex slots render in neutral gray so they're visually
+        // distinct from a position-locked starter.
+        let badgeText = slotLabel ?? pick.playerPosition
+        let isFlexSlot = slotLabel == "FLEX" || slotLabel == "SFLEX"
+        let badgeColor: Color = isFlexSlot ? Color(.systemGray) : positionColor(pick.playerPosition)
 
         return HStack(spacing: 0) {
-            // Position badge
-            Text(pick.playerPosition)
+            // Position / slot badge
+            Text(badgeText)
                 .font(.system(size: 9, weight: .bold))
                 .foregroundStyle(.white)
-                .frame(width: 26, height: 18)
-                .background(positionColor(pick.playerPosition))
+                .frame(width: 32, height: 18)
+                .background(badgeColor)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
                 .padding(.trailing, 6)
 

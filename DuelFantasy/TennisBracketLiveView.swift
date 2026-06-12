@@ -38,14 +38,49 @@ struct TennisBracketLiveView: View {
             .ignoresSafeArea()
         )
         .task {
+            // If the user landed here directly (e.g. from home → My Contests
+            // → bracket) the lobby task never ran, so `tournament` is nil and
+            // the user's saved bracket picks were never fetched. Run a full
+            // load when no tournament has been loaded yet, OR when the
+            // currently loaded tournament's tid doesn't match the active
+            // (grandSlam, drawType) pair (i.e. user navigated in for one
+            // draw, then later opened the other one on the home cards).
+            // We do NOT use `.task(id:)` here because @Observable re-renders
+            // would cancel and restart the in-flight load on every state
+            // mutation, producing the load→cancel→reload loop visible in
+            // the console.
+            let expectedTID = TennisBracketViewModel.currentTournamentID(
+                grandSlam: viewModel.selectedGrandSlam,
+                drawType: viewModel.selectedDrawType
+            )
+            // Wait for any in-flight load (e.g. FantasyHubView's preload)
+            // to finish before deciding whether to fire another. Without
+            // this guard the live view's .task races the preload, both
+            // bump `currentLoadToken`, the first aborts mid-flight, and
+            // user-entry fetches can be silently lost — resulting in
+            // "No bracket submitted" until the user re-toggles the draw.
+            while viewModel.isLoading {
+                try? await Task.sleep(nanoseconds: 80_000_000)  // 80ms
+            }
+            if viewModel.tournament?.id != expectedTID || !viewModel.hasAttemptedLoad {
+                await viewModel.loadTournament()
+            }
+            // Late-bind fetch for picks: catches the case where the first
+            // loadTournament ran from FantasyHubView before auth had
+            // propagated, so the user-entry fetch was silently skipped
+            // and "No bracket submitted" sticks until draw type is
+            // toggled. Same fix as PlayoffTiers/SoccerTiers.
+            await viewModel.restoreUserPicksIfMissing()
             // Refresh on every appearance. The bracket runs across two weeks of slams
             // and matches finish hourly — the prior cached state goes stale fast, so
             // unconditionally re-fetch when the user opens the view.
             await viewModel.refreshLive()
+            await viewModel.loadMyGroups()
         }
         .refreshable {
             // Pull-to-refresh for explicit re-fetch.
             await viewModel.refreshLive()
+            await viewModel.loadMyGroups()
         }
         .task(id: refreshTick) {
             guard viewModel.isLive else { return }
@@ -90,27 +125,44 @@ struct TennisBracketLiveView: View {
             HStack {
                 statusBadge
                 Spacer()
-                if let rank = viewModel.userRank {
-                    Text("Rank #\(rank)")
-                        .font(.title3.weight(.bold))
-                }
             }
 
-            HStack {
-                if let pts = viewModel.userTotalPoints {
+            // Tournament context: e.g. "2026 French Open — ATP" / "WTA".
+            // Without this the only on-screen label is the generic
+            // "Tennis Brackets" nav title, leaving no indication of
+            // which slam or year you're looking at.
+            if let title = viewModel.tournament?.title, !title.isEmpty {
+                Text(title.uppercased())
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            HStack(alignment: .top) {
+                if let rank = viewModel.userRank {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Your Points")
+                        Text("Your Rank")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(String(format: "%.0f", pts))
+                            .foregroundStyle(.white.opacity(0.75))
+                        Text("#\(rank)")
                             .font(.title2.weight(.bold))
                     }
                 }
                 Spacer()
+                if let pts = viewModel.userTotalPoints {
+                    VStack(alignment: .center, spacing: 2) {
+                        Text("Your Points")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.75))
+                        Text(String(format: "%.0f", pts))
+                            .font(.title2.weight(.bold))
+                    }
+                    Spacer()
+                }
                 VStack(alignment: .trailing, spacing: 2) {
                     Text("Field Size")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.white.opacity(0.75))
                     Text("\(viewModel.fieldEntries.count)")
                         .font(.title2.weight(.bold))
                 }
@@ -192,6 +244,7 @@ struct TennisBracketLiveView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
+                let yourEliminated = TennisBracketEngine.eliminatedPlayerNames(results: viewModel.results)
                 ForEach(0..<TennisBracketEngine.rounds.count, id: \.self) { roundIndex in
                     let round = TennisBracketEngine.rounds[roundIndex]
                     let matchCount = TennisBracketEngine.matchesPerRound[roundIndex]
@@ -226,7 +279,7 @@ struct TennisBracketLiveView: View {
                             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                                 HStack(spacing: 6) {
                                     ForEach(row, id: \.slot) { pick in
-                                        pickStatusBadge(slot: pick.slot, name: pick.name)
+                                        pickStatusBadge(slot: pick.slot, name: pick.name, eliminated: yourEliminated)
                                     }
                                     if row.count < columns {
                                         Spacer()
@@ -246,14 +299,22 @@ struct TennisBracketLiveView: View {
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
-    private func pickStatusBadge(slot: String, name: String) -> some View {
+    private func pickStatusBadge(slot: String, name: String, eliminated: Set<String>) -> some View {
         let result = viewModel.results[slot]
         let status: PickStatus = {
-            guard let result else { return .pending }
-            if TennisBracketEngine.normalizedName(result) == TennisBracketEngine.normalizedName(name) {
-                return .correct
+            if let result {
+                if TennisBracketEngine.normalizedName(result) == TennisBracketEngine.normalizedName(name) {
+                    return .correct
+                }
+                return .wrong
             }
-            return .wrong
+            // O(1) lookup against the pre-computed eliminated set instead
+            // of an O(results) scan per pick — kept the bracket sheet from
+            // freezing while it rendered 127 rows.
+            if eliminated.contains(TennisBracketEngine.normalizedName(name)) {
+                return .dead
+            }
+            return .pending
         }()
 
         return HStack(spacing: 4) {
@@ -262,7 +323,8 @@ struct TennisBracketLiveView: View {
                 .foregroundStyle(status.color)
             Text(name)
                 .font(.system(size: 11))
-                .foregroundStyle(status == .wrong ? .secondary : .primary)
+                .foregroundStyle(status == .wrong || status == .dead ? .secondary : .primary)
+                .strikethrough(status == .dead)
                 .lineLimit(1)
         }
         .padding(.horizontal, 8)
@@ -273,13 +335,14 @@ struct TennisBracketLiveView: View {
     }
 
     private enum PickStatus {
-        case correct, wrong, pending
+        case correct, wrong, pending, dead
 
         var icon: String {
             switch self {
             case .correct: return "checkmark.circle.fill"
             case .wrong: return "xmark.circle.fill"
             case .pending: return "clock"
+            case .dead: return "xmark.circle"
             }
         }
 
@@ -288,6 +351,7 @@ struct TennisBracketLiveView: View {
             case .correct: return .green
             case .wrong: return .red
             case .pending: return .gray
+            case .dead: return .red.opacity(0.6)
             }
         }
 
@@ -296,6 +360,7 @@ struct TennisBracketLiveView: View {
             case .correct: return .green.opacity(0.1)
             case .wrong: return .red.opacity(0.08)
             case .pending: return .gray.opacity(0.08)
+            case .dead: return .red.opacity(0.06)
             }
         }
     }
@@ -355,7 +420,9 @@ struct TennisBracketLiveView: View {
                 Text("Entry")
                 Spacer()
                 Text("Pts")
-                    .frame(width: 50, alignment: .trailing)
+                    .frame(width: 44, alignment: .trailing)
+                Text("Max")
+                    .frame(width: 44, alignment: .trailing)
             }
             .font(.caption.weight(.semibold))
             .foregroundStyle(.secondary)
@@ -407,8 +474,12 @@ struct TennisBracketLiveView: View {
                 .lineLimit(1)
             Spacer()
             Text(String(format: "%.0f", entry.totalPoints))
-                .font(.subheadline.weight(.semibold))
-                .frame(width: 50, alignment: .trailing)
+                .font(.subheadline.weight(.semibold).monospacedDigit())
+                .frame(width: 44, alignment: .trailing)
+            Text(String(format: "%.0f", entry.maxPossiblePoints))
+                .font(.subheadline.weight(.regular).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 44, alignment: .trailing)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -436,6 +507,11 @@ struct TennisBracketLiveView: View {
 
                     Divider()
 
+                    // Pre-compute the eliminated-name set once for this
+                    // render. Without this every pick row re-scanned all
+                    // results, which froze the UI on 127-pick sheets.
+                    let eliminated = TennisBracketEngine.eliminatedPlayerNames(results: viewModel.results)
+
                     ForEach(0..<TennisBracketEngine.rounds.count, id: \.self) { roundIndex in
                         let round = TennisBracketEngine.rounds[roundIndex]
                         let matchCount = TennisBracketEngine.matchesPerRound[roundIndex]
@@ -458,7 +534,7 @@ struct TennisBracketLiveView: View {
                             }
 
                             ForEach(picks, id: \.slot) { pick in
-                                pickStatusBadge(slot: pick.slot, name: pick.name)
+                                pickStatusBadge(slot: pick.slot, name: pick.name, eliminated: eliminated)
                             }
                         }
                         if roundIndex < TennisBracketEngine.rounds.count - 1 {

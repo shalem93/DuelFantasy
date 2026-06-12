@@ -211,6 +211,32 @@ struct BestBallMatchupView: View {
                 mlbMatchupSection(title: "PITCHERS", badge: "P", slots1: pitchers1, slots2: pitchers2)
                 mlbMatchupSection(title: "BATTERS", badge: "UTIL", slots1: batters1, slots2: batters2)
                     .padding(.top, 12)
+            } else if sport == "NFL", let league = viewModel.currentLeague {
+                // For NFL we render starters by their lineup slot
+                // (QB → RB → WR → TE → FLEX) so the matchup reads like a
+                // standard fantasy box score rather than a flat FLEX list.
+                let constraints = BestBallLineupConfig.requirements(for: league).constraints
+                let ordered1 = orderedSlots(team: slots1, constraints: constraints)
+                let ordered2 = orderedSlots(team: slots2, constraints: constraints)
+                let count = max(ordered1.count, ordered2.count)
+                VStack(spacing: 0) {
+                    ForEach(0..<count, id: \.self) { index in
+                        let row1 = index < ordered1.count ? ordered1[index] : nil
+                        let row2 = index < ordered2.count ? ordered2[index] : nil
+                        // Same constraint ordering on both sides means both
+                        // teams hit each slot label in sync; fall back to
+                        // either side's label if one team has no scoring
+                        // player for that row.
+                        let badge = row1?.label ?? row2?.label ?? "FLEX"
+                        matchupRow(badge: badge, player1: row1?.entry, player2: row2?.entry)
+                        if index < count - 1 { Divider() }
+                    }
+                }
+                .background(.white)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .shadow(color: .black.opacity(0.04), radius: 6, y: 2)
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
             } else {
                 let count = max(slots1.count, slots2.count)
                 VStack(spacing: 0) {
@@ -231,6 +257,28 @@ struct BestBallMatchupView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 12)
             }
+        }
+    }
+
+    /// Assigns a team's scoring starters to canonical NFL lineup slots
+    /// (QB, RB, RB, WR, WR, TE, FLEX, FLEX) so the matchup rows pair like
+    /// slots across both sides.
+    private func orderedSlots(
+        team: [(pick: BestBallPick, pts: Double)],
+        constraints: [BestBallPositionRequirement]
+    ) -> [(label: String, entry: (pick: BestBallPick, pts: Double))] {
+        let positions = Dictionary(uniqueKeysWithValues: team.map { ($0.pick.playerID, $0.pick.playerPosition) })
+        let points = Dictionary(uniqueKeysWithValues: team.map { ($0.pick.playerID, $0.pts) })
+        let byID = Dictionary(uniqueKeysWithValues: team.map { ($0.pick.playerID, $0) })
+        let assigned = BestBallLineupConfig.assignStartersToSlots(
+            scoringIDs: team.map { $0.pick.playerID },
+            positions: positions,
+            points: points,
+            constraints: constraints
+        )
+        return assigned.compactMap { slot in
+            guard let entry = byID[slot.playerID] else { return nil }
+            return (label: slot.label, entry: entry)
         }
     }
 

@@ -165,7 +165,7 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
     }
 
     func fetchSlate() async throws -> DFSSlate {
-        // Fetch PGA Tour scoreboard
+        // Fetch PGA Tour scoreboard (current week)
         guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard") else {
             throw NSError(domain: "GolfDFS", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid PGA scoreboard URL"])
         }
@@ -175,15 +175,105 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
             throw NSError(domain: "GolfDFS", code: 2, userInfo: [NSLocalizedDescriptionKey: "PGA scoreboard request failed"])
         }
 
-        let scoreboard = try JSONDecoder().decode(ESPNPGAScoreboardResponse.self, from: data)
+        var scoreboard = try JSONDecoder().decode(ESPNPGAScoreboardResponse.self, from: data)
+        let defaultStates = scoreboard.events.map { "\($0.id):\($0.status.type.state ?? "?")" }.joined(separator: ", ")
+        print("[GolfDFS] Default scoreboard events: \(defaultStates.isEmpty ? "<empty>" : defaultStates)")
 
-        // Find current or next PGA event
-        guard let event = pickActiveEvent(from: scoreboard.events) else {
+        // Try to pick an event from the default scoreboard first.
+        var pickedEvent = pickActiveEvent(from: scoreboard.events)
+
+        // Probe forward when (a) the default scoreboard surfaced
+        // nothing usable OR (b) the only thing it returned is a "post"
+        // tournament — in that case there's a more useful upcoming
+        // tournament we'd rather show, and ESPN's date-targeted
+        // scoreboard often has it before the default scoreboard does.
+        // We only ACCEPT a probe result that's an upcoming/live event
+        // (state "pre" or "in"), so we don't replace one finished
+        // tournament with another.
+        let shouldProbe = pickedEvent == nil || (pickedEvent?.status.type.state == "post")
+        if shouldProbe {
+            let dateFormatter = DateFormatter()
+            dateFormatter.dateFormat = "yyyyMMdd"
+            let calendar = Calendar(identifier: .gregorian)
+            let today = Date()
+            for offset in 0..<14 {
+                guard let probeDate = calendar.date(byAdding: .day, value: offset, to: today),
+                      let probeURL = URL(string: "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard?dates=\(dateFormatter.string(from: probeDate))") else {
+                    continue
+                }
+                guard let (probeData, probeResp) = try? await session.data(from: probeURL),
+                      let probeHTTP = probeResp as? HTTPURLResponse, (200..<300).contains(probeHTTP.statusCode),
+                      let probeScoreboard = try? JSONDecoder().decode(ESPNPGAScoreboardResponse.self, from: probeData) else {
+                    print("[GolfDFS] date probe +\(offset)d (\(dateFormatter.string(from: probeDate))) HTTP fetch failed")
+                    continue
+                }
+                let probeStates = probeScoreboard.events.map { "\($0.id):\($0.status.type.state ?? "?")" }.joined(separator: ", ")
+                if !probeScoreboard.events.isEmpty {
+                    print("[GolfDFS] date probe +\(offset)d (\(dateFormatter.string(from: probeDate))) events: \(probeStates)")
+                }
+                // Find a non-"post" event in the probed scoreboard so we
+                // don't keep adopting last week's finished tournament.
+                if let probeEvent = probeScoreboard.events.first(where: {
+                    let s = $0.status.type.state ?? ""
+                    return s == "pre" || s == "in"
+                }) {
+                    print("[GolfDFS] Found upcoming event \(probeEvent.id) (\(probeEvent.name)) via date probe +\(offset)d, state=\(probeEvent.status.type.state ?? "?")")
+                    scoreboard = probeScoreboard
+                    pickedEvent = probeEvent
+                    break
+                }
+            }
+        }
+
+        // Season-events fallback: try ESPN's core API season events
+        // listing first (most reliable for season schedules).
+        if pickedEvent == nil || (pickedEvent?.status.type.state == "post") {
+            if let nextEvent = await findNextScheduledEventFromSeason() {
+                print("[GolfDFS] Found upcoming event \(nextEvent.id) (\(nextEvent.name)) via season-events fallback")
+                scoreboard = ESPNPGAScoreboardResponse(events: [nextEvent])
+                pickedEvent = nextEvent
+            }
+        }
+
+        // Sequential-ID probe: as a last resort, walk a small range of
+        // event IDs forward from the most-recent known event. ESPN's
+        // event IDs are largely sequential per league per season, so if
+        // the listing endpoints are all failing we can usually find the
+        // next event by guessing IDs near the previous one.
+        if pickedEvent == nil || (pickedEvent?.status.type.state == "post") {
+            let baseID: Int = {
+                if let scoreboardLastID = scoreboard.events.last.map({ Int($0.id) ?? 0 }), scoreboardLastID > 0 {
+                    return scoreboardLastID
+                }
+                return 401_811_950 // Memorial Tournament 2026 — empirically known anchor
+            }()
+            if let nextEvent = await probeSequentialEventIDs(startingFrom: baseID) {
+                print("[GolfDFS] Found upcoming event \(nextEvent.id) (\(nextEvent.name)) via sequential-ID probe")
+                scoreboard = ESPNPGAScoreboardResponse(events: [nextEvent])
+                pickedEvent = nextEvent
+            }
+        }
+
+        guard let event = pickedEvent else {
             throw NSError(domain: "GolfDFS", code: 3, userInfo: [NSLocalizedDescriptionKey: "No active PGA Tour event found"])
         }
 
         guard let competition = event.competitions.first else {
             throw NSError(domain: "GolfDFS", code: 4, userInfo: [NSLocalizedDescriptionKey: "No competition data in event"])
+        }
+
+        // If the event came from the core API (sequential-ID probe or
+        // season-events listing), its competitors are usually a `$ref`
+        // URL rather than an inline array — and our existing Codable
+        // decoder maps that to an empty array. Re-fetch the competitor
+        // list directly so the player pool below has someone to map.
+        let competitors: [ESPNPGACompetitor]
+        if competition.competitors.isEmpty {
+            print("[GolfDFS] Competitors empty in event payload — hydrating from core API")
+            competitors = await hydrateCompetitors(eventID: event.id, competitionID: competition.id)
+            print("[GolfDFS] Hydrated \(competitors.count) competitors from core API")
+        } else {
+            competitors = competition.competitors
         }
 
         // Fetch DraftKings salaries (primary) and OWGR world rankings (fallback).
@@ -206,7 +296,7 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
         var dkMatched = 0
         var dkMissed = 0
         var sampleMisses: [String] = []
-        let players: [DFSPlayer] = competition.competitors.compactMap { competitor in
+        var players: [DFSPlayer] = competitors.compactMap { competitor in
             let athleteID = competitor.id
             let name = competitor.athlete.displayName
             let country = competitor.athlete.flag?.alt ?? ""
@@ -242,6 +332,43 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
             if let firstKey = dkSalaries.keys.sorted().first {
                 print("[GolfDFS] Sample DK keys: \(dkSalaries.keys.sorted().prefix(5).joined(separator: ", ")) (first=\(firstKey))")
             }
+        }
+
+        // DK-only fallback: when ESPN hasn't published competitors yet
+        // (typical for events 2+ days out from R1 kickoff), the players
+        // array above is empty. Synthesize a pool directly from the DK
+        // salary list — those names ARE the field, and DK publishes
+        // them as soon as the tournament's signups are confirmed.
+        // World ranking still works for projection because it's
+        // matched on name.
+        if players.isEmpty && !dkSalaries.isEmpty {
+            print("[GolfDFS] No competitors from ESPN — building pool from \(dkSalaries.count) DK salaries")
+            players = dkSalaries.map { (lowercaseName, salary) -> DFSPlayer in
+                // dkSalaries keys are lowercase e.g. "scottie scheffler".
+                // Title-case them for display.
+                let displayName = lowercaseName.split(separator: " ")
+                    .map { word -> String in
+                        let s = String(word)
+                        return s.prefix(1).uppercased() + s.dropFirst()
+                    }
+                    .joined(separator: " ")
+                let worldRank = matchWorldRanking(name: displayName, rankings: worldRankByName)
+                let stableID = "dk-\(lowercaseName.replacingOccurrences(of: " ", with: "-"))"
+                let projection = projectedGolfPoints(salary: salary, worldRank: worldRank, athleteID: stableID)
+                return DFSPlayer(
+                    id: "pga-\(stableID)",
+                    name: displayName,
+                    team: "",          // country unknown from DK alone
+                    position: "G",
+                    salary: salary,
+                    projectedPoints: projection,
+                    gameID: event.id
+                )
+            }
+            // Highest salary first — gives the lobby a sensible default
+            // sort even before the user filters.
+            players.sort { $0.salary > $1.salary }
+            print("[GolfDFS] DK-only fallback: built \(players.count) players, salary range $\(players.last?.salary ?? 0)-$\(players.first?.salary ?? 0)")
         }
 
         guard !players.isEmpty else {
@@ -297,6 +424,211 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
         return slate
     }
 
+    /// Walk the season's calendar of scheduled events from ESPN and
+    /// pick the soonest one whose start date is today or in the future.
+    /// Tries several URL shapes because ESPN's `?dates=` parameter is
+    /// finicky about the format it accepts — some endpoints want
+    /// `YYYYMMDD-YYYYMMDD` ranges, others want a single `YYYY`, and the
+    /// schedule endpoint returns different payloads.
+    private func findNextScheduledEventFromSeason() async -> ESPNPGAEvent? {
+        let calendar = Calendar(identifier: .gregorian)
+        let now = Date()
+        let year = calendar.component(.year, from: now)
+        let lowerBound = calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: now)) ?? now
+
+        // The site API's `?dates=` parameter is currently rejecting most
+        // queries (returning non-2xx for `20260611`, `2025`, `2026`,
+        // YYYYMMDD-YYYYMMDD ranges, etc.) so go straight to ESPN's
+        // CORE API instead — its `/seasons/<year>/events` endpoint is
+        // a reliable list of every scheduled event for the season.
+        // Each item is a `$ref` URL that we dereference in parallel to
+        // get the full ESPNPGAEvent payload.
+        for season in [year, year - 1] {
+            guard let listURL = URL(string: "https://sports.core.api.espn.com/v2/sports/golf/leagues/pga/seasons/\(season)/events?limit=100") else { continue }
+            guard let (listData, listResp) = try? await session.data(from: listURL),
+                  let listHTTP = listResp as? HTTPURLResponse,
+                  (200..<300).contains(listHTTP.statusCode) else {
+                print("[GolfDFS] core-events: season=\(season) list fetch failed")
+                continue
+            }
+            guard let json = try? JSONSerialization.jsonObject(with: listData) as? [String: Any],
+                  let items = json["items"] as? [[String: Any]] else {
+                print("[GolfDFS] core-events: season=\(season) JSON parse failed")
+                continue
+            }
+            let refURLs = items.compactMap { $0["$ref"] as? String }
+                .compactMap { URL(string: $0) }
+            print("[GolfDFS] core-events: season=\(season) found \(refURLs.count) event ref(s)")
+
+            let events = await withTaskGroup(of: ESPNPGAEvent?.self, returning: [ESPNPGAEvent].self) { group in
+                for url in refURLs {
+                    group.addTask {
+                        guard let (data, resp) = try? await self.session.data(from: url),
+                              let http = resp as? HTTPURLResponse,
+                              (200..<300).contains(http.statusCode),
+                              let event = try? JSONDecoder().decode(ESPNPGAEvent.self, from: data)
+                        else { return nil }
+                        return event
+                    }
+                }
+                var collected: [ESPNPGAEvent] = []
+                for await event in group {
+                    if let event { collected.append(event) }
+                }
+                return collected
+            }
+            print("[GolfDFS] core-events: season=\(season) dereferenced \(events.count) event(s)")
+
+            let upcoming = events
+                .compactMap { ev -> (ESPNPGAEvent, Date)? in
+                    guard let d = parseESPNDate(ev.date) else { return nil }
+                    return (ev, d)
+                }
+                .filter { $0.1 >= lowerBound }
+                .sorted { $0.1 < $1.1 }
+            if let (event, eventDate) = upcoming.first {
+                print("[GolfDFS] core-events: picking \(event.id) (\(event.name)) startDate=\(eventDate)")
+                return event
+            }
+        }
+        return nil
+    }
+
+    /// Fetch the competitor list for an event/competition directly from
+    /// ESPN's core API and decode each one into an `ESPNPGACompetitor`.
+    /// Used when the event was sourced from the core `/events/<id>`
+    /// endpoint — that endpoint returns competitors as a `$ref` URL,
+    /// so the inline competitors array on the decoded event is empty.
+    private func hydrateCompetitors(eventID: String, competitionID: String) async -> [ESPNPGACompetitor] {
+        guard let listURL = URL(string: "https://sports.core.api.espn.com/v2/sports/golf/leagues/pga/events/\(eventID)/competitions/\(competitionID)/competitors?limit=200") else {
+            return []
+        }
+        guard let (listData, listResp) = try? await session.data(from: listURL),
+              let listHTTP = listResp as? HTTPURLResponse,
+              (200..<300).contains(listHTTP.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: listData) as? [String: Any],
+              let items = json["items"] as? [[String: Any]] else {
+            print("[GolfDFS] hydrateCompetitors: list fetch failed")
+            return []
+        }
+        let refURLs = items.compactMap { $0["$ref"] as? String }
+            .compactMap { URL(string: $0) }
+        print("[GolfDFS] hydrateCompetitors: dereferencing \(refURLs.count) competitor refs")
+
+        // Each competitor ref returns a JSON object with an athlete `$ref`
+        // inside — we need to dereference that too to get the display
+        // name. Fetch both layers in parallel per competitor.
+        return await withTaskGroup(of: ESPNPGACompetitor?.self, returning: [ESPNPGACompetitor].self) { group in
+            for url in refURLs {
+                group.addTask { [session = self.session] in
+                    guard let (cData, cResp) = try? await session.data(from: url),
+                          let cHTTP = cResp as? HTTPURLResponse,
+                          (200..<300).contains(cHTTP.statusCode),
+                          let cJSON = try? JSONSerialization.jsonObject(with: cData) as? [String: Any] else {
+                        return nil
+                    }
+                    // Competitor's athlete is usually a `$ref` URL to the
+                    // athlete record. Resolve it for the display name.
+                    var athleteName = "Unknown"
+                    var athleteID = "0"
+                    var country = ""
+                    if let athleteRef = (cJSON["athlete"] as? [String: Any])?["$ref"] as? String,
+                       let athleteURL = URL(string: athleteRef),
+                       let (aData, aResp) = try? await session.data(from: athleteURL),
+                       let aHTTP = aResp as? HTTPURLResponse,
+                       (200..<300).contains(aHTTP.statusCode),
+                       let aJSON = try? JSONSerialization.jsonObject(with: aData) as? [String: Any] {
+                        athleteName = (aJSON["displayName"] as? String)
+                            ?? (aJSON["fullName"] as? String)
+                            ?? athleteName
+                        if let id = aJSON["id"] as? String {
+                            athleteID = id
+                        } else if let id = aJSON["id"] as? Int {
+                            athleteID = String(id)
+                        }
+                        if let flag = aJSON["flag"] as? [String: Any],
+                           let alt = flag["alt"] as? String {
+                            country = alt
+                        }
+                    }
+                    // The competitor record itself can also carry id /
+                    // athlete fields inline — prefer those when present.
+                    if let id = cJSON["id"] as? String {
+                        athleteID = id
+                    } else if let id = cJSON["id"] as? Int {
+                        athleteID = String(id)
+                    }
+                    let athlete = ESPNPGAAthlete(
+                        displayName: athleteName,
+                        shortName: nil,
+                        fullName: athleteName,
+                        flag: country.isEmpty ? nil : ESPNPGAFlag(alt: country, href: nil),
+                        headshot: nil
+                    )
+                    return ESPNPGACompetitor(
+                        id: athleteID,
+                        athlete: athlete,
+                        status: nil,
+                        score: nil,
+                        linescores: nil,
+                        order: nil,
+                        statistics: nil
+                    )
+                }
+            }
+            var collected: [ESPNPGACompetitor] = []
+            for await competitor in group {
+                if let competitor { collected.append(competitor) }
+            }
+            return collected
+        }
+    }
+
+    /// Probe a small range of event IDs forward from a known anchor
+    /// (typically the last-known event ID) and return the soonest
+    /// event whose start date is today-or-later. ESPN IDs are nearly
+    /// sequential per league/season — usually the next tournament's
+    /// ID is within 1–20 of the previous one. Each probe hits the core
+    /// API directly which has been the most reliable endpoint shape.
+    private func probeSequentialEventIDs(startingFrom anchor: Int) async -> ESPNPGAEvent? {
+        let calendar = Calendar(identifier: .gregorian)
+        let lowerBound = calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: Date())) ?? Date()
+
+        let candidateIDs = Array((anchor + 1)...(anchor + 30))
+        let events = await withTaskGroup(of: ESPNPGAEvent?.self, returning: [ESPNPGAEvent].self) { group in
+            for id in candidateIDs {
+                guard let url = URL(string: "https://sports.core.api.espn.com/v2/sports/golf/leagues/pga/events/\(id)") else { continue }
+                group.addTask {
+                    guard let (data, resp) = try? await self.session.data(from: url),
+                          let http = resp as? HTTPURLResponse,
+                          (200..<300).contains(http.statusCode),
+                          let event = try? JSONDecoder().decode(ESPNPGAEvent.self, from: data)
+                    else { return nil }
+                    return event
+                }
+            }
+            var collected: [ESPNPGAEvent] = []
+            for await event in group {
+                if let event { collected.append(event) }
+            }
+            return collected
+        }
+        print("[GolfDFS] sequential-ID probe: found \(events.count) event(s) in ID range \(anchor + 1)...\(anchor + 30)")
+
+        let upcoming = events
+            .compactMap { ev -> (ESPNPGAEvent, Date)? in
+                guard let d = parseESPNDate(ev.date) else { return nil }
+                return (ev, d)
+            }
+            .filter { $0.1 >= lowerBound }
+            .sorted { $0.1 < $1.1 }
+        if let (event, eventDate) = upcoming.first {
+            print("[GolfDFS] sequential-ID probe: picking \(event.id) (\(event.name)) startDate=\(eventDate)")
+            return event
+        }
+        return nil
+    }
+
     /// Pick the current in-progress or next upcoming PGA event
     private func pickActiveEvent(from events: [ESPNPGAEvent]) -> ESPNPGAEvent? {
         // Prefer in-progress events first
@@ -307,12 +639,30 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
         if let upcoming = events.first(where: { $0.status.type.state == "pre" }) {
             return upcoming
         }
-        // Then recently finished (post) events — for settlement
-        if let finished = events.first(where: { $0.status.type.state == "post" }) {
+        // Then a RECENTLY finished (post) event. Window the recency from the
+        // tournament END date (Sunday) — not start date — because a PGA event
+        // runs Thursday→Sunday, so by the time it goes "post" Sunday evening
+        // it's already ~3.5 days past start, which would otherwise instantly
+        // filter it out before we can settle. We still want to exclude *last*
+        // week's tournament once the new pre/in event materializes, so cap at
+        // 2 days past end. If endDate is missing, fall back to start + 6 days
+        // (covers full Thu→Sun + 2-day grace).
+        let now = Date()
+        if let finished = events.first(where: { event in
+            guard event.status.type.state == "post" else { return false }
+            let referenceDate: Date? = {
+                if let end = event.endDate, let parsed = parseESPNDate(end) { return parsed }
+                if let start = parseESPNDate(event.date) {
+                    return start.addingTimeInterval(4 * 24 * 3600) // ~Thu→Sun
+                }
+                return nil
+            }()
+            guard let ref = referenceDate else { return false }
+            return now.timeIntervalSince(ref) < 2 * 24 * 3600
+        }) {
             return finished
         }
-        // Fallback to first event
-        return events.first
+        return nil
     }
 
     // MARK: - OWGR World Rankings
@@ -510,6 +860,16 @@ struct ESPNPGADFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
 
         var scoreboard = try JSONDecoder().decode(ESPNPGAScoreboardResponse.self, from: data)
 
+        // Track whether we had to use the date-fallback to find the event.
+        // When true, the event has already rotated off the live scoreboard
+        // (i.e., it's a completed past tournament). ESPN's date-query
+        // response for past events frequently strips status fields
+        // (status.type.completed/name = nil, status.period = nil), which
+        // would normally cause every `allGamesFinal` gate to fail. We use
+        // this flag below to relax those gates when we have score-to-par
+        // data confirming a solo winner.
+        var usedDateFallback = false
+
         // Find matching event by ID
         // If our tournament is no longer on the current scoreboard, try fetching
         // with a date parameter to get historical tournament data
@@ -523,6 +883,7 @@ struct ESPNPGADFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
                    let dateScoreboard = try? JSONDecoder().decode(ESPNPGAScoreboardResponse.self, from: dateData) {
                     if dateScoreboard.events.first(where: { $0.id == tournamentGame.id }) != nil {
                         scoreboard = dateScoreboard
+                        usedDateFallback = true
                         print("[GolfDFS] Found tournament \(tournamentGame.id) via date query (\(dateStr))")
                     }
                 }
@@ -586,12 +947,108 @@ struct ESPNPGADFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
         // our own R4 data validation. This prevents premature "Final" when ESPN sets
         // state="post" while late groups are still on the course during R4.
         let espnSaysFinal = eventCompleted || eventStatusName == "STATUS_FINAL"
-        let allGamesFinal = eventState == "post" && currentRound >= 4 && hasR4Data && espnSaysFinal
+        // Playoff detection: a playoff is in progress when 2+ active
+        // competitors share the lowest score-to-par AND ESPN hasn't yet
+        // broken the tie via its position field. Once the playoff
+        // resolves, ESPN updates each competitor's `score.value` (score
+        // to par) — the winner stays at the regulation total and the
+        // runner-up's score-to-par stays the same too, but their POSITION
+        // diverges (the playoff loser is no longer "T1" but "2"). When
+        // ESPN's date-fallback response is stripped (status fields nil),
+        // we fall back to score-to-par tie detection — different
+        // score-to-par values prove the playoff is resolved regardless of
+        // what raw stroke linescores say.
+        //
+        // We use `score.value` (score-to-par) instead of summing R1-R4
+        // strokes because the date-fallback ESPN response sometimes
+        // returns degenerate linescores (all rounds = 67 even though the
+        // actual scores differ), which previously triggered a false tie.
+        let activeForLeaderCheck = competition.competitors.filter { competitor in
+            let statusName = competitor.status?.type?.name ?? ""
+            return statusName != "STATUS_CUT" && statusName != "STATUS_WITHDRAWN" && statusName != "STATUS_DISQUALIFIED"
+        }
+        let leadingScore: Double? = activeForLeaderCheck.compactMap { c -> Double? in
+            c.score?.value
+        }.min()
+        let leadersAtLow: Int = {
+            guard let low = leadingScore else { return 0 }
+            return activeForLeaderCheck.filter { c -> Bool in
+                guard let v = c.score?.value else { return false }
+                return abs(v - low) < 0.001
+            }.count
+        }()
+        // Position-based playoff resolution check (only used as a tiebreak
+        // signal when score-to-par values match exactly): the playoff is
+        // resolved when ESPN shows exactly ONE competitor at position "1"
+        // with no leading "T".
+        let soloLeaderPerESPN: Bool = {
+            let leadersByPosition = activeForLeaderCheck.filter { c in
+                guard let pos = c.status?.displayValue else { return false }
+                return pos == "1"
+            }
+            return leadersByPosition.count == 1
+        }()
+        let tiedAtTop = leadersAtLow >= 2 && !soloLeaderPerESPN
+        // Standard path: tournament is on the LIVE scoreboard, so all the
+        // status fields are populated and we can require the full set of
+        // gates before marking final.
+        //
+        // Trust ESPN when it explicitly says STATUS_FINAL / completed=true.
+        // After a playoff resolves, the winner's score-to-par equals the
+        // runner-up's (the playoff is sudden-death; both finished
+        // regulation at the same number). Our `tiedAtTop` check was
+        // still firing on that real-final state, leaving last week's
+        // playoff-decided tournament stuck "in progress" forever — no
+        // settlement, no bots generated, no past results in My Contests.
+        // ESPN's explicit final flag overrides the score-tie signal.
+        // Two ways to mark final on the live scoreboard:
+        //   A. ESPN explicitly says completed/STATUS_FINAL → trust it. ESPN
+        //      doesn't set STATUS_FINAL between rounds, only at true end of
+        //      tournament. During a sudden-death playoff ESPN flips the
+        //      event-level final flag while the per-competitor R4 strokes
+        //      linescore can still be stale or report a "5th period" for
+        //      playoff participants — which broke our `hasR4Data` gate and
+        //      left last week's playoff-decided tournament stuck in shimmer.
+        //   B. No explicit final flag, but R4 has played out fully across the
+        //      whole cut field (≥50 strokes for everyone). Covers the rare
+        //      case where ESPN lags on flipping the event status.
+        let liveScoreboardFinal = eventState == "post"
+            && (espnSaysFinal || (currentRound >= 4 && hasR4Data))
+        if tiedAtTop && espnSaysFinal {
+            print("[PGA-Score] \(leadersAtLow) competitors tied at score-to-par but ESPN says \(eventStatusName)/completed=\(eventCompleted) — treating as final (playoff resolved)")
+        }
+        // Date-fallback path: the event has rotated off the live scoreboard
+        // (i.e., it's a completed past tournament — for live/in-progress
+        // events ESPN keeps them on the main scoreboard). The date-query
+        // response strips status fields, so the live-scoreboard gates all
+        // fail. In this case we trust two things:
+        //   1. We have score-to-par data for the leaders (proves the
+        //      tournament finished — mid-tournament events on the date
+        //      query wouldn't have completed score.value for the winner).
+        //   2. No regulation tie at the top (or ESPN broke the tie via
+        //      a solo "1" position).
+        // Together these are sufficient to mark final. The R4 stroke
+        // linescores ESPN serves on the date-fallback are degenerate
+        // (every round = same value), so we can't use them — but the
+        // overall score.value field IS correct.
+        let dateFallbackFinal = usedDateFallback
+            && leadingScore != nil
+            && !tiedAtTop
+            && activeForLeaderCheck.count >= 2
+        let allGamesFinal = liveScoreboardFinal || dateFallbackFinal
+        if tiedAtTop && !allGamesFinal {
+            print("[PGA-Score] \(leadersAtLow) competitors tied at \(leadingScore ?? 0) — playoff in progress, not final")
+        }
+        if dateFallbackFinal && !liveScoreboardFinal {
+            print("[PGA-Score] Date-fallback final: leader=\(leadingScore ?? 0), leadersAtLow=\(leadersAtLow), active=\(activeForLeaderCheck.count) — marking allGamesFinal=true")
+        }
 
         // Build game info (tournament-level status)
         let statusLabel: String
         if allGamesFinal {
             statusLabel = "Final"
+        } else if tiedAtTop && hasR4Data {
+            statusLabel = "Playoff"
         } else if eventState == "in" {
             statusLabel = "Round \(currentRound) - Active"
         } else if eventState == "post" && currentRound >= 4 {
@@ -1125,11 +1582,73 @@ struct GolfTournamentHistoryProvider {
         self.session = session
     }
 
+    /// Resolve a human-readable player name to an ESPN athlete ID by
+    /// hitting ESPN's site search endpoint. Used to convert DK-fallback
+    /// IDs (which encode only the name, not an ESPN ID) into something
+    /// the per-athlete history endpoint can use.
+    private func resolveESPNAthleteID(forName name: String) async -> String? {
+        let query = name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? name
+        guard let url = URL(string: "https://site.web.api.espn.com/apis/search/v2?query=\(query)&type=player&sport=golf&limit=5") else {
+            return nil
+        }
+        guard let (data, resp) = try? await session.data(from: url),
+              let http = resp as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        // The search response shape: { results: [{ contents: [{ id, uid, displayName, sport, ... }] }] }
+        // IMPORTANT: `id` is a GUID like "38cbeebe-aac8-fb36-dce0-cf45436086e4"
+        // that the per-athlete overview endpoint rejects with HTTP 400. The
+        // *numeric* athlete ID needed by `/athletes/{id}/overview` lives inside
+        // `uid` (e.g. "s:1100~a:9478" → 9478) and `link.web`
+        // (e.g. ".../id/9478/scottie-scheffler"). Parse one of those instead.
+        let resultSections = (json["results"] as? [[String: Any]]) ?? []
+        for section in resultSections {
+            let contents = (section["contents"] as? [[String: Any]]) ?? []
+            for item in contents {
+                let sport = (item["sport"] as? String)?.lowercased() ?? ""
+                guard sport.contains("golf") else { continue }
+                // 1. uid: "s:1100~a:9478" — extract digits after "a:"
+                if let uid = item["uid"] as? String,
+                   let aRange = uid.range(of: "a:") {
+                    let tail = uid[aRange.upperBound...]
+                    let digits = tail.prefix(while: { $0.isNumber })
+                    if !digits.isEmpty { return String(digits) }
+                }
+                // 2. link.web: ".../id/9478/scottie-scheffler"
+                if let link = item["link"] as? [String: Any],
+                   let web = link["web"] as? String,
+                   let idRange = web.range(of: "/id/") {
+                    let tail = web[idRange.upperBound...]
+                    let digits = tail.prefix(while: { $0.isNumber })
+                    if !digits.isEmpty { return String(digits) }
+                }
+            }
+        }
+        return nil
+    }
+
     /// Fetch recent tournament results for a golfer by ESPN athlete ID.
     /// Returns up to 15 most recent tournaments across all tours.
     func fetchTournamentHistory(athleteID: String) async throws -> [GolfTournamentResult] {
         // Strip "pga-" prefix if present
-        let rawID = athleteID.hasPrefix("pga-") ? String(athleteID.dropFirst(4)) : athleteID
+        var rawID = athleteID.hasPrefix("pga-") ? String(athleteID.dropFirst(4)) : athleteID
+
+        // DK-fallback IDs look like "dk-eric-cole" (built from the DK
+        // salary list when ESPN hadn't published competitors yet for an
+        // upcoming event). Resolve those to a real ESPN athlete ID via
+        // the site search API so tournament history lookups work.
+        if rawID.hasPrefix("dk-") {
+            let nameSlug = String(rawID.dropFirst(3)).replacingOccurrences(of: "-", with: " ")
+            if let resolvedID = await resolveESPNAthleteID(forName: nameSlug) {
+                print("[GolfDFS] resolved DK player '\(nameSlug)' → ESPN athlete ID \(resolvedID)")
+                rawID = resolvedID
+            } else {
+                print("[GolfDFS] couldn't resolve ESPN athlete ID for DK player '\(nameSlug)'")
+                return []
+            }
+        }
 
         guard let url = URL(string: "https://site.web.api.espn.com/apis/common/v3/sports/golf/pga/athletes/\(rawID)/overview") else {
             return []

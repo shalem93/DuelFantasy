@@ -15,7 +15,7 @@ struct DFSLineupBuilderView: View {
         VStack(spacing: 0) {
             salaryBar
             lineupSlots
-            if viewModel.tournament?.isSingleGame != true && viewModel.sport != "PGA" {
+            if viewModel.tournament?.isSingleGame != true && viewModel.sport != "PGA" && viewModel.sport != "UFC" {
                 positionFilters
             }
             if !viewModel.gameMatchupLabels.isEmpty && viewModel.tournament?.isSingleGame != true && viewModel.sport != "PGA" {
@@ -66,6 +66,19 @@ struct DFSLineupBuilderView: View {
                     let currentType = current.tournamentType
                     var entries: [DFSEntryRecord] = []
 
+                    // Slate identity = tournament ID minus the trailing field
+                    // size (and any -iN instance suffix). "pga-401811949-2000"
+                    // → "pga-401811949", "mlb-20260610-eve-5" → "mlb-20260610-eve".
+                    @MainActor func slateIdentity(_ id: String) -> String {
+                        let base = viewModel.baseTournamentID(id)
+                        let parts = base.components(separatedBy: "-")
+                        if let last = parts.last, Int(last) != nil, parts.count > 1 {
+                            return parts.dropLast().joined(separator: "-")
+                        }
+                        return base
+                    }
+                    let currentIdentity = slateIdentity(current.id)
+
                     // 1. Public entries from `userEntryRecords` — the original
                     //    behavior.
                     for (tid, records) in viewModel.userEntryRecords {
@@ -80,8 +93,12 @@ struct DFSLineupBuilderView: View {
                                 entries.append(contentsOf: records)
                             }
                         } else {
-                            // For main slate: show all lineups of the same type
-                            if DFSTournamentType.from(tournamentID: tid) == currentType {
+                            // Same type AND same slate. Matching on type alone
+                            // offered LAST week's PGA lineups (both events are
+                            // `.main`) — importing those fills the builder with
+                            // $0 stubs for players not in this week's field.
+                            if DFSTournamentType.from(tournamentID: tid) == currentType,
+                               slateIdentity(tid) == currentIdentity {
                                 entries.append(contentsOf: records)
                             }
                         }
@@ -92,6 +109,16 @@ struct DFSLineupBuilderView: View {
                     //    into synthetic DFSEntryRecord rows so they slot into
                     //    the same import menu and `loadLineupFromEntry` path.
                     guard let myUUID = viewModel.userID.flatMap(UUID.init(uuidString:)) else { return entries }
+                    // Extract the 8-digit YYYYMMDD date prefix from a
+                    // tournament ID (e.g. `mlb-20260606-2000` → `20260606`).
+                    // Used to gate import suggestions to the same slate date —
+                    // yesterday's private MLB main slate shouldn't get offered
+                    // for import into today's main slate builder.
+                    func dateKey(_ tid: String) -> String? {
+                        let parts = tid.components(separatedBy: "-")
+                        return parts.first(where: { $0.count == 8 && Int($0) != nil })
+                    }
+                    let currentDateKey = dateKey(currentBase)
                     for contest in viewModel.myPrivateContests {
                         let parentBase = viewModel.baseTournamentID(contest.parentTournamentID)
                         let parentType = DFSTournamentType.from(tournamentID: contest.parentTournamentID)
@@ -101,7 +128,14 @@ struct DFSLineupBuilderView: View {
                                 let parentGamePart = parentBase.components(separatedBy: "-").dropLast().joined(separator: "-")
                                 return parentGamePart == currentGamePart
                             }
-                            return parentType == currentType
+                            // Main/evening: same type AND same date. Without
+                            // the date check, yesterday's main slate private
+                            // contest shows up as importable into today's
+                            // builder — and the player IDs may not even
+                            // exist in today's slate.
+                            guard parentType == currentType else { return false }
+                            guard let cdk = currentDateKey, let pdk = dateKey(parentBase) else { return false }
+                            return cdk == pdk
                         }()
                         guard matches else { continue }
                         guard let entry = (viewModel.privateContestEntries[contest.id] ?? []).first(where: { $0.userID == myUUID }) else { continue }
@@ -121,7 +155,20 @@ struct DFSLineupBuilderView: View {
                         )
                         entries.append(synthetic)
                     }
-                    return entries
+                    // Dedup by lineup-player-ID set: if a user submitted the
+                    // same 6/10 players to multiple sibling tournaments
+                    // (H2H + 5-Man + 2000-person, or main + evening), they
+                    // shouldn't see the same lineup listed N times in the
+                    // import menu — one entry per unique lineup is enough.
+                    var seenLineups = Set<String>()
+                    var deduped: [DFSEntryRecord] = []
+                    for entry in entries {
+                        let key = entry.lineupPlayerIDs.sorted().joined(separator: "|")
+                        if seenLineups.insert(key).inserted {
+                            deduped.append(entry)
+                        }
+                    }
+                    return deduped
                 }()
                 if !allSlateEntries.isEmpty {
                     Menu {
@@ -475,14 +522,33 @@ struct DFSLineupBuilderView: View {
                                             .background(Color.green)
                                             .clipShape(RoundedRectangle(cornerRadius: 3))
                                     }
-                                    if player.isConfirmedActive && (viewModel.sport == "EPL" || viewModel.sport == "UCL" || viewModel.sport == "WC") {
-                                        Text("CS")
-                                            .font(.system(size: 9, weight: .bold))
-                                            .foregroundStyle(.white)
-                                            .padding(.horizontal, 5)
-                                            .padding(.vertical, 1)
-                                            .background(brandPurple)
-                                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                                    if viewModel.sport == "EPL" || viewModel.sport == "UCL" || viewModel.sport == "WC" {
+                                        if player.isConfirmedActive {
+                                            // Confirmed starter — XI announced
+                                            Label("CS", systemImage: "checkmark.circle.fill")
+                                                .labelStyle(.titleAndIcon)
+                                                .font(.system(size: 9, weight: .bold))
+                                                .foregroundStyle(.white)
+                                                .padding(.horizontal, 5)
+                                                .padding(.vertical, 1)
+                                                .background(Color.green)
+                                                .clipShape(RoundedRectangle(cornerRadius: 3))
+                                        } else if player.playedRecently,
+                                                  !viewModel.confirmedXITeams.contains(player.team) {
+                                            // Projected starter — started or subbed
+                                            // into a recent match AND their team's
+                                            // XI isn't out yet. Once the XI drops,
+                                            // unconfirmed players are benched, so
+                                            // PS would be misleading.
+                                            Label("PS", systemImage: "clock.fill")
+                                                .labelStyle(.titleAndIcon)
+                                                .font(.system(size: 9, weight: .bold))
+                                                .foregroundStyle(.white)
+                                                .padding(.horizontal, 5)
+                                                .padding(.vertical, 1)
+                                                .background(Color.orange)
+                                                .clipShape(RoundedRectangle(cornerRadius: 3))
+                                        }
                                     }
                                     if let status = player.injuryStatus {
                                         Text(status)

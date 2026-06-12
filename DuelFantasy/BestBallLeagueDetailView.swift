@@ -74,9 +74,16 @@ struct BestBallLeagueDetailView: View {
         }
         .task {
             await viewModel.loadLeagueDetail(leagueID: leagueID)
-            // Auto-catch-up on initial load if league is active and host
+            // Auto-catch-up on initial load for ANY member opening the
+            // league. `catchUpScoring` already skips weeks that are
+            // fully scored, and `batchUpsertWeeklyScores` is idempotent
+            // on conflict — so opening the door beyond just the host
+            // means a member who joined mid-week sees correct standings
+            // without waiting for the host to log in. Race against
+            // another member triggering the same compute is acceptable:
+            // both writes converge on the same values via upsert.
             if viewModel.currentLeague?.status == "active",
-               viewModel.isHost, !isCatchingUp, !hasTriggeredCatchUp {
+               !isCatchingUp, !hasTriggeredCatchUp {
                 hasTriggeredCatchUp = true
                 isCatchingUp = true
                 await viewModel.catchUpScoring(leagueID: leagueID)
@@ -296,6 +303,12 @@ struct BestBallLeagueDetailView: View {
                             }
                             .buttonStyle(.bordered)
                             .tint(brandPurple)
+                            ShareLink(item: league.shareMessage(code: code)) {
+                                Label("Share", systemImage: "square.and.arrow.up")
+                                    .font(.caption.weight(.medium))
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(brandPurple)
                         }
                     }
                 }
@@ -375,11 +388,23 @@ struct BestBallLeagueDetailView: View {
                         Task { await viewModel.startDraft(leagueID: league.id) }
                     } label: {
                         VStack(spacing: 4) {
-                            Text("Start Draft")
-                                .font(.headline)
-                            Text("Empty slots will be filled by bots")
-                                .font(.caption)
-                                .opacity(0.8)
+                            if viewModel.isStartingDraft {
+                                HStack(spacing: 8) {
+                                    ProgressView()
+                                        .tint(.white)
+                                    Text("Starting Draft…")
+                                        .font(.headline)
+                                }
+                                Text("Filling empty slots with bots and loading player pool")
+                                    .font(.caption)
+                                    .opacity(0.8)
+                            } else {
+                                Text("Start Draft")
+                                    .font(.headline)
+                                Text("Empty slots will be filled by bots")
+                                    .font(.caption)
+                                    .opacity(0.8)
+                            }
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 14)
@@ -387,6 +412,7 @@ struct BestBallLeagueDetailView: View {
                         .foregroundStyle(.white)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
+                    .disabled(viewModel.isStartingDraft)
                 } else {
                     Text("Waiting for host to start draft...")
                         .font(.subheadline)
@@ -436,6 +462,16 @@ struct BestBallLeagueDetailView: View {
 
 }
 
+extension BestBallLeague {
+    /// Pre-filled share message for the system share sheet. The invite
+    /// code is the actionable bit; we wrap it in friendly copy so a
+    /// recipient pasting from Messages/WhatsApp/etc. sees context, not
+    /// just a code blob.
+    func shareMessage(code: String) -> String {
+        "Join my Best Ball league \"\(title)\" on DuelFantasy — invite code: \(code)"
+    }
+}
+
 // MARK: - Commissioner Settings Sheet (standalone view so @State initializes from league)
 
 private struct CommishSettingsSheet: View {
@@ -450,10 +486,28 @@ private struct CommishSettingsSheet: View {
     @State private var editIsPrivate: Bool
     @State private var editPitcherSlots: Int
     @State private var editBatterSlots: Int
+    @State private var editNflQB: Int
+    @State private var editNflRB: Int
+    @State private var editNflWR: Int
+    @State private var editNflTE: Int
+    @State private var editNflFLEX: Int
+    @State private var editNflSFLEX: Int
     @State private var isSavingSettings: Bool = false
+    @State private var showDeleteConfirmation: Bool = false
+    @State private var isDeletingLeague: Bool = false
 
     private var brandPurple: Color {
         Color(red: 0.48, green: 0.23, blue: 0.93)
+    }
+
+    /// True only when this user created the league AND no other human
+    /// has joined — the "solo open league" state. Once someone else
+    /// signs up, deletion is hidden because tearing the league down
+    /// would silently strand other players.
+    private var canDeleteLeague: Bool {
+        guard let uid = viewModel.userID, league.createdBy == uid else { return false }
+        let humans = viewModel.currentMembers.filter { !$0.isBot }
+        return humans.count <= 1 && humans.allSatisfy { $0.userID == uid }
     }
 
     init(league: BestBallLeague, viewModel: BestBallViewModel, leagueID: String, onDismiss: @escaping () -> Void) {
@@ -467,6 +521,12 @@ private struct CommishSettingsSheet: View {
         _editIsPrivate = State(initialValue: league.isPrivate)
         _editPitcherSlots = State(initialValue: league.pitcherSlots)
         _editBatterSlots = State(initialValue: league.batterSlots)
+        _editNflQB = State(initialValue: league.nflQbStarters)
+        _editNflRB = State(initialValue: league.nflRbStarters)
+        _editNflWR = State(initialValue: league.nflWrStarters)
+        _editNflTE = State(initialValue: league.nflTeStarters)
+        _editNflFLEX = State(initialValue: league.nflFlexStarters)
+        _editNflSFLEX = State(initialValue: league.nflSflexStarters)
     }
 
     var body: some View {
@@ -553,6 +613,12 @@ private struct CommishSettingsSheet: View {
                                     }
                                     .buttonStyle(.bordered)
                                     .tint(brandPurple)
+                                    ShareLink(item: league.shareMessage(code: code)) {
+                                        Label("Share", systemImage: "square.and.arrow.up")
+                                            .font(.caption.weight(.medium))
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .tint(brandPurple)
                                 }
                             }
                         }
@@ -629,6 +695,40 @@ private struct CommishSettingsSheet: View {
                                 }
                             }
                         }
+                    } else if league.sport == "NFL" {
+                        settingsCard(title: "Starting Lineup") {
+                            // NFL config is only editable before the
+                            // draft starts — once it's drafting/active
+                            // the player pool was generated against the
+                            // current shape, so changing it mid-stream
+                            // would invalidate everyone's roster.
+                            let isEditable = league.status == "open"
+                            nflLineupConfigStepper(label: "QB",   value: $editNflQB,   range: 0...2, editable: isEditable)
+                            Divider()
+                            nflLineupConfigStepper(label: "RB",   value: $editNflRB,   range: 0...4, editable: isEditable)
+                            Divider()
+                            nflLineupConfigStepper(label: "WR",   value: $editNflWR,   range: 0...4, editable: isEditable)
+                            Divider()
+                            nflLineupConfigStepper(label: "TE",   value: $editNflTE,   range: 0...3, editable: isEditable)
+                            Divider()
+                            nflLineupConfigStepper(label: "FLEX", value: $editNflFLEX, range: 0...3, editable: isEditable)
+                            Divider()
+                            nflLineupConfigStepper(label: "SFLEX", value: $editNflSFLEX, range: 0...2, editable: isEditable)
+                            Divider()
+                            HStack {
+                                Text("Total Starters")
+                                    .font(.subheadline.weight(.medium))
+                                Spacer()
+                                Text("\(editNflQB + editNflRB + editNflWR + editNflTE + editNflFLEX + editNflSFLEX)")
+                                    .font(.subheadline.weight(.bold))
+                                    .foregroundStyle(brandPurple)
+                            }
+                            if !isEditable {
+                                Text("Lineup is locked once the draft begins.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                     }
 
                     // Scoring Model card
@@ -652,14 +752,27 @@ private struct CommishSettingsSheet: View {
                             Haptics.medium()
                             isSavingSettings = true
                             Task {
+                                // Make sure the roster can still hold
+                                // the configured NFL lineup.
+                                var effectiveRoster = editRosterSize
+                                if league.sport == "NFL" {
+                                    let starters = editNflQB + editNflRB + editNflWR + editNflTE + editNflFLEX + editNflSFLEX
+                                    effectiveRoster = max(effectiveRoster, starters)
+                                }
                                 await viewModel.updateLeagueSettings(
                                     leagueID: leagueID,
                                     title: editTitle.trimmingCharacters(in: .whitespacesAndNewlines),
                                     maxMembers: editMaxMembers,
-                                    rosterSize: editRosterSize,
+                                    rosterSize: effectiveRoster,
                                     isPrivate: editIsPrivate,
                                     pitcherSlots: editPitcherSlots,
-                                    batterSlots: editBatterSlots
+                                    batterSlots: editBatterSlots,
+                                    nflQB: editNflQB,
+                                    nflRB: editNflRB,
+                                    nflWR: editNflWR,
+                                    nflTE: editNflTE,
+                                    nflFLEX: editNflFLEX,
+                                    nflSFLEX: editNflSFLEX
                                 )
                                 isSavingSettings = false
                                 onDismiss()
@@ -674,6 +787,10 @@ private struct CommishSettingsSheet: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 12))
                         }
                         .disabled(editTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSavingSettings)
+
+                        if canDeleteLeague {
+                            deleteLeagueButton
+                        }
 
                         Button {
                             Haptics.light()
@@ -694,7 +811,64 @@ private struct CommishSettingsSheet: View {
             .background(Color(.systemGroupedBackground))
             .navigationTitle("League Settings")
             .navigationBarTitleDisplayMode(.inline)
+            .alert("Delete League?", isPresented: $showDeleteConfirmation) {
+                Button("Cancel", role: .cancel) { }
+                Button("Delete", role: .destructive) {
+                    Haptics.medium()
+                    isDeletingLeague = true
+                    Task {
+                        let ok = await viewModel.deleteLeague(league)
+                        isDeletingLeague = false
+                        if ok { onDismiss() }
+                    }
+                }
+            } message: {
+                Text("This will permanently remove \"\(league.title)\". Since no one else has joined yet, you can safely delete it.")
+            }
         }
+    }
+
+    @ViewBuilder
+    private func nflLineupConfigStepper(label: String, value: Binding<Int>, range: ClosedRange<Int>, editable: Bool) -> some View {
+        HStack {
+            Text(label)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Spacer()
+            if editable {
+                Stepper("\(value.wrappedValue)", value: value, in: range)
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: 140)
+            } else {
+                Text("\(value.wrappedValue)")
+                    .font(.subheadline.weight(.semibold))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var deleteLeagueButton: some View {
+        Button(role: .destructive) {
+            Haptics.medium()
+            showDeleteConfirmation = true
+        } label: {
+            HStack(spacing: 6) {
+                if isDeletingLeague {
+                    ProgressView().tint(.red)
+                } else {
+                    Image(systemName: "trash")
+                        .font(.subheadline.weight(.semibold))
+                }
+                Text(isDeletingLeague ? "Deleting…" : "Delete League")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(Color.red.opacity(0.10))
+            .foregroundStyle(.red)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .disabled(isDeletingLeague)
     }
 
     private func settingsCard<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {

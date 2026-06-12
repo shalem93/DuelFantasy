@@ -12,6 +12,13 @@ struct BestBallBrowseView: View {
     @State private var newPitcherSlots: Int = 2
     @State private var newBatterSlots: Int = 6
     @State private var newScoringMode: BestBallScoringMode = .normal
+    // NFL starting-lineup config — only used when sport == "NFL".
+    @State private var newNflQB: Int = 1
+    @State private var newNflRB: Int = 2
+    @State private var newNflWR: Int = 2
+    @State private var newNflTE: Int = 1
+    @State private var newNflFLEX: Int = 2
+    @State private var newNflSFLEX: Int = 0
     @State private var inviteCode: String = ""
     @State private var isJoiningByCode: Bool = false
 
@@ -19,7 +26,22 @@ struct BestBallBrowseView: View {
         Color(red: 0.48, green: 0.23, blue: 0.93)
     }
 
-    private let sports = ["MLB"]
+    // NBA is hidden during the off-season (Apr–Sep) — the league wrapped
+    // in June and there's no live data to score against until tip-off in
+    // mid-October. Re-add once the 2026-27 season is on the schedule.
+    private let sports = ["MLB", "NFL"]
+
+    /// Bump the roster-size stepper up to the configured starting-lineup
+    /// total when the commissioner adds another starter slot. Mirrors
+    /// the MLB onChange handlers and the auto-floor we already apply on
+    /// Create. Without it, "Roster Size: 8 / Total Starters: 9" was a
+    /// reachable state in the form.
+    private func floorRosterSizeForNFL() {
+        let total = newNflQB + newNflRB + newNflWR + newNflTE + newNflFLEX + newNflSFLEX
+        if newLeagueRosterSize < total {
+            newLeagueRosterSize = total
+        }
+    }
 
     var body: some View {
         ScrollView {
@@ -39,6 +61,12 @@ struct BestBallBrowseView: View {
                 HStack(spacing: 8) {
                     Button {
                         Haptics.medium()
+                        // Pre-select the create-sheet sport to match
+                        // whatever filter pill the user already has
+                        // active. Saves them the redundant tap.
+                        if let filter = viewModel.sportFilter, sports.contains(filter) {
+                            newLeagueSport = filter
+                        }
                         showCreateSheet = true
                     } label: {
                         HStack {
@@ -194,7 +222,16 @@ struct BestBallBrowseView: View {
                 Section("League Settings") {
                     Stepper("League Size: \(newLeagueSize)", value: $newLeagueSize, in: 4...16, step: 2)
                     if newScoringMode != .dingersOnly {
-                        let minRoster = newPitcherSlots + newBatterSlots
+                        // Sport-aware minimum roster size — it can never
+                        // be lower than the configured starting lineup
+                        // count, otherwise the bot drafter and lineup
+                        // optimizer can't fill all the slots.
+                        let minRoster: Int = {
+                            if newLeagueSport == "NFL" {
+                                return newNflQB + newNflRB + newNflWR + newNflTE + newNflFLEX + newNflSFLEX
+                            }
+                            return newPitcherSlots + newBatterSlots
+                        }()
                         Stepper("Roster Size: \(newLeagueRosterSize)", value: $newLeagueRosterSize, in: minRoster...20)
                     }
                     Toggle("Private League", isOn: $newLeaguePrivate)
@@ -255,6 +292,29 @@ struct BestBallBrowseView: View {
                             }
                         ), in: 6...12)
                     }
+                } else if newLeagueSport == "NFL" {
+                    Section("Starting Lineup") {
+                        Stepper("QB: \(newNflQB)", value: $newNflQB, in: 0...2)
+                            .onChange(of: newNflQB) { _, _ in floorRosterSizeForNFL() }
+                        Stepper("RB: \(newNflRB)", value: $newNflRB, in: 0...4)
+                            .onChange(of: newNflRB) { _, _ in floorRosterSizeForNFL() }
+                        Stepper("WR: \(newNflWR)", value: $newNflWR, in: 0...4)
+                            .onChange(of: newNflWR) { _, _ in floorRosterSizeForNFL() }
+                        Stepper("TE: \(newNflTE)", value: $newNflTE, in: 0...3)
+                            .onChange(of: newNflTE) { _, _ in floorRosterSizeForNFL() }
+                        Stepper("FLEX: \(newNflFLEX)", value: $newNflFLEX, in: 0...3)
+                            .onChange(of: newNflFLEX) { _, _ in floorRosterSizeForNFL() }
+                        Stepper("SFLEX (Superflex): \(newNflSFLEX)", value: $newNflSFLEX, in: 0...2)
+                            .onChange(of: newNflSFLEX) { _, _ in floorRosterSizeForNFL() }
+                        HStack {
+                            Text("Total Starters")
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text("\(newNflQB + newNflRB + newNflWR + newNflTE + newNflFLEX + newNflSFLEX)")
+                                .font(.subheadline.weight(.bold))
+                                .foregroundStyle(brandPurple)
+                        }
+                    }
                 }
 
                 Section("Scoring Model") {
@@ -296,14 +356,28 @@ struct BestBallBrowseView: View {
                         let title = newLeagueTitle.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !title.isEmpty else { return }
                         Task {
+                            // For NFL leagues, ensure the roster is at
+                            // least big enough to hold the configured
+                            // starting lineup.
+                            let nflStarters = newNflQB + newNflRB + newNflWR + newNflTE + newNflFLEX + newNflSFLEX
+                            let effectiveRoster: Int
+                            if newLeagueSport == "NFL" {
+                                effectiveRoster = max(newLeagueRosterSize, nflStarters)
+                            } else if newScoringMode == .dingersOnly {
+                                effectiveRoster = newBatterSlots
+                            } else {
+                                effectiveRoster = newLeagueRosterSize
+                            }
                             _ = await viewModel.createLeague(
                                 title: title, sport: newLeagueSport,
                                 isPrivate: newLeaguePrivate,
                                 maxMembers: newLeagueSize,
-                                rosterSize: newScoringMode == .dingersOnly ? newBatterSlots : newLeagueRosterSize,
+                                rosterSize: effectiveRoster,
                                 pitcherSlots: newScoringMode == .dingersOnly ? 0 : newPitcherSlots,
                                 batterSlots: newBatterSlots,
-                                scoringMode: newScoringMode
+                                scoringMode: newScoringMode,
+                                nflQB: newNflQB, nflRB: newNflRB,
+                                nflWR: newNflWR, nflTE: newNflTE, nflFLEX: newNflFLEX, nflSFLEX: newNflSFLEX
                             )
                             showCreateSheet = false
                             newLeagueTitle = ""
@@ -313,6 +387,12 @@ struct BestBallBrowseView: View {
                             newPitcherSlots = 2
                             newBatterSlots = 6
                             newScoringMode = .normal
+                            newNflQB = 1
+                            newNflRB = 2
+                            newNflWR = 2
+                            newNflTE = 1
+                            newNflFLEX = 2
+                            newNflSFLEX = 0
                         }
                     }
                     .disabled(newLeagueTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

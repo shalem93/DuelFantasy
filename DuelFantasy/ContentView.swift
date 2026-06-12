@@ -1,5 +1,7 @@
 import SwiftUI
 import UIKit
+import PhotosUI
+import SensitiveContentAnalysis
 
 /// Lightweight haptic helper — call `Haptics.light()` or `.medium()` on any button tap.
 enum Haptics {
@@ -106,7 +108,12 @@ private struct SettledSyncModifier: ViewModifier {
 
 struct ContentView: View {
     @EnvironmentObject private var auth: AuthViewModel
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("profile_name") private var profileName: String = ""
+    @AppStorage("profile_avatar_url") private var profileAvatarURL: String = ""
+    @State private var avatarPickerItem: PhotosPickerItem?
+    @State private var avatarUploading: Bool = false
+    @State private var avatarBlockedAlert: String?
     @AppStorage("odds_api_key") private var oddsAPIKey: String = AppSecrets.defaultOddsAPIKey
     @AppStorage("rr_score") private var rrScore: Int = 1000
     @AppStorage("wins") private var wins: Int = 0
@@ -192,6 +199,12 @@ struct ContentView: View {
     @State private var friendProfiles: [String: LeaderboardProfile] = [:]
     @State private var isLoadingLeaderboard: Bool = false
     @State private var showAddFriend: Bool = false
+    @State private var showDeleteAccountConfirm: Bool = false
+    @State private var isDeletingAccount: Bool = false
+    @State private var deleteAccountError: String? = nil
+    /// Set when the App Store has a newer version than the installed build.
+    /// Drives the blocking `ForceUpdateView` cover at the root.
+    @State private var pendingUpdate: AppVersionChecker.VersionInfo? = nil
     @State private var friendSearchText: String = ""
     @State private var friendSearchResults: [LeaderboardProfile] = []
     @State private var isSearchingFriends: Bool = false
@@ -237,10 +250,66 @@ struct ContentView: View {
         serverPickemRRDelta
     }
 
-    /// DFS RR delta: sum of stored rrDelta values from local DFS history.
-    /// These values account for tie-pooling and are the single source of truth.
+    /// DFS RR delta: sum of stored rrDelta values from local DFS history,
+    /// merged across all sport view models and deduplicated by canonical
+    /// owner. Previously this only summed `dfsViewModel.dfsHistory` (NBA's
+    /// history), so Pick'em screen showed e.g. "+366" while the Contests
+    /// page (which already merges all sports) showed "+501". The mismatch
+    /// was the difference between NBA-only and full cross-sport totals.
     private var dfsRRDelta: Int {
-        dfsViewModel.dfsHistory.reduce(0) { $0 + $1.rrDelta }
+        let sources: [DFSViewModel] = [
+            dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
+            eplDFSViewModel, uclDFSViewModel, wcDFSViewModel,
+            ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel
+        ]
+        func canonicalVM(for tid: String) -> DFSViewModel? {
+            if tid.hasPrefix("pga-") { return pgaDFSViewModel }
+            if tid.hasPrefix("nhl-") { return nhlDFSViewModel }
+            if tid.hasPrefix("ncaam-") { return nhlDFSViewModel }
+            if tid.hasPrefix("mlb-") { return mlbDFSViewModel }
+            if tid.hasPrefix("epl-") { return eplDFSViewModel }
+            if tid.hasPrefix("ucl-") { return uclDFSViewModel }
+            if tid.hasPrefix("wc-")  { return wcDFSViewModel  }
+            if tid.hasPrefix("ufc-") { return ufcDFSViewModel }
+            if tid.hasPrefix("nfl-") { return nflDFSViewModel }
+            if tid.hasPrefix("cfb-") { return cfbDFSViewModel }
+            if tid.hasPrefix("nba-") { return dfsViewModel    }
+            return nil
+        }
+        // Mirror `unifiedMyContestsContent`'s dedup key (DFSContestView.swift):
+        //   • SG tid → `<sport>-sg-<gameID>-<entryCount>#<ln>` (date stripped)
+        //   • Otherwise → full `<tid>#<ln>`
+        // Without this, home-screen DFS total drifts from My Contests because
+        // the old slate-identity collapse rolled H2H/5-Man/2000-person into
+        // one row by largest size, dropping the small-contest RR deltas
+        // (e.g. a -10 5-Man) from the home-screen accumulator.
+        var byKey: [String: DFSResult] = [:]
+        for vm in sources {
+            for result in vm.dfsHistory {
+                let tid = result.tournamentId ?? result.id.uuidString
+                if let owner = canonicalVM(for: tid), owner !== vm {
+                    continue
+                }
+                let ln = result.lineupNumber ?? 1
+                let key: String = {
+                    var stripped = tid
+                    if let range = stripped.range(of: #"-i\d+$"#, options: .regularExpression) {
+                        stripped.removeSubrange(range)
+                    }
+                    if let sgRange = stripped.range(of: "-sg-"),
+                       let firstDash = stripped.firstIndex(of: "-") {
+                        let sport = String(stripped[..<firstDash])
+                        let afterSG = String(stripped[sgRange.upperBound...])
+                        return "\(sport)-sg-\(afterSG)#\(ln)"
+                    }
+                    return "\(stripped)#\(ln)"
+                }()
+                if byKey[key] == nil {
+                    byKey[key] = result
+                }
+            }
+        }
+        return byKey.values.reduce(0) { $0 + $1.rrDelta }
     }
 
     /// Displayed total RR — always derived from components so the pills add up.
@@ -267,6 +336,22 @@ struct ContentView: View {
 
     var body: some View {
         mainTabView
+            .fullScreenCover(item: $pendingUpdate) { info in
+                ForceUpdateView(
+                    installedVersion: info.installed,
+                    latestVersion: info.latest,
+                    appStoreURL: info.appStoreURL
+                )
+                .interactiveDismissDisabled(true)
+            }
+            .task {
+                // Check on launch. Throttled to once per hour inside the
+                // checker so re-renders during a session don't spam the
+                // iTunes Search API.
+                if let info = await AppVersionChecker.shared.checkForUpdate() {
+                    await MainActor.run { pendingUpdate = info }
+                }
+            }
             .modifier(DFSSyncModifiers(
                 dfs: dfsViewModel, nhl: nhlDFSViewModel,
                 mlb: mlbDFSViewModel, pga: pgaDFSViewModel,
@@ -325,6 +410,28 @@ struct ContentView: View {
                 .tag(4)
         }
         .tint(brandPurple)
+        // Dedicated cross-sport history sync that fires whenever the access
+        // token resolves (including the initial mount when it's already
+        // loaded from keychain). The launch `.task` below can fire BEFORE
+        // auth is ready, and `.onChange(of: auth.accessToken)` doesn't fire
+        // if the token was already set at first render — so without this,
+        // UCL/UFC/etc. only loaded when the user navigated to DFS, which is
+        // exactly the symptom the user kept hitting.
+        .task(id: auth.accessToken) {
+            guard let userID = auth.userID, let token = auth.accessToken else { return }
+            print("[DFS-SharedSync] task(id: accessToken) fired — userID=\(userID.prefix(8))…")
+            let allVMs: [DFSViewModel] = [
+                dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
+                eplDFSViewModel, uclDFSViewModel, wcDFSViewModel,
+                ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel
+            ]
+            await DFSViewModel.syncAllSportsHistoryFromServer(
+                vms: allVMs, userID: userID, accessToken: token,
+                onMergedHistory: { blob in
+                    syncHistoryData(blob)
+                }
+            )
+        }
         .task {
             syncAuthToViewModel()
             // Run leaderboard sync and pick settlement concurrently.
@@ -345,6 +452,32 @@ struct ContentView: View {
             if needsRRRecompute, let uid = auth.userID, let token = auth.accessToken {
                 needsRRRecompute = false
                 await pushCorrectedStats(userID: uid, accessToken: token)
+            }
+            // Cross-sport DFS history sync at LAUNCH so the Pick'em home
+            // "DFS +X" breakdown isn't missing UCL/UFC/WC/NFL/CFB until
+            // the user wanders into My Contests. All 10 fetches run in
+            // parallel and write to their OWN VM's `dfsHistoryData` — we
+            // deliberately skip the per-iteration `syncHistoryData` fan-out
+            // that was causing the "20-second ratcheting number" effect
+            // (each iteration broadcast a blob that overwrote others
+            // mid-sync, forcing N intermediate UI updates). The unified
+            // RR delta + Contests page already use a canonical-owner
+            // merge across all VMs, so each one keeping its own results
+            // is sufficient.
+            Task { @MainActor in
+                let allVMs: [DFSViewModel] = [
+                    dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
+                    eplDFSViewModel, uclDFSViewModel, wcDFSViewModel,
+                    ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel
+                ]
+                if let userID = auth.userID, let token = auth.accessToken {
+                    await DFSViewModel.syncAllSportsHistoryFromServer(
+                        vms: allVMs, userID: userID, accessToken: token,
+                        onMergedHistory: { blob in
+                            syncHistoryData(blob)
+                        }
+                    )
+                }
             }
         }
         .onAppear {
@@ -369,8 +502,41 @@ struct ContentView: View {
                 losses = 230
                 needsRRRecompute = true  // triggers server push
             }
+            if dfsSettlementVersion < 19 {
+                // v19: recovery from the "empty fetch wrote 0-0 to server"
+                // bug. Don't hard-code values — just clear the throttle so
+                // the next leaderboard sync runs immediately and the new
+                // empty-fetch guard preserves whatever it actually finds.
+                // If the server has settled picks, they'll be adopted; if
+                // it doesn't, the local 0-0 stays put (no further damage).
+                dfsSettlementVersion = 19
+                lastLeaderboardLoad = .distantPast
+                hasPerformedInitialSync = false
+            }
             initDFSViewModels()
             restorePersistedPicks()
+
+            // Self-heal wins/losses AND Pick'em RR delta from local
+            // prediction history. If the server-overwrite bug zeroed the
+            // counters but `history_data` is still populated (i.e., Recent
+            // Results renders just fine but the stat tiles show 0-0 and
+            // the RR breakdown shows Pick'em +0), reconstruct everything
+            // from the local rrDelta column. Positive delta = win,
+            // negative = loss, sum = total Pick'em RR contribution.
+            if wins == 0 && losses == 0 && serverPickemRRDelta == 0 {
+                let restored = Self.deduplicatedHistory(from: historyData)
+                if !restored.isEmpty {
+                    let derivedWins = restored.filter { $0.rrDelta > 0 }.count
+                    let derivedLosses = restored.filter { $0.rrDelta < 0 }.count
+                    let derivedDelta = restored.reduce(0) { $0 + $1.rrDelta }
+                    if derivedWins + derivedLosses > 0 {
+                        print("[Pick'em] Self-heal: rebuilt from history — W=\(derivedWins), L=\(derivedLosses), RR delta=\(derivedDelta), from \(restored.count) records")
+                        wins = derivedWins
+                        losses = derivedLosses
+                        serverPickemRRDelta = derivedDelta
+                    }
+                }
+            }
         }
         .onChange(of: selectedTab) { _, newTab in
             // When returning to Pick'em tab, settle any completed picks so
@@ -380,18 +546,22 @@ struct ContentView: View {
                 Task { await reconcileCompletedPicks() }
             }
         }
-        // Pick'em settlement — fast loop (every 30s) so games grade promptly.
-        // Separated from DFS so slow DFS operations don't delay grading.
+        // Pick'em settlement — loop runs every 60s in the foreground.
+        // Previously 30s, but picks don't grade fast enough to matter and
+        // every cycle hits Supabase for unresolved/active picks. Skipped
+        // entirely when app is backgrounded (scenePhase != .active) so the
+        // user's device isn't pinging the DB while asleep.
         .task(id: "pickem-settlement-timer") {
-            // Short delay to let the startup .task kick off first, then start looping.
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             while !Task.isCancelled {
-                await reconcileCompletedPicks()
-                if Date().timeIntervalSince(lastGlobalSettlement) >= 60 {
-                    await reconcileAllPicks()
-                    lastGlobalSettlement = Date()
+                if scenePhase == .active {
+                    await reconcileCompletedPicks()
+                    if Date().timeIntervalSince(lastGlobalSettlement) >= 120 {
+                        await reconcileAllPicks()
+                        lastGlobalSettlement = Date()
+                    }
                 }
-                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
             }
         }
         // DFS settlement — slower loop (every 60s) for slate loading, tournament
@@ -454,6 +624,28 @@ struct ContentView: View {
                 Task {
                     await loadLeaderboardAndFriends(force: true)
                     syncAuthToViewModel()
+                }
+                // Auth just became available — fire the cross-sport DFS
+                // history sync now in case the launch `.task` ran before
+                // the token was set. Without this, UCL/UFC/etc. only loaded
+                // when the user navigated to My Contests (which triggered
+                // its own per-VM sync). The shared fetch hits Postgres
+                // exactly twice across all 10 sports, so re-firing is cheap.
+                Task { @MainActor in
+                    let allVMs: [DFSViewModel] = [
+                        dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
+                        eplDFSViewModel, uclDFSViewModel, wcDFSViewModel,
+                        ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel
+                    ]
+                    if let userID = auth.userID, let token = auth.accessToken {
+                        print("[DFS-SharedSync] auth.accessToken changed — firing shared sync")
+                        await DFSViewModel.syncAllSportsHistoryFromServer(
+                            vms: allVMs, userID: userID, accessToken: token,
+                            onMergedHistory: { blob in
+                                syncHistoryData(blob)
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -697,11 +889,40 @@ struct ContentView: View {
         }
         .task {
             await loadMatchesIfNeeded()
+            // Match-fetch loop: 60s in foreground, paused in background.
+            // Pick'em tab is also gated on `selectedTab == 0` so the loop
+            // doesn't keep hammering ESPN+Supabase when the user is on a
+            // different tab (most cycle's cost is the 18-request ESPN fan-
+            // out, but the settlement that follows also hits Supabase).
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 45_000_000_000)
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
+                guard scenePhase == .active, selectedTab == 0 else { continue }
                 await loadMatches(force: true)
             }
         }
+    }
+
+    @ViewBuilder
+    private var deleteAccountSection: some View {
+        Button {
+            Haptics.medium()
+            showDeleteAccountConfirm = true
+        } label: {
+            Text(isDeletingAccount ? "Deleting…" : "Delete Account")
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(Color.red.opacity(0.12))
+                .foregroundStyle(.red)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .disabled(isDeletingAccount)
+
+        Text("Deleting your account permanently removes your profile, picks, DFS entries, and stats. This cannot be undone.")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 4)
     }
 
     // MARK: - Profile Tab
@@ -712,15 +933,63 @@ struct ContentView: View {
                 VStack(spacing: 16) {
                     // Profile hero card
                     VStack(spacing: 16) {
-                        // Avatar
-                        ZStack {
-                            Circle()
-                                .fill(brandPurple)
-                                .frame(width: 72, height: 72)
-                            Text(String((profileName.isEmpty ? auth.userEmail : profileName).prefix(1)).uppercased())
-                                .font(.title.weight(.bold))
-                                .foregroundStyle(.white)
+                        // Avatar — tap to pick a new photo. Replaces the
+                        // letter-initial fallback whenever the user has
+                        // uploaded an avatar.
+                        PhotosPicker(selection: $avatarPickerItem, matching: .images) {
+                            ZStack {
+                                if !profileAvatarURL.isEmpty,
+                                   let url = URL(string: profileAvatarURL) {
+                                    AsyncImage(url: url) { phase in
+                                        switch phase {
+                                        case .success(let image):
+                                            image.resizable().scaledToFill()
+                                        default:
+                                            Circle().fill(brandPurple)
+                                            Text(String((profileName.isEmpty ? auth.userEmail : profileName).prefix(1)).uppercased())
+                                                .font(.title.weight(.bold))
+                                                .foregroundStyle(.white)
+                                        }
+                                    }
+                                    .frame(width: 72, height: 72)
+                                    .clipShape(Circle())
+                                } else {
+                                    Circle()
+                                        .fill(brandPurple)
+                                        .frame(width: 72, height: 72)
+                                    Text(String((profileName.isEmpty ? auth.userEmail : profileName).prefix(1)).uppercased())
+                                        .font(.title.weight(.bold))
+                                        .foregroundStyle(.white)
+                                }
+                                if avatarUploading {
+                                    Circle()
+                                        .fill(.black.opacity(0.4))
+                                        .frame(width: 72, height: 72)
+                                    ProgressView().tint(.white)
+                                }
+                                // Camera badge in the corner to signal it's editable.
+                                Image(systemName: "camera.fill")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.white)
+                                    .padding(6)
+                                    .background(brandPurple)
+                                    .clipShape(Circle())
+                                    .overlay(Circle().stroke(.white, lineWidth: 2))
+                                    .offset(x: 26, y: 26)
+                            }
                         }
+                        .onChange(of: avatarPickerItem) { _, newItem in
+                            guard let newItem else { return }
+                            Task { await handleAvatarSelection(newItem) }
+                        }
+                        .alert("Photo Blocked", isPresented: Binding(
+                            get: { avatarBlockedAlert != nil },
+                            set: { if !$0 { avatarBlockedAlert = nil } }
+                        ), actions: {
+                            Button("OK", role: .cancel) {}
+                        }, message: {
+                            Text(avatarBlockedAlert ?? "")
+                        })
 
                         Text(profileName.isEmpty ? (auth.userEmail.isEmpty ? "Player" : auth.userEmail) : profileName)
                             .font(.title2.weight(.bold))
@@ -1270,6 +1539,11 @@ struct ContentView: View {
                             .foregroundStyle(.red)
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
+
+                    // Delete account (Apple App Review 5.1.1(v) requires
+                    // an in-app deletion path for any app that supports
+                    // account creation).
+                    deleteAccountSection
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
@@ -1277,22 +1551,57 @@ struct ContentView: View {
             }
             .background(appBackground.ignoresSafeArea())
             .navigationTitle("Profile")
+            .alert("Delete Account?", isPresented: $showDeleteAccountConfirm) {
+                Button("Cancel", role: .cancel) {}
+                Button("Delete", role: .destructive) {
+                    Task {
+                        isDeletingAccount = true
+                        let ok = await auth.deleteAccount()
+                        isDeletingAccount = false
+                        if ok {
+                            clearLocalUserData()
+                        } else {
+                            deleteAccountError = auth.errorMessage ?? "Couldn't delete account. Please try again."
+                        }
+                    }
+                }
+            } message: {
+                Text("This permanently removes your account, profile, picks, DFS entries, and stats. This cannot be undone.")
+            }
+            .alert("Couldn't Delete Account", isPresented: Binding(
+                get: { deleteAccountError != nil },
+                set: { if !$0 { deleteAccountError = nil } }
+            )) {
+                Button("OK", role: .cancel) { deleteAccountError = nil }
+            } message: {
+                Text(deleteAccountError ?? "")
+            }
             .task {
                 await loadLeaderboardAndFriends()
                 // Quick check: if this user has zero server DFS results but local
                 // history has entries, wipe the stale data (from a previous account).
                 await cleanStaleLocalDFSHistory()
-                // Sync DFS history from server for all sports so profile totals are correct.
-                // After each sport syncs, propagate its updated history to all VMs
-                // so the next sport sees the combined data (they share dfsHistoryData).
-                await dfsViewModel.syncHistoryFromServer()
-                syncHistoryData(dfsViewModel.dfsHistoryData)
-                await nhlDFSViewModel.syncHistoryFromServer()
-                syncHistoryData(nhlDFSViewModel.dfsHistoryData)
-                await mlbDFSViewModel.syncHistoryFromServer()
-                syncHistoryData(mlbDFSViewModel.dfsHistoryData)
-                await pgaDFSViewModel.syncHistoryFromServer()
-                syncHistoryData(pgaDFSViewModel.dfsHistoryData)
+                // Sync DFS history from server for EVERY sport. Run in
+                // parallel so the user sees one update instead of the RR
+                // number ratcheting through 10 intermediate states. Each
+                // VM only fetches results matching its own sport prefix
+                // and writes to its own `dfsHistoryData` — the unified
+                // RR + Contests page already merge across VMs via the
+                // canonical-owner filter, so we don't need to fan the
+                // updated blob back to every other VM during the sync.
+                let allDFSVMs: [DFSViewModel] = [
+                    dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
+                    eplDFSViewModel, uclDFSViewModel, wcDFSViewModel,
+                    ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel
+                ]
+                if let userID = auth.userID, let token = auth.accessToken {
+                    await DFSViewModel.syncAllSportsHistoryFromServer(
+                        vms: allDFSVMs, userID: userID, accessToken: token,
+                        onMergedHistory: { blob in
+                            syncHistoryData(blob)
+                        }
+                    )
+                }
                 // Also run settlement so stale active picks get resolved
                 if Date().timeIntervalSince(lastGlobalSettlement) >= 60 {
                     await reconcileAllPicks()
@@ -1668,6 +1977,7 @@ struct ContentView: View {
             // Also include friend profiles that might not be in the top 100
             let allUsernames = usernameMap.merging(friendProfiles.mapValues { $0.username }) { existing, _ in existing }
 
+            let avatarsByID = Dictionary(uniqueKeysWithValues: leaderboardProfiles.map { ($0.id, $0.avatarUrl) })
             var profiles: [LeaderboardProfile] = userStats.compactMap { (userID, stats) in
                 guard let username = allUsernames[userID] else { return nil }
                 return LeaderboardProfile(
@@ -1675,7 +1985,8 @@ struct ContentView: View {
                     username: username,
                     rrScore: stats.rr,
                     wins: stats.wins,
-                    losses: stats.losses
+                    losses: stats.losses,
+                    avatarUrl: avatarsByID[userID] ?? nil
                 )
             }
 
@@ -1690,7 +2001,8 @@ struct ContentView: View {
                     username: username.isEmpty ? "You" : username,
                     rrScore: 0,
                     wins: 0,
-                    losses: 0
+                    losses: 0,
+                    avatarUrl: avatarsByID[userID] ?? nil
                 ))
             }
 
@@ -1705,6 +2017,59 @@ struct ContentView: View {
             )
         } catch {
             print("[Leaderboard] Failed to load time-filtered data: \(error.localizedDescription)")
+        }
+    }
+
+    /// Reads the picked image, compresses to a small JPEG, uploads to the
+    /// `avatars` bucket, persists the URL on the profile, and stores it in
+    /// AppStorage so the new avatar shows everywhere immediately.
+    private func handleAvatarSelection(_ item: PhotosPickerItem) async {
+        guard let userID = auth.userID, let token = auth.accessToken else { return }
+        await MainActor.run { avatarUploading = true }
+        defer { Task { @MainActor in avatarUploading = false } }
+        do {
+            guard let data = try await item.loadTransferable(type: Data.self),
+                  let image = UIImage(data: data) else { return }
+
+            // Block nudity / explicit content before the upload via Apple's
+            // on-device SensitiveContentAnalysis. Only effective when the
+            // user has "Sensitive Content Warning" enabled in iOS Settings;
+            // when disabled, the analyzer's policy is `.disabled` and we
+            // pass through — server-side scanning would be needed to cover
+            // that case.
+            if let cg = image.cgImage {
+                let analyzer = SCSensitivityAnalyzer()
+                if analyzer.analysisPolicy != .disabled {
+                    if let analysis = try? await analyzer.analyzeImage(cg),
+                       analysis.isSensitive {
+                        await MainActor.run {
+                            avatarBlockedAlert = "This image was blocked because it appears to contain explicit content. Please choose a different photo."
+                            avatarPickerItem = nil
+                        }
+                        return
+                    }
+                }
+            }
+
+            // Cap longest edge at 512px — avatars are rendered ~72px tall,
+            // so anything bigger is wasted bytes + slower download.
+            let maxSide: CGFloat = 512
+            let scale = min(1.0, maxSide / max(image.size.width, image.size.height))
+            let targetSize = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+            let renderer = UIGraphicsImageRenderer(size: targetSize)
+            let resized = renderer.image { _ in
+                image.draw(in: CGRect(origin: .zero, size: targetSize))
+            }
+            guard let jpeg = resized.jpegData(compressionQuality: 0.8) else { return }
+            let url = try await SupabaseService.shared.uploadAvatar(
+                userID: userID, jpegData: jpeg, accessToken: token
+            )
+            try await SupabaseService.shared.updateProfileAvatarURL(
+                userID: userID, avatarURL: url, accessToken: token
+            )
+            await MainActor.run { profileAvatarURL = url }
+        } catch {
+            print("[Profile] Avatar upload failed: \(error.localizedDescription)")
         }
     }
 
@@ -1835,15 +2200,18 @@ struct ContentView: View {
     }
 
     private var filteredMatches: [Match] {
-        guard let filter = selectedLeagueFilter else {
-            // Hide live/final games the user didn't pick — they just clutter the UI.
-            // Keep all upcoming games (pickable) and any live/final games the user picked.
-            return matches.filter { match in
-                if match.isLive || match.isFinal {
-                    return picksByMatch[match.id] != nil
-                }
-                return true
+        // Shared rule used by every filter branch: hide live/final games the
+        // user didn't pick — they just clutter the feed with games whose
+        // outcome doesn't affect the user's RR. Pre-game matches always
+        // pass through (still pickable).
+        let pickedOrPregame: (Match) -> Bool = { match in
+            if match.isLive || match.isFinal {
+                return picksByMatch[match.id] != nil
             }
+            return true
+        }
+        guard let filter = selectedLeagueFilter else {
+            return matches.filter(pickedOrPregame)
         }
         if filter == "Live" {
             return matches.filter { $0.isLive && picksByMatch[$0.id] != nil }
@@ -1851,7 +2219,7 @@ struct ContentView: View {
         if filter == "Final" {
             return matches.filter { $0.isFinal && picksByMatch[$0.id] != nil }
         }
-        return matches.filter { $0.league == filter }
+        return matches.filter { $0.league == filter && pickedOrPregame($0) }
     }
 
     private var matchesSection: some View {
@@ -3148,15 +3516,27 @@ struct ContentView: View {
                 let localDFSDelta = dfsViewModel.dfsHistory.reduce(0) { $0 + $1.rrDelta }
                 let fullRR = 1000 + pickemDelta + localDFSDelta
 
-                if rrScore != fullRR || wins != settledWins || losses != settledLosses {
-                    print("[Pick'em] Sync: adopting RR=\(fullRR) (pickem=\(pickemDelta), dfs=\(localDFSDelta)) was \(rrScore). W=\(settledWins) (was \(wins)), L=\(settledLosses) (was \(losses))")
+                // Safety guard: if the server fetch came back EMPTY but we
+                // have non-zero local record, treat it as a transient
+                // failure and DON'T overwrite. Without this, a single bad
+                // fetch (RLS hiccup, paging error, etc.) used to wipe the
+                // user's record to 0-0 and then syncProfileStats cemented
+                // it on the server, requiring manual recovery.
+                let serverReturnedNothing = allSettledPicks.isEmpty
+                let haveLocalRecord = wins > 0 || losses > 0
+                if serverReturnedNothing && haveLocalRecord {
+                    print("[Pick'em] Sync: server returned 0 settled picks but local W=\(wins)/L=\(losses) — keeping local record (likely transient fetch issue)")
+                } else {
+                    if rrScore != fullRR || wins != settledWins || losses != settledLosses {
+                        print("[Pick'em] Sync: adopting RR=\(fullRR) (pickem=\(pickemDelta), dfs=\(localDFSDelta)) was \(rrScore). W=\(settledWins) (was \(wins)), L=\(settledLosses) (was \(losses))")
+                    }
+                    rrScore = fullRR
+                    wins = settledWins
+                    losses = settledLosses
+                    try? await SupabaseService.shared.syncProfileStats(
+                        userID: userID, rrScore: fullRR, wins: settledWins, losses: settledLosses, accessToken: token
+                    )
                 }
-                rrScore = fullRR
-                wins = settledWins
-                losses = settledLosses
-                try? await SupabaseService.shared.syncProfileStats(
-                    userID: userID, rrScore: fullRR, wins: settledWins, losses: settledLosses, accessToken: token
-                )
             }
 
             // Merge server settled picks into resolvedMatches and history.
@@ -3391,11 +3771,33 @@ struct ContentView: View {
                     profileName = serverProfile.username
                     draftName = serverProfile.username
                 }
+                if let avatar = serverProfile.avatarUrl, !avatar.isEmpty {
+                    profileAvatarURL = avatar
+                }
             }
 
-            // Restore prediction history and resolved matches from settled picks
-            if let settledPicks = try? await SupabaseService.shared.fetchSettledPicks(userID: userID, limit: 200, accessToken: token) {
-                let restoredHistory = settledPicks.map { pick in
+            // Restore prediction history and resolved matches from settled picks.
+            // Paginate so we get every settled pick — the breakdown pill on
+            // the home screen reads `serverPickemRRDelta`, which has to sum
+            // ALL picks. The previous single-page (limit: 200) fetch also
+            // only set `historyData` and `resolvedMatches`, leaving
+            // `serverPickemRRDelta` at 0 — that's why fresh-install +
+            // first-login showed "Pick'em +0" until you relaunched (the
+            // relaunch took the same-user branch which paginates AND sets
+            // the delta).
+            var firstLoginSettledPicks: [SettledPickRecord] = []
+            var firstLoginOffset = 0
+            let firstLoginPageSize = 200
+            while true {
+                guard let page = try? await SupabaseService.shared.fetchSettledPicks(
+                    userID: userID, limit: firstLoginPageSize, offset: firstLoginOffset, accessToken: token
+                ) else { break }
+                firstLoginSettledPicks.append(contentsOf: page)
+                if page.count < firstLoginPageSize { break }
+                firstLoginOffset += page.count
+            }
+            if !firstLoginSettledPicks.isEmpty {
+                let restoredHistory = firstLoginSettledPicks.map { pick in
                     PredictionRecord(
                         id: UUID(),
                         matchName: pick.matchName,
@@ -3406,9 +3808,10 @@ struct ContentView: View {
                     )
                 }
                 historyData = (try? JSONEncoder().encode(restoredHistory)) ?? Data()
-                for pick in settledPicks {
+                for pick in firstLoginSettledPicks {
                     resolvedMatches.insert(pick.matchId)
                 }
+                serverPickemRRDelta = firstLoginSettledPicks.reduce(0) { $0 + $1.rrDelta }
             }
 
             // Restore active picks from server
@@ -3451,9 +3854,9 @@ struct ContentView: View {
 
             if !allRelatedIDs.isEmpty {
                 let dfsProfiles = try await SupabaseService.shared.fetchProfiles(userIDs: Array(allRelatedIDs), accessToken: token)
-                friendProfiles = Dictionary(uniqueKeysWithValues: dfsProfiles.compactMap { p in
+                friendProfiles = Dictionary(uniqueKeysWithValues: dfsProfiles.compactMap { p -> (String, LeaderboardProfile)? in
                     guard let rr = p.rrScore, let w = p.wins, let l = p.losses else { return nil }
-                    return (p.id, LeaderboardProfile(id: p.id, username: p.username, rrScore: rr, wins: w, losses: l))
+                    return (p.id, LeaderboardProfile(id: p.id, username: p.username, rrScore: rr, wins: w, losses: l, avatarUrl: p.avatarUrl))
                 })
             }
         } catch {

@@ -78,6 +78,18 @@ struct SoccerTiersLiveView: View {
                             .font(.caption.weight(.bold))
                             .foregroundStyle(.white)
                     }
+                } else if viewModel.livePlayerPoints.isEmpty {
+                    // Locked but nothing has scored yet — the tournament
+                    // hasn't kicked off. "LOCKED · #1 · 0.0" read like it
+                    // already started.
+                    HStack(spacing: 6) {
+                        Image(systemName: "clock.fill")
+                            .font(.caption)
+                            .foregroundStyle(.white)
+                        Text("KICKS OFF SOON")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.white)
+                    }
                 } else {
                     Text("LOCKED")
                         .font(.caption.weight(.bold))
@@ -91,13 +103,15 @@ struct SoccerTiersLiveView: View {
                     .foregroundStyle(.white.opacity(0.8))
             }
 
-            // User rank and points
+            // User rank and points. Rank/score are meaningless before any
+            // match has been scored (everyone is tied at 0.0) — show dashes
+            // until real points exist.
             HStack(spacing: 24) {
                 VStack(spacing: 2) {
                     Text("YOUR RANK")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.6))
-                    if let rank = viewModel.userRank {
+                    if let rank = viewModel.userRank, !viewModel.livePlayerPoints.isEmpty {
                         Text("#\(rank)")
                             .font(.title.weight(.bold).monospacedDigit())
                             .foregroundStyle(.white)
@@ -112,7 +126,7 @@ struct SoccerTiersLiveView: View {
                     Text("TOTAL FPTS")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.6))
-                    if let points = viewModel.userTotalPoints {
+                    if let points = viewModel.userTotalPoints, !viewModel.livePlayerPoints.isEmpty {
                         Text(String(format: "%.1f", points))
                             .font(.title.weight(.bold).monospacedDigit())
                             .foregroundStyle(.white)

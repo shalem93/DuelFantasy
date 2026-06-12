@@ -55,6 +55,41 @@ enum GrandSlam: String, Codable, CaseIterable, Identifiable {
         case .usOpen: return "Late August – Early September"
         }
     }
+
+    /// Approximate end date (month, day) for finals weekend — used to
+    /// pick the "next" slam after the current one wraps.
+    private var approxEndMonthDay: (month: Int, day: Int) {
+        switch self {
+        case .australianOpen: return (1, 31)
+        case .frenchOpen:     return (6, 7)
+        case .wimbledon:      return (7, 14)
+        case .usOpen:         return (9, 8)
+        }
+    }
+
+    /// Returns the slam the user is most likely interested in right now:
+    /// the in-progress slam if one is active, otherwise the next upcoming
+    /// one in the calendar. Wraps around year-end so December lands on
+    /// the Australian Open.
+    static func currentOrUpcoming(_ date: Date = Date()) -> GrandSlam {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
+        let comps = cal.dateComponents([.month, .day], from: date)
+        let mmdd = (comps.month ?? 1) * 100 + (comps.day ?? 1)
+        // Order by approximate end-of-tournament so a date past one
+        // slam's final rolls forward to the next.
+        let ordered: [(slam: GrandSlam, endMmdd: Int)] = [
+            (.australianOpen, 131),
+            (.frenchOpen, 607),
+            (.wimbledon, 714),
+            (.usOpen, 908)
+        ]
+        for entry in ordered where mmdd <= entry.endMmdd {
+            return entry.slam
+        }
+        // Past US Open → next is Australian Open (early next year).
+        return .australianOpen
+    }
 }
 
 enum DrawType: String, Codable, CaseIterable, Identifiable {
@@ -142,6 +177,9 @@ struct TennisBracketLeaderboardEntry: Identifiable {
     let rank: Int
     let isCurrentUser: Bool
     let roundBreakdown: [String: Int]       // "R1" → points from R1
+    /// Theoretical ceiling: current points + every still-possible point.
+    /// A pick can still score if it hasn't been eliminated by a played match.
+    let maxPossiblePoints: Double
 }
 
 // MARK: - Private Groups
@@ -249,17 +287,99 @@ struct TennisBracketEngine {
         return (total, breakdown)
     }
 
+    /// Maximum points a bracket can still finish with — current points plus
+    /// every pick that hasn't been eliminated yet. A pick is eliminated if
+    /// any played match on their path to a slot was won by someone else.
+    /// Pass a precomputed `eliminated` set when scoring many brackets at
+    /// once to avoid re-scanning results per pick (cuts leaderboard build
+    /// time from seconds to milliseconds on a 999-bot field).
+    static func maxPossibleScore(
+        picks: [String: String],
+        results: [String: String],
+        eliminated: Set<String>? = nil
+    ) -> Double {
+        let eliminatedSet: Set<String> = eliminated ?? eliminatedPlayerNames(results: results)
+        var total = 0.0
+        for (roundIndex, round) in rounds.enumerated() {
+            let matchCount = matchesPerRound[roundIndex]
+            let ptsPerCorrect = pointsPerRound[roundIndex]
+            for matchNum in 1...matchCount {
+                let slot = matchSlot(round: round, matchNumber: matchNum)
+                guard let picked = picks[slot] else { continue }
+                if let actual = results[slot] {
+                    if normalizedName(picked) == normalizedName(actual) {
+                        total += Double(ptsPerCorrect)
+                    }
+                    continue
+                }
+                // Match not yet played — count if the pick is still alive.
+                // O(1) set lookup instead of an O(results) scan per pick.
+                if !eliminatedSet.contains(normalizedName(picked)) {
+                    total += Double(ptsPerCorrect)
+                }
+            }
+        }
+        return total
+    }
+
+    /// A pick is eliminated iff there exists a played match where the pick
+    /// was a participant (won one of the source matches) but isn't the
+    /// winner of this match. Scanning forward over all results catches the
+    /// case where a player lost two or more rounds before the current
+    /// (unplayed) slot — the previous backward walk only looked at the
+    /// immediate source matches and missed deeper-in-the-bracket exits.
+    static func isPickAlive(pick: String, results: [String: String]) -> Bool {
+        let normalizedPick = normalizedName(pick)
+        for (playedSlot, winner) in results {
+            if normalizedName(winner) == normalizedPick { continue }
+            guard let (src1, src2) = sourceSlots(for: playedSlot) else { continue }
+            let s1 = results[src1].map(normalizedName)
+            let s2 = results[src2].map(normalizedName)
+            if s1 == normalizedPick || s2 == normalizedPick {
+                return false   // pick was in this match and lost
+            }
+        }
+        return true
+    }
+
+    /// Pre-compute the set of eliminated player names for a results map.
+    /// Cheaper than calling `isPickAlive` per pick when rendering a 127-row
+    /// bracket detail sheet — the previous per-pick scan was O(picks ×
+    /// results) which visibly froze the UI.
+    static func eliminatedPlayerNames(results: [String: String]) -> Set<String> {
+        var eliminated = Set<String>()
+        for (slot, winner) in results {
+            guard let (src1, src2) = sourceSlots(for: slot) else { continue }
+            let winNorm = normalizedName(winner)
+            if let s1 = results[src1] {
+                let s1n = normalizedName(s1)
+                if s1n != winNorm { eliminated.insert(s1n) }
+            }
+            if let s2 = results[src2] {
+                let s2n = normalizedName(s2)
+                if s2n != winNorm { eliminated.insert(s2n) }
+            }
+        }
+        return eliminated
+    }
+
     /// Compute leaderboard from entries + results.
     static func computeLeaderboard(
         entries: [TennisBracketEntry],
         results: [String: String],
         currentUserID: String?
     ) -> [TennisBracketLeaderboardEntry] {
-        var scored: [(entry: TennisBracketEntry, total: Double, breakdown: [String: Int])] = []
+        var scored: [(entry: TennisBracketEntry, total: Double, breakdown: [String: Int], maxPossible: Double)] = []
 
+        // Precompute the eliminated set once across the whole field — the
+        // alternative (per-entry, per-pick scan) was O(entries × picks ×
+        // results) which froze the main actor for ~10s on a full 999-bot
+        // field with R3+ underway.
+        let eliminated = eliminatedPlayerNames(results: results)
         for entry in entries {
             let (total, breakdown) = scoreBracket(picks: entry.picks, results: results)
-            scored.append((entry, total, breakdown))
+            let maxPossible = maxPossibleScore(picks: entry.picks, results: results, eliminated: eliminated)
+            scored.append((entry, total, breakdown, maxPossible))
         }
 
         scored.sort { $0.total > $1.total }
@@ -284,7 +404,8 @@ struct TennisBracketEngine {
                 totalPoints: item.total,
                 rank: ranks[index],
                 isCurrentUser: item.entry.userID == currentUserID,
-                roundBreakdown: item.breakdown
+                roundBreakdown: item.breakdown,
+                maxPossiblePoints: item.maxPossible
             )
         }
     }
@@ -337,9 +458,24 @@ struct TennisBracketEngine {
 
     /// Normalize player name for comparison (lowercase, strip diacritics).
     static func normalizedName(_ name: String) -> String {
-        name.lowercased()
+        // Replace hyphens/en-dashes with spaces so "Auger-Aliassime" and
+        // "Auger Aliassime" match. ESPN's tennis feed flips between the
+        // two forms across endpoints, so compound surnames stayed pending
+        // for the entire tournament under the old strict-equality match.
+        // Strip periods so initialized first names ("F. Auger Aliassime")
+        // collapse onto the right surname tokens for last-name matching.
+        // Collapse runs of whitespace produced by the substitutions.
+        var s = name.lowercased()
             .folding(options: .diacriticInsensitive, locale: .current)
+            .replacingOccurrences(of: "\u{2013}", with: " ")  // en-dash
+            .replacingOccurrences(of: "\u{2014}", with: " ")  // em-dash
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: ".", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        while s.contains("  ") {
+            s = s.replacingOccurrences(of: "  ", with: " ")
+        }
+        return s
     }
 
     /// Clear all downstream picks that depended on a specific player
@@ -579,6 +715,11 @@ struct ESPNTennisResultsProvider: Sendable {
                     // match — otherwise a R2 with one unmapped name would clobber
                     // the real R1 result for the same slot.
                     let isInferred: Bool
+                    // ESPN competition date — used to apply inferred matches in
+                    // chronological order so the win-count-based round inference
+                    // is deterministic when a player has multiple matches whose
+                    // opponents are all unmapped (R1 vs WC + R2 vs Q, etc.).
+                    let date: Date?
                 }
                 let parsed: [ParsedMatch] = await withTaskGroup(of: ParsedMatch?.self) { group in
                     var sampleLogged = false
@@ -609,6 +750,14 @@ struct ESPNTennisResultsProvider: Sendable {
 
                         let hasWinner = competitors.contains(where: { ($0["winner"] as? Bool) == true })
                         guard hasWinner else { continue }
+                        // Parse competition date once before the inner task so it
+                        // doesn't capture `comp` (which is the only sendable concern).
+                        let compDate: Date? = {
+                            if let dateStr = comp["date"] as? String {
+                                return ISO8601DateFormatter().date(from: dateStr)
+                            }
+                            return nil
+                        }()
                         group.addTask {
                             let names: [String?] = await withTaskGroup(of: (Int, String?).self) { inner in
                                 for (i, c) in competitors.enumerated() {
@@ -645,7 +794,7 @@ struct ESPNTennisResultsProvider: Sendable {
                             if let wPos = wPosMaybe, let lPos = lPosMaybe,
                                let slot = self.determineSlot(winnerPos: wPos, loserPos: lPos) {
                                 let resolvedName = drawPlayers.first(where: { $0.drawPosition == wPos })?.name ?? winnerName
-                                return ParsedMatch(slot: slot, winnerName: resolvedName, winnerPos: wPos, loserPos: lPos, isInferred: false)
+                                return ParsedMatch(slot: slot, winnerName: resolvedName, winnerPos: wPos, loserPos: lPos, isInferred: false, date: compDate)
                             }
 
                             // Qualifier / lucky-loser path: exactly ONE name maps to the draw
@@ -669,7 +818,7 @@ struct ESPNTennisResultsProvider: Sendable {
                                 let partnerPos = knownPos % 2 == 1 ? knownPos + 1 : knownPos - 1
                                 let wPos = wPosMaybe ?? partnerPos
                                 let lPos = lPosMaybe ?? partnerPos
-                                return ParsedMatch(slot: slot, winnerName: resolvedName, winnerPos: wPos, loserPos: lPos, isInferred: true)
+                                return ParsedMatch(slot: slot, winnerName: resolvedName, winnerPos: wPos, loserPos: lPos, isInferred: true, date: compDate)
                             }
 
                             if wPosMaybe == nil {
@@ -699,26 +848,130 @@ struct ESPNTennisResultsProvider: Sendable {
                     let bIdx = roundOrder.firstIndex(of: b.slot.components(separatedBy: "-").first ?? "") ?? 99
                     return aIdx < bIdx
                 }
-                // Apply confirmed (both-names-mapped) matches FIRST so they own their
-                // slots. Inferred matches (qualifier/LL path, R1-assumed) only apply
-                // when the target slot is still empty — prevents a R2 match with one
-                // unmapped side from clobbering the legitimate R1 result.
-                let confirmedMatches = sortedMatches.filter { !$0.isInferred }
-                let inferredMatches = sortedMatches.filter { $0.isInferred }
-                for match in confirmedMatches {
+                // Application order matters: R2+ matches use `isPlausibleSlotAtCurrentTime`
+                // which counts each player's prior wins from `results.values` to verify
+                // the round assignment. We must populate ALL R1 results before checking
+                // R2+ plausibility — otherwise an R2/R3/etc winner whose R1 match was
+                // inferred (qualifier or LL whose name wasn't in the draw) would only
+                // be credited with 0 R1 wins at R2-check time, failing the gate and
+                // silently dropping the R2 match. Same cascade happens through R3+.
+                //
+                // Fix: apply ALL R1 results first (confirmed + inferred), then apply
+                // R2+ in round order. Confirmed still wins ties via the `results[slot]
+                // == nil` guard on inferred.
+                let r1Confirmed = sortedMatches.filter { !$0.isInferred && $0.slot.hasPrefix("R1-") }
+                // Sort inferred matches by match date ASCENDING so when a
+                // single player has multiple inferred matches (e.g. R1 vs
+                // wildcard + R2 vs qualifier), the earlier round is applied
+                // first. The win-count-based round inference then deterministically
+                // promotes the later match to R2/R3/etc. Without this the apply
+                // order was arbitrary and could invert R1↔R2 for that player.
+                let r1Inferred = sortedMatches
+                    .filter { $0.isInferred && $0.slot.hasPrefix("R1-") }
+                    .sorted { (a, b) in
+                        switch (a.date, b.date) {
+                        case let (.some(da), .some(db)): return da < db
+                        case (.some, .none): return true
+                        case (.none, .some): return false
+                        case (.none, .none): return false
+                        }
+                    }
+                let laterRounds = sortedMatches.filter { !$0.slot.hasPrefix("R1-") }
+                for match in r1Confirmed {
                     if !isPlausibleSlotAtCurrentTime(slot: match.slot, results: results, drawPlayers: drawPlayers,
                                                      winnerPos: match.winnerPos, loserPos: match.loserPos) {
                         continue
                     }
                     results[match.slot] = match.winnerName
                 }
-                for match in inferredMatches {
-                    guard results[match.slot] == nil else { continue }
-                    if !isPlausibleSlotAtCurrentTime(slot: match.slot, results: results, drawPlayers: drawPlayers,
-                                                     winnerPos: match.winnerPos, loserPos: match.loserPos) {
-                        continue
+                for match in r1Inferred {
+                    // Determine which side (winner or loser) is the known
+                    // draw player. In the parse path's qualifier branch:
+                    //   • winner-known: winnerPos is a real draw pos, and
+                    //     match.winnerName equals the player at winnerPos.
+                    //   • loser-known:  winnerPos is the loser's R1 partner
+                    //     position (placeholder), match.winnerName is the
+                    //     ESPN-only winner string (not in draw).
+                    let winnerDrawName = drawPlayers.first(where: { $0.drawPosition == match.winnerPos })?.name
+                    let loserDrawName  = drawPlayers.first(where: { $0.drawPosition == match.loserPos  })?.name
+                    let winnerIsKnown = (winnerDrawName != nil) && (winnerDrawName == match.winnerName)
+
+                    let roundLabels = ["R1", "R2", "R3", "R4", "QF", "SF", "F"]
+
+                    if winnerIsKnown, let winnerName = winnerDrawName {
+                        // Known winner, unmapped loser (qualifier/LL).
+                        // Happy path: tentative R1 slot is empty → fill it.
+                        if results[match.slot] == nil {
+                            if !isPlausibleSlotAtCurrentTime(slot: match.slot, results: results, drawPlayers: drawPlayers,
+                                                             winnerPos: match.winnerPos, loserPos: match.loserPos) {
+                                continue
+                            }
+                            results[match.slot] = match.winnerName
+                            continue
+                        }
+                        // R1 slot occupied — this is actually a LATER round
+                        // for the known winner vs an unmapped opponent. Use
+                        // win count to infer round.
+                        let winsBefore = results.values.filter { $0 == winnerName }.count
+                        let nextRoundIdx = winsBefore + 1
+                        guard nextRoundIdx >= 1, nextRoundIdx <= roundLabels.count else { continue }
+                        let roundLabel = roundLabels[nextRoundIdx - 1]
+                        let divisor = Int(pow(2.0, Double(nextRoundIdx)))
+                        let matchNum = (match.winnerPos - 1) / divisor + 1
+                        let inferredSlot = TennisBracketEngine.matchSlot(round: roundLabel, matchNumber: matchNum)
+                        guard results[inferredSlot] == nil else { continue }
+                        if !isPlausibleSlotAtCurrentTime(slot: inferredSlot, results: results, drawPlayers: drawPlayers,
+                                                         winnerPos: match.winnerPos, loserPos: match.loserPos) {
+                            continue
+                        }
+                        results[inferredSlot] = winnerName
+                        print("[TennisESPN] re-routed inferred match (winner-known) for \(winnerName): \(match.slot) (occupied) → \(inferredSlot) (\(winsBefore) prior wins → \(roundLabel))")
+                    } else if let loserName = loserDrawName {
+                        // Known loser, unmapped winner. The known player
+                        // LOST this match against a qualifier/LL whose name
+                        // ESPN provides as match.winnerName. We must still
+                        // record the result so the user's pick of the loser
+                        // gets marked wrong / eliminated downstream.
+                        //
+                        // Round inference uses the LOSER's existing win
+                        // count: if Zverev has 1 R1 win in results and just
+                        // lost, this is his R2. Record results[R2-slot] =
+                        // ESPN's winner name string (de Jong, etc.).
+                        let winsBefore = results.values.filter { $0 == loserName }.count
+                        let nextRoundIdx = winsBefore + 1
+                        guard nextRoundIdx >= 1, nextRoundIdx <= roundLabels.count else { continue }
+                        let roundLabel = roundLabels[nextRoundIdx - 1]
+                        let divisor = Int(pow(2.0, Double(nextRoundIdx)))
+                        let matchNum = (match.loserPos - 1) / divisor + 1
+                        let inferredSlot = TennisBracketEngine.matchSlot(round: roundLabel, matchNumber: matchNum)
+                        guard results[inferredSlot] == nil else { continue }
+                        // Plausibility uses the loser's prior-wins count
+                        // (they had to reach this round to be playing it).
+                        if !isPlausibleSlotAtCurrentTime(slot: inferredSlot, results: results, drawPlayers: drawPlayers,
+                                                         winnerPos: match.loserPos, loserPos: match.loserPos) {
+                            continue
+                        }
+                        results[inferredSlot] = match.winnerName
+                        print("[TennisESPN] re-routed inferred match (loser-known) — \(loserName) lost to \(match.winnerName) at \(inferredSlot) (\(winsBefore) prior wins → \(roundLabel))")
                     }
-                    results[match.slot] = match.winnerName
+                }
+                for match in laterRounds {
+                    // confirmed first (already filtered), then inferred isn't expected
+                    // for R2+ but be defensive: only fill empty slots.
+                    if !match.isInferred {
+                        if !isPlausibleSlotAtCurrentTime(slot: match.slot, results: results, drawPlayers: drawPlayers,
+                                                         winnerPos: match.winnerPos, loserPos: match.loserPos) {
+                            continue
+                        }
+                        results[match.slot] = match.winnerName
+                    } else {
+                        guard results[match.slot] == nil else { continue }
+                        if !isPlausibleSlotAtCurrentTime(slot: match.slot, results: results, drawPlayers: drawPlayers,
+                                                         winnerPos: match.winnerPos, loserPos: match.loserPos) {
+                            continue
+                        }
+                        results[match.slot] = match.winnerName
+                    }
                 }
         }
 
@@ -879,13 +1132,26 @@ struct ESPNTennisResultsProvider: Sendable {
         if round == "R1" { return true }
         let roundOrder: [String: Int] = ["R1": 1, "R2": 2, "R3": 3, "R4": 4, "QF": 5, "SF": 6, "F": 7]
         guard let roundN = roundOrder[round] else { return false }
-        let requiredPriorWins = roundN - 1
+        // R2 always passes — the slot math from (winnerPos, loserPos) is
+        // deterministic and at R2 the only "wrong slot" case would be a
+        // qualifier-round match where both names happen to also be
+        // main-draw players, which is vanishingly rare.
+        guard roundN >= 3 else { return true }
         let winnerName = drawPlayers.first(where: { $0.drawPosition == winnerPos })?.name ?? ""
-        let loserName = drawPlayers.first(where: { $0.drawPosition == loserPos })?.name ?? ""
         var winsByPlayer: [String: Int] = [:]
         for v in results.values { winsByPlayer[v, default: 0] += 1 }
-        return (winsByPlayer[winnerName] ?? 0) >= requiredPriorWins
-            && (winsByPlayer[loserName] ?? 0) >= requiredPriorWins
+        // For R3 and deeper: require the winner has AT LEAST ONE recorded
+        // prior win, not exactly `roundN - 1`. The strict count breaks
+        // when ESPN's data has gaps:
+        //   • Walkovers: ESPN sometimes omits a walkover match entirely.
+        //     If Fils won R2 by walkover, results has no R2 entry for
+        //     him, his win count is 1 (just R1), and a strict R3 check
+        //     (requires 2) drops his legitimate R3 win.
+        //   • Retirements / late name updates: same shape.
+        //   • Qualifier R1 paths where ESPN's match data didn't surface.
+        // Trust the slot math; require only that the winner shows up
+        // somewhere upstream so we still reject purely orphan matches.
+        return (winsByPlayer[winnerName] ?? 0) >= 1
     }
 
     /// Find draw position by fuzzy name match. Handles compound surnames like
@@ -1689,7 +1955,8 @@ struct TennisBracketBotDrafter {
     static func generateBotEntries(
         draw: [TennisBracketPlayer],
         grandSlam: GrandSlam,
-        count: Int = 999
+        count: Int = 999,
+        tournamentID: String = ""
     ) -> [TennisBracketEntry] {
         guard draw.count == 128 else { return [] }
 
@@ -1698,11 +1965,28 @@ struct TennisBracketBotDrafter {
 
         for i in 0..<count {
             let personality = personalities[i % personalities.count]
-            let nameIndex = i / personalities.count
-            let baseName = botNames[nameIndex % botNames.count]
-            let botName = nameIndex < botNames.count ? baseName : "\(baseName)\(nameIndex / botNames.count)"
+            // Append the bot index (1-based) to every name so 999 bots all
+            // have unique handles. The previous formula reused the same
+            // `baseName` for all 5 personality variants of the same name
+            // slot, producing 5 identical "AceServe" rows in the leaderboard.
+            let baseName = botNames[i % botNames.count]
+            let botName = "\(baseName)\(i + 1)"
 
-            guard let picks = generateBotPicks(draw: draw, personality: personality, grandSlam: grandSlam) else { continue }
+            // Seeded RNG keyed on (tournamentID, botIndex) makes picks
+            // deterministic across regenerations. Without this, every
+            // call to `generateBotPicks` used the global random source
+            // and produced a fresh set of picks — so any path that
+            // re-generated bots (insert failed silently, server fetch
+            // returned <500 rows, stale-cache guard tripped, etc.)
+            // shuffled the leaderboard between views even when the
+            // user's score and the underlying draw hadn't changed.
+            var rng = TennisBracketBotDrafter.makeSeededRNG(
+                tournamentID: tournamentID, botIndex: i
+            )
+            guard let picks = generateBotPicks(
+                draw: draw, personality: personality,
+                grandSlam: grandSlam, rng: &rng
+            ) else { continue }
 
             entries.append(TennisBracketEntry(
                 id: UUID(),
@@ -1721,10 +2005,38 @@ struct TennisBracketBotDrafter {
     }
 
     /// Generate a full 127-pick bracket for one bot.
+    /// Splitmix64 — a small, fast, deterministic PRNG suitable for
+    /// reproducible bot generation. Keyed off (tournamentID, botIndex)
+    /// so any regeneration produces identical picks.
+    struct SeededRNG: RandomNumberGenerator {
+        var state: UInt64
+        mutating func next() -> UInt64 {
+            state &+= 0x9E3779B97F4A7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+            z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+            return z ^ (z >> 31)
+        }
+    }
+
+    static func makeSeededRNG(tournamentID: String, botIndex: Int) -> SeededRNG {
+        // FNV-1a hash of "<tournamentID>#<index>" to seed the PRNG.
+        var hash: UInt64 = 0xCBF29CE484222325
+        let prime: UInt64 = 0x100000001B3
+        for byte in tournamentID.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* prime
+        }
+        hash ^= UInt64(bitPattern: Int64(botIndex))
+        hash = hash &* prime
+        return SeededRNG(state: hash == 0 ? 0xDEADBEEF : hash)
+    }
+
     private static func generateBotPicks(
         draw: [TennisBracketPlayer],
         personality: BotPersonality,
-        grandSlam: GrandSlam
+        grandSlam: GrandSlam,
+        rng: inout SeededRNG
     ) -> [String: String]? {
         guard draw.count == 128 else { return nil }
 
@@ -1736,8 +2048,8 @@ struct TennisBracketBotDrafter {
         for matchNum in 1...64 {
             let p1 = sorted[(matchNum - 1) * 2]
             let p2 = sorted[(matchNum - 1) * 2 + 1]
-            let prob = winProbability(player1: p1, player2: p2, personality: personality, grandSlam: grandSlam)
-            let winner = Double.random(in: 0...1) < prob ? p1 : p2
+            let prob = winProbability(player1: p1, player2: p2, personality: personality, grandSlam: grandSlam, rng: &rng)
+            let winner = Double.random(in: 0...1, using: &rng) < prob ? p1 : p2
             let slot = TennisBracketEngine.matchSlot(round: "R1", matchNumber: matchNum)
             picks[slot] = winner.name
             r1Winners[matchNum] = winner
@@ -1755,8 +2067,8 @@ struct TennisBracketBotDrafter {
                 let src2 = matchNum * 2
                 guard let p1 = prevWinners[src1], let p2 = prevWinners[src2] else { continue }
 
-                let prob = winProbability(player1: p1, player2: p2, personality: personality, grandSlam: grandSlam)
-                let winner = Double.random(in: 0...1) < prob ? p1 : p2
+                let prob = winProbability(player1: p1, player2: p2, personality: personality, grandSlam: grandSlam, rng: &rng)
+                let winner = Double.random(in: 0...1, using: &rng) < prob ? p1 : p2
                 let slot = TennisBracketEngine.matchSlot(round: round, matchNumber: matchNum)
                 picks[slot] = winner.name
                 currentWinners[matchNum] = winner
@@ -1773,7 +2085,8 @@ struct TennisBracketBotDrafter {
         player1: TennisBracketPlayer,
         player2: TennisBracketPlayer,
         personality: BotPersonality,
-        grandSlam: GrandSlam
+        grandSlam: GrandSlam,
+        rng: inout SeededRNG
     ) -> Double {
         let rank1 = max(1, Double(player1.rank))
         let rank2 = max(1, Double(player2.rank))
@@ -1783,7 +2096,7 @@ struct TennisBracketBotDrafter {
         var prob = rank2 / total
 
         // Personality noise
-        let noise = Double.random(in: -personality.noiseMultiplier...personality.noiseMultiplier)
+        let noise = Double.random(in: -personality.noiseMultiplier...personality.noiseMultiplier, using: &rng)
 
         switch personality {
         case .upsetHunter:

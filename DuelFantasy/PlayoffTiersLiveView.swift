@@ -91,8 +91,29 @@ struct PlayoffTiersLiveView: View {
                     .foregroundStyle(.white.opacity(0.8))
             }
 
-            // User rank and points
+            // User rank and points — or, when the user didn't enter, the
+            // contest leader (dashes told the viewer nothing).
             HStack(spacing: 24) {
+                if !viewModel.hasSubmitted, let leader = viewModel.leaderboardEntries.first {
+                    VStack(spacing: 2) {
+                        Text("LEADER")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.6))
+                        Text(leader.entryName)
+                            .font(.headline.weight(.bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                    }
+
+                    VStack(spacing: 2) {
+                        Text("TOP FPTS")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.6))
+                        Text(String(format: "%.1f", leader.totalPoints))
+                            .font(.title.weight(.bold).monospacedDigit())
+                            .foregroundStyle(.white)
+                    }
+                } else {
                 VStack(spacing: 2) {
                     Text("YOUR RANK")
                         .font(.system(size: 10, weight: .semibold))
@@ -121,6 +142,7 @@ struct PlayoffTiersLiveView: View {
                             .font(.title.weight(.bold))
                             .foregroundStyle(.white.opacity(0.5))
                     }
+                }
                 }
 
                 Spacer()

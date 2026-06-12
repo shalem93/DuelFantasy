@@ -8,6 +8,9 @@ struct BestBallDraftView: View {
     @State private var showRoster: Bool = false
     @State private var pickTimer: Int = 30
     @State private var timerTask: Task<Void, Never>? = nil
+    /// Set when the user taps a team pill in the recent-picks ticker —
+    /// presents a sheet listing that member's drafted players so far.
+    @State private var inspectMemberID: String? = nil
 
     private var brandPurple: Color {
         Color(red: 0.48, green: 0.23, blue: 0.93)
@@ -35,6 +38,12 @@ struct BestBallDraftView: View {
         .sheet(isPresented: $showRoster) {
             rosterSheet
         }
+        .sheet(item: Binding(
+            get: { inspectMemberID.map(InspectMemberID.init(id:)) },
+            set: { inspectMemberID = $0?.id }
+        )) { wrapper in
+            inspectTeamSheet(memberID: wrapper.id)
+        }
         .onAppear {
             if let league = viewModel.currentLeague {
                 viewModel.startDraftPolling(leagueID: league.id)
@@ -54,6 +63,31 @@ struct BestBallDraftView: View {
 
     private func draftHeader(_ state: BestBallDraftState) -> some View {
         VStack(spacing: 8) {
+            // Big gold "ON THE CLOCK" banner when it's the user's pick.
+            // The previous "YOUR PICK" caption was easy to miss when the
+            // draft was flying by at bot speed.
+            if viewModel.isMyTurn && !state.isDraftComplete {
+                HStack(spacing: 8) {
+                    Image(systemName: "target")
+                        .font(.subheadline.weight(.bold))
+                    Text("YOU'RE ON THE CLOCK")
+                        .font(.subheadline.weight(.heavy))
+                        .tracking(0.5)
+                }
+                .foregroundStyle(Color.black)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 1.00, green: 0.84, blue: 0.20),
+                            Color(red: 0.98, green: 0.74, blue: 0.10)
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+            }
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Round \(state.currentRound) • Pick \(state.currentPickNumber)/\(state.totalPicks)")
@@ -136,22 +170,28 @@ struct BestBallDraftView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(Array(state.picks.suffix(8).reversed()), id: \.id) { pick in
-                    VStack(spacing: 2) {
-                        Text("R\(pick.round)P\(pick.pickNumber)")
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(.secondary)
-                        Text(pick.playerName.components(separatedBy: " ").last ?? pick.playerName)
-                            .font(.caption.weight(.medium))
-                            .lineLimit(1)
-                        Text(viewModel.memberName(for: pick.memberID))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                    Button {
+                        Haptics.light()
+                        inspectMemberID = pick.memberID
+                    } label: {
+                        VStack(spacing: 2) {
+                            Text("R\(pick.round)P\(pick.pickNumber)")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(.secondary)
+                            Text(pick.playerName.components(separatedBy: " ").last ?? pick.playerName)
+                                .font(.caption.weight(.medium))
+                                .lineLimit(1)
+                            Text(viewModel.memberName(for: pick.memberID))
+                                .font(.caption2)
+                                .foregroundStyle(pick.memberID == viewModel.myMemberID ? brandPurple : .secondary)
+                                .lineLimit(1)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(Color(.systemGray6))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .background(Color(.systemGray6))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .buttonStyle(.plain)
                 }
             }
             .padding(.horizontal, 16)
@@ -246,9 +286,23 @@ struct BestBallDraftView: View {
                                         .foregroundStyle(player.lastSeasonHR >= 30 ? .orange : .primary)
                                         .frame(width: 48, alignment: .trailing)
                                 } else {
-                                    Text(String(format: "%.1f", player.projectedPoints))
+                                    // Display season-total projection (PPG × games).
+                                    // Internal `projectedPoints` is per-game so the
+                                    // bot drafter and scoring engine stay consistent;
+                                    // the draft board reads better in season-long
+                                    // totals because that's how Yahoo / ESPN /
+                                    // Sleeper rank the players.
+                                    let gamesPerSeason: Double = {
+                                        switch player.sport {
+                                        case "NFL": return 17
+                                        case "NBA": return 82
+                                        case "MLB": return 162
+                                        default: return 17
+                                        }
+                                    }()
+                                    Text(String(format: "%.0f", player.projectedPoints * gamesPerSeason))
                                         .font(.subheadline.weight(.medium).monospacedDigit())
-                                        .frame(width: 44, alignment: .trailing)
+                                        .frame(width: 52, alignment: .trailing)
                                 }
                             }
                             .padding(.horizontal, 16)
@@ -263,6 +317,70 @@ struct BestBallDraftView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Inspect Other Member Sheet
+
+    /// Wrapper around a memberID so it can drive a SwiftUI `.sheet(item:)`.
+    private struct InspectMemberID: Identifiable, Hashable { let id: String }
+
+    @ViewBuilder
+    private func inspectTeamSheet(memberID: String) -> some View {
+        NavigationStack {
+            let name = viewModel.memberName(for: memberID)
+            let picks = state?.roster(for: memberID) ?? []
+            let sport = viewModel.currentLeague?.sport ?? "NFL"
+            let sortOrder: [String] = {
+                switch sport {
+                case "NFL": return ["QB", "RB", "FB", "WR", "TE", "K"]
+                case "NBA": return ["PG", "SG", "SF", "PF", "C"]
+                case "MLB": return ["SP", "RP", "P", "C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "OF", "DH"]
+                default:    return []
+                }
+            }()
+            let sorted = picks.sorted { a, b in
+                let aRank = sortOrder.firstIndex(of: a.playerPosition) ?? Int.max
+                let bRank = sortOrder.firstIndex(of: b.playerPosition) ?? Int.max
+                if aRank != bRank { return aRank < bRank }
+                return a.pickNumber < b.pickNumber
+            }
+            Group {
+                if sorted.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: "person")
+                            .font(.largeTitle)
+                            .foregroundStyle(.secondary)
+                        Text("\(name) hasn't drafted yet")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    List(sorted) { pick in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(pick.playerName)
+                                    .font(.subheadline.weight(.medium))
+                                Text("\(pick.playerPosition) • \(pick.playerTeam)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Text("R\(pick.round) P\(pick.pickNumber)")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .navigationTitle(name)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { inspectMemberID = nil }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 
     // MARK: - Roster Sheet
@@ -324,7 +442,11 @@ struct BestBallDraftView: View {
                 return ["C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "OF", "DH"]
             }
             return ["SP", "C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "OF", "DH"]
-        case "NFL": return ["QB", "RB", "WR", "TE", "K"]
+        // Best Ball lineups have no kicker slot, so K is removed from
+        // the filter dropdown. The player pool already filters them out
+        // upstream — the dropdown is the only place a leftover "K"
+        // option could appear.
+        case "NFL": return ["QB", "RB", "WR", "TE"]
         default: return []
         }
     }

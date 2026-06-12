@@ -49,14 +49,66 @@ struct ESPNUFCDFSSlateProvider: DFSSlateProvider {
             return cached
         }
 
-        // Start fetching real DraftKings salaries in parallel with ESPN data
-        async let rgSalaries = RotoGrindersSalaryProvider.shared.fetchSalaries(sport: "mma", maxClassicSalary: 12000)
-
-        // 1. Fetch the upcoming UFC card (event) with all fights (competitions)
+        // 1. Fetch the upcoming UFC card (event) with all fights (competitions).
+        //    Sequencing this BEFORE the salary fetch lets us hit
+        //    LineupHQ for the actual FIGHT DATE rather than today's —
+        //    critical for special events (UFC 250 at the White House,
+        //    PPVs, etc.) that often sit 3-7 days out from when the user
+        //    first opens the tab.
         let (_, fights) = try await fetchUFCCard()
         guard !fights.isEmpty else {
             throw NSError(domain: "UFCDFS", code: 1, userInfo: [NSLocalizedDescriptionKey: "No UFC fights found"])
         }
+
+        // No `maxClassicSalary` for MMA — DK MMA isn't structured as
+        // main-vs-showdown; the entire fight card is a single classic-style
+        // contest with a naturally tight $7K–$10K range. Passing a max
+        // tripped LineupHQ's showdown-detection (median $8.5K > $6K = 12K/2)
+        // and rejected legitimate UFC pricing as "showdown data", leaving
+        // every fighter at the $12K estimate.
+        //
+        // For PPV / special events that ship as Captain-Mode showdowns
+        // (e.g. UFC 250 at the White House), the LineupHQ aggregate
+        // 404s and the per-slate showdown master is the only source.
+        // `fetchSalaries` falls through to `fetchAllShowdownSalaries`
+        // automatically when the aggregate is empty.
+        // DK publishes contest slates under the date a contest OPENS for
+        // signups, not the fight date — so for a UFC 250 card on June 14,
+        // LineupHQ has the slate filed under today (June 9). Try the
+        // fight date first (correct most of the time for non-PPV cards),
+        // then today, then a sweep of the days in between. First non-
+        // empty response wins.
+        let fightDate = fights.first?.startTime ?? Date()
+        let calendar = Calendar(identifier: .gregorian)
+        var dateCandidates: [Date] = [fightDate, Date()]
+        // Days between today and fight date — covers slates published
+        // anywhere in that window.
+        let daysOut = calendar.dateComponents([.day], from: Date(), to: fightDate).day ?? 0
+        if daysOut > 0 {
+            for offset in 1..<min(daysOut, 14) {
+                if let d = calendar.date(byAdding: .day, value: offset, to: Date()) {
+                    dateCandidates.append(d)
+                }
+            }
+        }
+        // Dedupe by YYYYMMDD.
+        var seenDates = Set<String>()
+        let uniqueCandidates = dateCandidates.filter {
+            let key = RotoGrindersSalaryProvider.dateKeyStatic(for: $0)
+            return seenDates.insert(key).inserted
+        }
+        var resolvedSalaries: [String: Int] = [:]
+        var resolvedDate: Date = fightDate
+        for candidate in uniqueCandidates {
+            let salaries = await RotoGrindersSalaryProvider.shared.fetchSalaries(sport: "mma", maxClassicSalary: nil, date: candidate)
+            if !salaries.isEmpty {
+                resolvedSalaries = salaries
+                resolvedDate = candidate
+                print("[UFC-DFS] Resolved \(salaries.count) DK salaries from date \(RotoGrindersSalaryProvider.dateKeyStatic(for: candidate))")
+                break
+            }
+        }
+        let rgSalaries = resolvedSalaries
 
         // 2. Build included games — each fight is a "game"
         let includedGames: [DFSSlateGame] = fights.map { fight in
@@ -102,7 +154,7 @@ struct ESPNUFCDFSSlateProvider: DFSSlateProvider {
         }
 
         // 4. Apply real DraftKings salaries from RotoGrinders where available
-        let realSalaries = await rgSalaries
+        let realSalaries = rgSalaries
         let finalPlayers: [DFSPlayer]
         if !realSalaries.isEmpty {
             let matchCount = players.filter { RotoGrindersSalaryProvider.lookupSalary(espnName: $0.name, in: realSalaries) != nil }.count
@@ -163,15 +215,48 @@ struct ESPNUFCDFSSlateProvider: DFSSlateProvider {
         let tournamentID = "ufc-\(dateKey(for: slateDate))"
         let isSingleGame = includedGames.count == 1
 
+        // Captain-mode detection. Three signals, any of which flips us
+        // into MVP + 5 FLEX:
+        //   1. LineupHQ master has ONLY showdown slates (no classic).
+        //   2. We never got real DK salary data from any source —
+        //      historically every UFC special event we can't reach via
+        //      our normal scrapers ends up being a captain-mode-only
+        //      contest. Default to captain mode rather than the
+        //      classic-only fallback so the lineup shape matches DK.
+        //   3. The card has 7+ fights — DK only publishes classic
+        //      contests for ~3-fight Fight Night cards; everything
+        //      bigger is showdown-only.
+        let lineupHQCaptain = await RotoGrindersSalaryProvider.shared.detectCaptainMode(sport: "mma", date: resolvedDate)
+        let noRealSalaries = rgSalaries.isEmpty
+        let bigCard = fights.count >= 7
+        let isCaptainMode = lineupHQCaptain || noRealSalaries || bigCard
+        if isCaptainMode {
+            let reason: String
+            if lineupHQCaptain { reason = "LineupHQ master has only showdown slates" }
+            else if noRealSalaries { reason = "no real salary data available" }
+            else { reason = "\(fights.count)-fight card" }
+            print("[UFC-DFS] Captain mode detected (\(reason)) — using MVP + 5 FLEX roster")
+        }
+        let rosterSlots: [String]? = isCaptainMode
+            ? ["MVP", "FLEX", "FLEX", "FLEX", "FLEX", "FLEX"]
+            : nil
+
+        // Phase 2: pull RG's per-fight showdown salaries. UFC is always
+        // showdown — each fight is its own single-game contest. Use the
+        // same date the main salary fetch resolved against so we hit
+        // the right LineupHQ bucket for PPV cards.
+        let ufcShowdownSalaries = await RotoGrindersSalaryProvider.shared.fetchAllShowdownSalaries(sport: "ufc", date: resolvedDate)
+
         let (tournaments, sgPlayers) = buildMultiTournamentSlate(
             baseID: tournamentID,
             league: "UFC",
             mainSalaryCap: 50000,
             mainLineupSize: 6,
-            mainRosterSlots: nil,
+            mainRosterSlots: rosterSlots,
             isSingleGameSlate: isSingleGame,
             includedGames: includedGames,
-            mainPlayers: sortedPlayers
+            mainPlayers: sortedPlayers,
+            showdownSalaries: ufcShowdownSalaries.isEmpty ? nil : ufcShowdownSalaries
         )
 
         let slate = DFSSlate(

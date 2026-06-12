@@ -5,12 +5,73 @@ import SwiftUI
         case nhl = "NHL"
         case mlb = "MLB"
         case pga = "PGA"
-        case epl = "EPL"
-        case ucl = "UCL"
         case wc = "WC"
         case ufc = "UFC"
+        case epl = "EPL"
+        case ucl = "UCL"
         case nfl = "NFL"
         case cfb = "CFB"
+
+        /// In-season check by today's date. Sports out-of-season are pushed
+        /// to the end of the pill row so the user always sees active leagues
+        /// first without us having to ship a release every solstice.
+        /// Windows are intentionally generous on the edges (preseason +
+        /// playoffs) so the pills don't disappear mid-tournament.
+        func isInSeason(on date: Date = Date()) -> Bool {
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
+            let comps = cal.dateComponents([.month, .day], from: date)
+            let mmdd = (comps.month ?? 1) * 100 + (comps.day ?? 1)
+            switch self {
+            case .pga, .ufc:
+                return true                              // year-round
+            case .nba:
+                return mmdd >= 1021 || mmdd <= 622       // preseason → Finals
+            case .nhl:
+                return mmdd >= 1007 || mmdd <= 622       // preseason → Cup
+            case .mlb:
+                return mmdd >= 327 && mmdd <= 1101       // regular + postseason
+            case .nfl:
+                return mmdd >= 801 || mmdd <= 215        // preseason → Super Bowl
+            case .cfb:
+                return mmdd >= 820 || mmdd <= 120        // Week 0 → bowl season
+            case .wc:
+                return mmdd >= 611 && mmdd <= 719        // World Cup 2026
+            case .epl:
+                return mmdd >= 815 || mmdd <= 525
+            case .ucl:
+                return mmdd >= 915 || mmdd <= 607
+            }
+        }
+
+        /// Within-group priority: in-season sports keep this order, then
+        /// out-of-season sports follow in the same order. Lower = earlier.
+        /// Sequence reflects "what the user is most likely to want to play"
+        /// during the headline pro-sports windows: NFL > NBA > MLB > NHL >
+        /// WC (when active) > PGA > CFB > UFC > EPL > UCL.
+        private var pillPriority: Int {
+            switch self {
+            case .nfl: return 0
+            case .nba: return 1
+            case .mlb: return 2
+            case .nhl: return 3
+            case .wc:  return 4
+            case .pga: return 5
+            case .cfb: return 6
+            case .ufc: return 7
+            case .epl: return 8
+            case .ucl: return 9
+            }
+        }
+
+        /// All sports ordered for display: in-season first, then off-season.
+        static func orderedForToday(_ date: Date = Date()) -> [DFSSport] {
+            let inSeason = allCases.filter { $0.isInSeason(on: date) }
+                .sorted { $0.pillPriority < $1.pillPriority }
+            let offSeason = allCases.filter { !$0.isInSeason(on: date) }
+                .sorted { $0.pillPriority < $1.pillPriority }
+            return inSeason + offSeason
+        }
     }
 
 struct DFSContestView: View {
@@ -25,11 +86,16 @@ struct DFSContestView: View {
     @Bindable var nflViewModel: DFSViewModel
     @Bindable var cfbViewModel: DFSViewModel
     @EnvironmentObject private var auth: AuthViewModel
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab: DFSTab = .today
     @State private var selectedSport: DFSSport = .nba
     /// Entries from previous tournaments that are still in progress (not yet settled)
     @State private var previousInProgressEntries: [DFSEntryRecord] = []
     @State private var statsSportFilter: String = "All"
+    /// Comma-separated list of sport labels the user has ever had a result
+    /// for. Persisted across sessions so a transient sync failure for any
+    /// sport (UCL/NCAAM/etc.) doesn't make its pill vanish from My Contests.
+    @AppStorage("dfsSportsEverCompetedIn") private var sportsEverCompetedRaw: String = ""
 
     private enum DFSTab: String, CaseIterable {
         case today = "Today"
@@ -38,6 +104,22 @@ struct DFSContestView: View {
 
     private var brandPurple: Color {
         Color(red: 0.48, green: 0.23, blue: 0.93)
+    }
+
+    /// View model for the currently selected sport pill.
+    private var selectedSportViewModel: DFSViewModel {
+        switch selectedSport {
+        case .nba: return viewModel
+        case .nhl: return nhlViewModel
+        case .mlb: return mlbViewModel
+        case .pga: return pgaViewModel
+        case .epl: return eplViewModel
+        case .ucl: return uclViewModel
+        case .wc:  return wcViewModel
+        case .ufc: return ufcViewModel
+        case .nfl: return nflViewModel
+        case .cfb: return cfbViewModel
+        }
     }
 
     var body: some View {
@@ -72,7 +154,7 @@ struct DFSContestView: View {
                 if selectedTab == .today {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 10) {
-                            ForEach(DFSSport.allCases, id: \.self) { sport in
+                            ForEach(DFSSport.orderedForToday(), id: \.self) { sport in
                                 Button {
                                     Haptics.light()
                                     withAnimation(.easeInOut(duration: 0.15)) {
@@ -173,6 +255,13 @@ struct DFSContestView: View {
             }
         }
         .task {
+            // The VISIBLE sport's slate loads before anything else — the
+            // shimmer can't clear without it, and the auth refresh + global
+            // history sync below are serial network calls that otherwise gate
+            // first paint. The slate fetch hits public ESPN endpoints, so it
+            // doesn't need the refreshed token; entries hydrate right after.
+            await selectedSportViewModel.loadSlateIfNeeded()
+
             await refreshAuthAndSync()
 
             // Restore each sport's cached private-contest list synchronously
@@ -185,16 +274,30 @@ struct DFSContestView: View {
                 vm.loadCachedPrivateContests()
             }
 
-            // Sync history once and propagate to all sport viewmodels — the
-            // history payload is the same regardless of which sport calls it,
-            // so doing it 9 times sequentially is wasted time.
-            await viewModel.syncHistoryFromServer()
-            propagateHistory(from: viewModel)
+            // Shared cross-sport history fetch: ONE call to Postgres for
+            // user_history + ONE for tournament metadata, dispatched into
+            // each VM's `applyServerHistory`. Previously this did an NBA-
+            // only sync and then `propagateHistory(from: viewModel)` —
+            // which overwrote each VM's `dfsHistoryData` with NBA's blob,
+            // wiping any UCL/UFC rows that the launch shared sync had just
+            // ingested. By the time the user got to My Contests, UCL was
+            // gone and only reappeared after the next sync cycle re-pulled
+            // it from the server. The shared fetch keeps every sport's
+            // rows intact in their respective VMs.
+            let allVMs: [DFSViewModel] = [
+                viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
+                eplViewModel, uclViewModel, wcViewModel,
+                ufcViewModel, nflViewModel, cfbViewModel
+            ]
+            if let userID = viewModel.userID, let token = viewModel.accessToken {
+                await DFSViewModel.syncAllSportsHistoryFromServer(
+                    vms: allVMs, userID: userID, accessToken: token
+                )
+            }
 
-            // Per-sport init pipelines run in PARALLEL. Previously these were
-            // sequential, so MLB / PGA / later sports stayed empty for 10+
-            // seconds after launch — long enough for a user to tap into an
-            // MLB SG contest and see raw IDs + an empty leaderboard.
+            // Per-sport init pipelines run in PARALLEL (the visible sport's
+            // slate was already loaded above, so its pipeline is cheap and
+            // the other 9 no longer compete with the user-facing paint).
             async let nba: Void  = initSportPipeline(viewModel)
             async let nhl: Void  = initSportPipeline(nhlViewModel)
             async let mlb: Void  = initSportPipeline(mlbViewModel)
@@ -210,9 +313,18 @@ struct DFSContestView: View {
             // Load previous in-progress entries for My Contests
             await loadPreviousInProgressEntries()
         }
+        // DFS polling strategy:
+        //   • Only the currently-selected sport polls at full rate (35s).
+        //     The other 9 sports' polls sleep — when the user switches to
+        //     them, an immediate refresh fires via `.onChange(of: selectedSport)`.
+        //   • Polling is skipped entirely while the app is backgrounded
+        //     (scenePhase != .active).
+        // Net effect: the DFS tab generates ~10× less DB load while still
+        // feeling instant when the user switches sports.
         .task(id: "nba-polling") {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 35_000_000_000)
+                guard scenePhase == .active, selectedSport == .nba else { continue }
                 await refreshAuthAndSync()
                 await viewModel.refreshLive()
             }
@@ -220,6 +332,7 @@ struct DFSContestView: View {
         .task(id: "nhl-polling") {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 35_000_000_000)
+                guard scenePhase == .active, selectedSport == .nhl else { continue }
                 await refreshAuthAndSync()
                 await nhlViewModel.refreshLive()
             }
@@ -227,6 +340,7 @@ struct DFSContestView: View {
         .task(id: "mlb-polling") {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 35_000_000_000)
+                guard scenePhase == .active, selectedSport == .mlb else { continue }
                 await refreshAuthAndSync()
                 await mlbViewModel.refreshLive()
             }
@@ -235,6 +349,7 @@ struct DFSContestView: View {
             while !Task.isCancelled {
                 let interval = UInt64(pgaViewModel.pollingInterval * 1_000_000_000)
                 try? await Task.sleep(nanoseconds: interval)
+                guard scenePhase == .active, selectedSport == .pga else { continue }
                 await refreshAuthAndSync()
                 await pgaViewModel.refreshLive()
             }
@@ -242,6 +357,7 @@ struct DFSContestView: View {
         .task(id: "epl-polling") {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 35_000_000_000)
+                guard scenePhase == .active, selectedSport == .epl else { continue }
                 await refreshAuthAndSync()
                 await eplViewModel.refreshLive()
             }
@@ -249,6 +365,7 @@ struct DFSContestView: View {
         .task(id: "ucl-polling") {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 35_000_000_000)
+                guard scenePhase == .active, selectedSport == .ucl else { continue }
                 await refreshAuthAndSync()
                 await uclViewModel.refreshLive()
             }
@@ -256,6 +373,7 @@ struct DFSContestView: View {
         .task(id: "wc-polling") {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 35_000_000_000)
+                guard scenePhase == .active, selectedSport == .wc else { continue }
                 await refreshAuthAndSync()
                 await wcViewModel.refreshLive()
             }
@@ -263,6 +381,7 @@ struct DFSContestView: View {
         .task(id: "ufc-polling") {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 35_000_000_000)
+                guard scenePhase == .active, selectedSport == .ufc else { continue }
                 await refreshAuthAndSync()
                 await ufcViewModel.refreshLive()
             }
@@ -270,6 +389,7 @@ struct DFSContestView: View {
         .task(id: "nfl-polling") {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 35_000_000_000)
+                guard scenePhase == .active, selectedSport == .nfl else { continue }
                 await refreshAuthAndSync()
                 await nflViewModel.refreshLive()
             }
@@ -277,8 +397,50 @@ struct DFSContestView: View {
         .task(id: "cfb-polling") {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 35_000_000_000)
+                guard scenePhase == .active, selectedSport == .cfb else { continue }
                 await refreshAuthAndSync()
                 await cfbViewModel.refreshLive()
+            }
+        }
+        // Immediate refresh on sport switch — the active polling loop
+        // won't fire for up to 35s after the switch, so kick off a one-shot
+        // refresh right away so the new tab's data feels fresh.
+        .onChange(of: selectedSport) { _, newSport in
+            Task {
+                await refreshAuthAndSync()
+                switch newSport {
+                case .nba: await viewModel.refreshLive()
+                case .nhl: await nhlViewModel.refreshLive()
+                case .mlb: await mlbViewModel.refreshLive()
+                case .pga: await pgaViewModel.refreshLive()
+                case .epl: await eplViewModel.refreshLive()
+                case .ucl: await uclViewModel.refreshLive()
+                case .wc:  await wcViewModel.refreshLive()
+                case .ufc: await ufcViewModel.refreshLive()
+                case .nfl: await nflViewModel.refreshLive()
+                case .cfb: await cfbViewModel.refreshLive()
+                }
+            }
+        }
+        // Watchdog for the selected sport's initial load. The launch `.task`
+        // chain (auth refresh → global history sync → 10 sport pipelines) can
+        // be cancelled by a SwiftUI re-render or stall on one slow request —
+        // leaving the visible sport's shimmer up forever with nothing
+        // retrying until the user taps another sport (whose onChange kicks a
+        // refresh). This re-checks a few times after the sport appears and
+        // loads the slate itself if the chain never got there.
+        .task(id: selectedSport) {
+            let vm = selectedSportViewModel
+            // ~2 minutes of coverage. With the 45s fetch timeout and the
+            // 60s stuck-load takeover in loadSlate, a wedged first attempt
+            // resolves and this picks it back up; loadSlateIfNeeded is a
+            // no-op once the slate is loaded.
+            for _ in 0..<60 {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if Task.isCancelled || vm.tournament != nil { return }
+                if !vm.isLoading {
+                    await vm.loadSlateIfNeeded()
+                }
             }
         }
     }
@@ -298,6 +460,13 @@ struct DFSContestView: View {
             } else {
                 DFSLobbyView(viewModel: pgaViewModel)
             }
+        }
+        // Fire refreshLive immediately on tab appear so the PGA self-heal
+        // (orphaned past tournament settlement) doesn't wait the 30-minute
+        // pre-tournament polling interval. Without this, stale Memorial /
+        // past-event cards stay in Active Contests until the next poll cycle.
+        .task {
+            await pgaViewModel.refreshLive()
         }
     }
 
@@ -435,7 +604,7 @@ struct DFSContestView: View {
                 ScrollView {
                     VStack(spacing: 16) {
                         // Show a card for each entered MLB tournament
-                        ForEach(mlbActiveEntries, id: \.tournamentID) { entry in
+                        ForEach(mlbActiveEntries, id: \.id) { entry in
                             inProgressContestCard(entry)
                         }
 
@@ -685,7 +854,7 @@ struct DFSContestView: View {
                 ScrollView {
                     VStack(spacing: 16) {
                         // Show a card for each entered NHL tournament
-                        ForEach(nhlActiveEntries, id: \.tournamentID) { entry in
+                        ForEach(nhlActiveEntries, id: \.id) { entry in
                             inProgressContestCard(entry)
                         }
 
@@ -1277,7 +1446,7 @@ struct DFSContestView: View {
             return set
         }()
         let enteredTournaments: [DFSTournament] = vm.enteredTournamentIDs
-            .filter { !settledIDs.contains($0) && !unenteredPrivateParents.contains($0) }
+            .filter { !vm.isTournamentSettledOrSibling($0) && !unenteredPrivateParents.contains($0) }
             .compactMap { tid -> DFSTournament? in
                 if let existing = tournamentByID[tid] { return existing }
                 // Synthesize from entry data (best-effort — preserves the card
@@ -1340,26 +1509,25 @@ struct DFSContestView: View {
             }
             return id
         }
+        // Dedup by (full tournament ID, lineupNumber). The previous
+        // size-collapsing logic ("keep largest size per slate identity")
+        // was a workaround for the phantom-H2H bug — cross-tournament
+        // data leak via stale `remoteEntries` — that's now fixed at the
+        // source. Submitting the SAME lineup to multiple sizes of the
+        // same slate (e.g. Red Sox SG H2H + 5-Man + 2000) is legitimate;
+        // each should show as its own active-contest card.
         let dedupedByLineup: [(tournament: DFSTournament, entry: DFSEntryRecord)] = {
-            let grouped = Dictionary(grouping: rawEntries, by: { row -> String in
-                let slate = slateIdentity(row.tournament.id)
-                let ln = row.entry.lineupNumber ?? 1
-                return "\(slate)#\(ln)"
-            })
+            var seen = Set<String>()
             var kept: [(tournament: DFSTournament, entry: DFSEntryRecord)] = []
-            for (_, rows) in grouped {
-                // If all rows have the same entry count, keep them all.
-                let counts = Set(rows.map { $0.tournament.entryCount })
-                if counts.count == 1 {
-                    kept.append(contentsOf: rows)
-                    continue
+            for row in rawEntries {
+                let key = "\(row.tournament.id)#\(row.entry.lineupNumber ?? 1)"
+                if seen.insert(key).inserted {
+                    kept.append(row)
                 }
-                // Multiple sizes for the same slate+lineup → keep only the largest.
-                let maxCount = counts.max() ?? 0
-                kept.append(contentsOf: rows.filter { $0.tournament.entryCount == maxCount })
             }
             return kept
         }()
+        _ = slateIdentity  // silence unused-function warning; helper retained for potential future use
 
         // Sort by (tournament.id, lineupNumber) for a stable order so the
         // Active Contests list doesn't visibly reshuffle on every return
@@ -1389,7 +1557,17 @@ struct DFSContestView: View {
             guard !settledIDs.contains(contest.parentTournamentID) else { return false }
             if let parent = vm.tournaments.first(where: { $0.id == contest.parentTournamentID }) {
                 let lockTime = vm.lockTimeForTournament(parent)
+                // Not active until the parent slate actually locks — until
+                // then it belongs in the Private Contests section of the lobby.
+                if Date() < lockTime { return false }
                 if Date().timeIntervalSince(lockTime) > 6 * 3600 { return false }
+            } else if let slateDate = parsedSlateDate(from: contest.parentTournamentID),
+                      !Calendar.current.isDateInToday(slateDate) {
+                // Parent tournament isn't in today's loaded slate AND its
+                // ID's embedded date isn't today — it's yesterday or older.
+                // Without this fallback, the contest stuck in Active
+                // Contests forever once the slate provider rotated.
+                return false
             }
             return true
         }
@@ -1530,7 +1708,7 @@ struct DFSContestView: View {
     /// and the lobby (filtered to available tournaments) below.
     private func partiallyLockedView(viewModel vm: DFSViewModel) -> some View {
         let settledIDs = vm.settledTournaments
-        let enteredLocked = vm.lockedTournaments.filter { vm.enteredTournamentIDs.contains($0.id) && !settledIDs.contains($0.id) }
+        let enteredLocked = vm.lockedTournaments.filter { vm.enteredTournamentIDs.contains($0.id) && !vm.isTournamentSettledOrSibling($0.id) }
         // Build per-entry items for locked tournaments
         struct LockedEntryItem: Identifiable {
             let id: String
@@ -1554,31 +1732,18 @@ struct DFSContestView: View {
             }
         }
 
-        // Strip trailing entry-count + instance suffix so contests like
-        // "mlb-20260529-2" (H2H) and "mlb-20260529-2000" (Grand Tourn.) on the
-        // same slate + same lineup number get grouped together.
-        func slateIdentity(_ tid: String) -> String {
-            var id = tid
-            if let range = id.range(of: #"-i\d+$"#, options: .regularExpression) {
-                id.removeSubrange(range)
-            }
-            let parts = id.components(separatedBy: "-")
-            if let last = parts.last, let n = Int(last),
-               [2, 3, 5, 10, 100, 500, 1000, 2000].contains(n) {
-                return parts.dropLast().joined(separator: "-")
-            }
-            return id
-        }
-        let grouped = Dictionary(grouping: rawPairs) { row in
-            "\(slateIdentity(row.tournament.id))#\(row.lineupNumber)"
-        }
+        // Dedup by FULL (tournament.id, lineupNumber) — same convention as
+        // `lockedContestList` and `unifiedMyContestsContent`. The previous
+        // slate-identity collapse (strip the trailing entry count and keep
+        // only the largest size) was a holdover from the phantom-H2H bug
+        // and incorrectly hid legitimate multi-size submissions. Submitting
+        // the same lineup to H2H + 5-Man + 2000-person for the same SG game
+        // is supported — each tournament gets its own active-contest card.
+        var seenKeys = Set<String>()
         var deduped: [(tournament: DFSTournament, lineupNumber: Int)] = []
-        for (_, rows) in grouped {
-            let counts = Set(rows.map { $0.tournament.entryCount })
-            // Keep only the largest entry-count contest for each
-            // (slate, lineup number) pair — drops the phantom small ones.
-            let maxCount = counts.max() ?? 0
-            for row in rows where row.tournament.entryCount == maxCount {
+        for row in rawPairs {
+            let key = "\(row.tournament.id)#\(row.lineupNumber)"
+            if seenKeys.insert(key).inserted {
                 deduped.append((row.tournament, row.lineupNumber))
             }
         }
@@ -1610,7 +1775,13 @@ struct DFSContestView: View {
             guard !settledIDs.contains(contest.parentTournamentID) else { return false }
             if let parent = vm.tournaments.first(where: { $0.id == contest.parentTournamentID }) {
                 let lockTime = vm.lockTimeForTournament(parent)
+                // Not active until the parent slate actually locks — until
+                // then it belongs in the Private Contests section of the lobby.
+                if Date() < lockTime { return false }
                 if Date().timeIntervalSince(lockTime) > 6 * 3600 { return false }
+            } else if let slateDate = parsedSlateDate(from: contest.parentTournamentID),
+                      !Calendar.current.isDateInToday(slateDate) {
+                return false
             }
             return true
         }
@@ -1745,6 +1916,13 @@ struct DFSContestView: View {
             return (vm.privateContestEntries[contest.id] ?? []).first(where: { $0.userID == me })
         }()
         let myScore: Double = {
+            // Prefer the settled / box-score-derived final score if it's
+            // been computed. Live points only cover today's slate, so a
+            // contest whose parent slate has rotated would otherwise read
+            // a partial 0-padded total here even though the contest is done.
+            if let finalScore = vm.privateContestFinalScores[contest.id], finalScore > 0 {
+                return finalScore
+            }
             guard let entry = myEntry else { return 0 }
             var total = 0.0
             for (i, pid) in entry.lineupPlayerIDs.enumerated() {
@@ -1913,15 +2091,18 @@ struct DFSContestView: View {
 
     // MARK: - Unified My Contests (all sports combined)
 
-    /// Active entries for a single view model (one per entered tournament, excluding settled).
+    /// Active entries for a single view model (excluding settled). One card
+    /// per LINEUP — taking only `.first` hid every multi-entry lineup beyond
+    /// the user's first in My Contests.
     private func activeEntries(for vm: DFSViewModel) -> [DFSEntryRecord] {
         let settled = vm.settledTournaments
         var entries: [DFSEntryRecord] = []
         for tid in vm.enteredTournamentIDs {
             guard !settled.contains(tid) else { continue }
-            if let record = vm.userEntryRecords[tid]?.first {
-                entries.append(record)
+            let records = (vm.userEntryRecords[tid] ?? []).sorted {
+                ($0.lineupNumber ?? 1) < ($1.lineupNumber ?? 1)
             }
+            entries.append(contentsOf: records)
         }
         return entries
     }
@@ -2029,6 +2210,17 @@ struct DFSContestView: View {
         return parts.first(where: { $0.count == 8 && Int($0) != nil }).map(String.init) ?? ""
     }
 
+    /// Parses the YYYYMMDD date out of any tournament ID. Used as a
+    /// fallback to determine whether a private contest's slate is today
+    /// when the parent tournament isn't in `vm.tournaments` anymore.
+    private func parsedSlateDate(from tournamentID: String) -> Date? {
+        let parts = tournamentID.split(separator: "-")
+        guard let dateStr = parts.first(where: { $0.count == 8 && Int($0) != nil }) else { return nil }
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyyMMdd"
+        return fmt.date(from: String(dateStr))
+    }
+
     /// Converts a private contest's parent-ID date string to a Date for
     /// merge-sorting with public results' `loggedAt`.
     private func parsedDate(for contest: DFSPrivateContest) -> Date {
@@ -2044,21 +2236,93 @@ struct DFSContestView: View {
         // writes only to its own `dfsHistory` afterwards — without merging
         // here, a UFC result settled mid-session would only appear in the
         // UFC lobby's Recent Results, never in the unified Past Results.
-        // Dedupe on `id` since settlement on multiple VMs can produce
-        // identical entries.
+        //
+        // Dedupe key is `slateIdentity(tid)#lineupNumber` — we strip the
+        // trailing entry-count and instance suffix (e.g. "-i2") from the
+        // tournament ID so that entries persisted under slightly different
+        // IDs for the same slate+lineup (cross-VM settlement, multi-entry
+        // padding, phantom small-contest shadows) collapse into a single
+        // row per actual user lineup.
+        func slateIdentity(_ tid: String) -> String {
+            var id = tid
+            if let range = id.range(of: #"-i\d+$"#, options: .regularExpression) {
+                id.removeSubrange(range)
+            }
+            let parts = id.components(separatedBy: "-")
+            if let last = parts.last, let n = Int(last),
+               [2, 3, 5, 10, 100, 500, 1000, 2000].contains(n) {
+                return parts.dropLast().joined(separator: "-")
+            }
+            return id
+        }
         let mergedHistory: [DFSResult] = {
             let sources: [DFSViewModel] = [
                 viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
                 eplViewModel, uclViewModel, wcViewModel,
                 ufcViewModel, nflViewModel, cfbViewModel
             ]
-            var byID: [UUID: DFSResult] = [:]
+            // Each tournament has a canonical owner — the sport VM whose
+            // prefix matches the tournament ID (e.g. PGA tournaments belong
+            // to pgaViewModel). When the owner un-settles a tournament it
+            // removes the row from ITS history, but other VMs still hold
+            // a stale copy from the initial cross-VM propagation. Keeping
+            // them in the merge would zombie the row back into Past Results
+            // after un-settle. So when we have a canonical owner, only
+            // accept rows from that VM.
+            func canonicalVM(for tid: String) -> DFSViewModel? {
+                if tid.hasPrefix("pga-") { return pgaViewModel }
+                if tid.hasPrefix("nhl-") { return nhlViewModel }
+                if tid.hasPrefix("ncaam-") { return nhlViewModel }
+                if tid.hasPrefix("mlb-") { return mlbViewModel }
+                if tid.hasPrefix("epl-") { return eplViewModel }
+                if tid.hasPrefix("ucl-") { return uclViewModel }
+                if tid.hasPrefix("wc-") { return wcViewModel }
+                if tid.hasPrefix("ufc-") { return ufcViewModel }
+                if tid.hasPrefix("nfl-") { return nflViewModel }
+                if tid.hasPrefix("cfb-") { return cfbViewModel }
+                if tid.hasPrefix("nba-") { return viewModel }
+                return nil
+            }
+            var byKey: [String: DFSResult] = [:]
             for vm in sources {
                 for result in vm.dfsHistory {
-                    if byID[result.id] == nil { byID[result.id] = result }
+                    let tid = result.tournamentId ?? result.id.uuidString
+                    // If the tournament has a canonical owner and this VM
+                    // isn't it, skip — the owner's view is the truth.
+                    if let owner = canonicalVM(for: tid), owner !== vm {
+                        continue
+                    }
+                    let ln = result.lineupNumber ?? 1
+                    // Dedup key strategy:
+                    //   • SG tournaments — `<sport>-sg-<gameID>-<entryCount>#<ln>`.
+                    //     Drops the date prefix so two settle paths that logged
+                    //     the same game under both yesterday's and today's
+                    //     date prefix (e.g. `nba-20260605-sg-401859964-2000`
+                    //     and `nba-20260606-sg-401859964-2000`) collapse to
+                    //     one row. Different entry counts (H2H vs 5-Man vs
+                    //     2000) stay separate because the count is in the key.
+                    //   • Main slate — full `<tid>#<ln>`. Each date's main
+                    //     slate is a genuinely different set of games, so
+                    //     the date IS the identity.
+                    let key: String = {
+                        var stripped = tid
+                        if let range = stripped.range(of: #"-i\d+$"#, options: .regularExpression) {
+                            stripped.removeSubrange(range)
+                        }
+                        if let sgRange = stripped.range(of: "-sg-"),
+                           let firstDash = stripped.firstIndex(of: "-") {
+                            let sport = String(stripped[..<firstDash])
+                            let afterSG = String(stripped[sgRange.upperBound...])
+                            return "\(sport)-sg-\(afterSG)#\(ln)"
+                        }
+                        return "\(stripped)#\(ln)"
+                    }()
+                    if byKey[key] == nil {
+                        byKey[key] = result
+                    }
                 }
             }
-            return Array(byID.values)
+            return Array(byKey.values)
         }()
         let allHistory = mergedHistory.sorted {
             if $0.loggedAt != $1.loggedAt { return $0.loggedAt > $1.loggedAt }
@@ -2080,7 +2344,20 @@ struct DFSContestView: View {
             for result in allHistory {
                 sports.insert(sportLabel(for: result))
             }
-            return ["All"] + sports.sorted()
+            let persisted: Set<String> = Set(
+                sportsEverCompetedRaw
+                    .split(separator: ",")
+                    .map { String($0) }
+                    .filter { !$0.isEmpty }
+            )
+            let newOnes = sports.subtracting(persisted)
+            if !newOnes.isEmpty {
+                let next = persisted.union(newOnes).sorted().joined(separator: ",")
+                Task { @MainActor in
+                    sportsEverCompetedRaw = next
+                }
+            }
+            return ["All"] + sports.union(persisted).sorted()
         }()
         return ZStack {
             nbaGradientBackground
@@ -2115,7 +2392,7 @@ struct DFSContestView: View {
                 ScrollView {
                     VStack(spacing: 16) {
                         // Active contest cards for each entered tournament per sport
-                        ForEach(allActiveEntries, id: \.tournamentID) { entry in
+                        ForEach(allActiveEntries, id: \.id) { entry in
                             inProgressContestCard(entry)
                         }
 
@@ -2204,7 +2481,8 @@ struct DFSContestView: View {
             // own scores; we kick all of them off in parallel.
             await withTaskGroup(of: Void.self) { group in
                 for vm in [viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
-                           eplViewModel, uclViewModel, ufcViewModel, nflViewModel, cfbViewModel] {
+                           eplViewModel, uclViewModel, wcViewModel,
+                           ufcViewModel, nflViewModel, cfbViewModel] {
                     group.addTask { await vm.loadAllPrivateContestFinalScores() }
                 }
             }
@@ -2394,7 +2672,16 @@ struct DFSContestView: View {
                     }
                 }
                 if myEntry != nil {
-                    let displayScore = myLiveRow?.points ?? myFinalScore ?? myEntry?.lineupTotalPoints ?? 0
+                    // For past contests, prefer the box-score-derived final
+                    // score over the live leaderboard's row. The live row
+                    // can be cached at 0 points if the leaderboard was
+                    // computed before `pastTournamentPlayerStats` was
+                    // loaded — and a stored 0 would beat a real final
+                    // score in the old fallback chain.
+                    let displayScore = myFinalScore
+                        ?? myLiveRow?.points
+                        ?? myEntry?.lineupTotalPoints
+                        ?? 0
                     Text("\(totalMembers) members • \(String(format: "%.1f", displayScore)) pts")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -2482,7 +2769,7 @@ struct DFSContestView: View {
                 ScrollView {
                     VStack(spacing: 16) {
                         // Show a card for each entered NBA tournament
-                        ForEach(nbaActiveEntries, id: \.tournamentID) { entry in
+                        ForEach(nbaActiveEntries, id: \.id) { entry in
                             inProgressContestCard(entry)
                         }
 
@@ -3000,6 +3287,20 @@ struct DFSContestView: View {
         case 10: typeLabel = "\(prefix)10-Man"
         default: typeLabel = "\(prefix)\(entryCount)-Entry"
         }
+        // For SG tournaments, try to find the loaded tournament object's
+        // title (e.g. "CAR @ VGK", "TB @ MIA") and prepend it so the user
+        // sees which matchup the card refers to. Falls back to the generic
+        // sport+type label when no VM has the tournament loaded.
+        if isSG {
+            let allVMs: [DFSViewModel] = [viewModel, nhlViewModel, mlbViewModel, pgaViewModel, eplViewModel, uclViewModel, wcViewModel, ufcViewModel, nflViewModel, cfbViewModel]
+            for vm in allVMs {
+                if let t = vm.tournaments.first(where: { $0.id == tournamentID }),
+                   !t.title.isEmpty,
+                   t.title != "\(vm.sport) Contest" {
+                    return (typeLabel, "\(t.title) · \(typeLabel)")
+                }
+            }
+        }
         return (typeLabel, "\(sport) \(typeLabel)")
     }
 
@@ -3018,16 +3319,30 @@ struct DFSContestView: View {
             return nil
         }()
 
-        return NavigationLink {
-            DFSLiveContestView(viewModel: vm)
-                .task {
-                    vm.selectTournament(entry.tournamentID, lineupNumber: lineupNumber)
-                    // Ensure field is rebuilt if cache didn't exist for this tournament
-                    if vm.leaderboardEntries.isEmpty {
-                        await vm.refreshLive()
-                    }
+        // Pre-lock cards aren't tappable — tapping in only reveals bots
+        // and a meaningless leaderboard before games start. After lock,
+        // the card becomes a NavigationLink to the live contest.
+        @ViewBuilder
+        func cardWrapper<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+            if upcoming {
+                content()
+            } else {
+                NavigationLink {
+                    DFSLiveContestView(viewModel: vm)
+                        .task {
+                            vm.selectTournament(entry.tournamentID, lineupNumber: lineupNumber)
+                            // Ensure field is rebuilt if cache didn't exist for this tournament
+                            if vm.leaderboardEntries.isEmpty {
+                                await vm.refreshLive()
+                            }
+                        }
+                } label: {
+                    content()
                 }
-        } label: {
+                .buttonStyle(.plain)
+            }
+        }
+        return cardWrapper {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 HStack(spacing: 6) {
@@ -3069,44 +3384,86 @@ struct DFSContestView: View {
                 }
             }
 
-            Text(fullTitle)
+            // Distinguish multi-entry lineups in the same tournament
+            let siblingCount = (vm.userEntryRecords[entry.tournamentID] ?? []).count
+            Text(siblingCount > 1 ? "\(fullTitle) · Lineup #\(lineupNumber)" : fullTitle)
                 .font(.title3.weight(.bold))
                 .foregroundStyle(.white)
 
             HStack(spacing: 20) {
-                if let rank {
-                    VStack(spacing: 2) {
-                        Text("RANK")
+                if upcoming {
+                    // Pre-lock: hide rank/score against pre-generated bots —
+                    // the leaderboard isn't real yet. Show when the contest
+                    // locks so the user has a useful signal instead.
+                    let lockLabel: String = {
+                        let tid = entry.tournamentID
+                        let allVMs: [DFSViewModel] = [viewModel, nhlViewModel, mlbViewModel, pgaViewModel, eplViewModel, uclViewModel, wcViewModel, ufcViewModel, nflViewModel, cfbViewModel]
+                        for vm in allVMs {
+                            if let t = vm.tournaments.first(where: { $0.id == tid }) {
+                                let lt = vm.lockTimeForTournament(t)
+                                let formatter = DateFormatter()
+                                formatter.dateFormat = "h:mm a"
+                                return formatter.string(from: lt)
+                            }
+                        }
+                        return ""
+                    }()
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(lockLabel.isEmpty ? "LOCKS SOON" : "LOCKS AT")
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(.white.opacity(0.6))
-                        Text("#\(rank)")
+                        Text(lockLabel)
                             .font(.title2.weight(.bold).monospacedDigit())
                             .foregroundStyle(.white)
                             .lineLimit(1)
                             .fixedSize()
                     }
+                    VStack(spacing: 2) {
+                        Text("FIELD")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.6))
+                        Text("\(entryCount)")
+                            .font(.title2.weight(.bold).monospacedDigit())
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                    Spacer()
+                } else {
+                    if let rank {
+                        VStack(spacing: 2) {
+                            Text("RANK")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.white.opacity(0.6))
+                            Text("#\(rank)")
+                                .font(.title2.weight(.bold).monospacedDigit())
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+                                .fixedSize()
+                        }
+                    }
+                    VStack(spacing: 2) {
+                        Text("SCORE")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.6))
+                        Text(String(format: "%.1f", liveScore))
+                            .font(.title2.weight(.bold).monospacedDigit())
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                    VStack(spacing: 2) {
+                        Text("FIELD")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.6))
+                        Text("\(entryCount)")
+                            .font(.title2.weight(.bold).monospacedDigit())
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                    Spacer()
                 }
-                VStack(spacing: 2) {
-                    Text("SCORE")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.6))
-                    Text(String(format: "%.1f", liveScore))
-                        .font(.title2.weight(.bold).monospacedDigit())
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                        .fixedSize()
-                }
-                VStack(spacing: 2) {
-                    Text("FIELD")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.6))
-                    Text("\(entryCount)")
-                        .font(.title2.weight(.bold).monospacedDigit())
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                        .fixedSize()
-                }
-                Spacer()
             }
 
         }
@@ -3115,7 +3472,6 @@ struct DFSContestView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .shadow(color: .black.opacity(0.15), radius: 12, y: 6)
         }
-        .buttonStyle(.plain)
     }
 
     // MARK: - Loading View

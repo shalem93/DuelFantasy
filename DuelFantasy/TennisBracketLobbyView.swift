@@ -6,6 +6,7 @@ struct TennisBracketLobbyView: View {
     @State private var selectedQuarter: Int = 0      // R1 sub-quarter (0-3)
     @State private var showCreateGroup = false
     @State private var showJoinGroup = false
+    @State private var showGroupsList = false
     @State private var newGroupName = ""
     @State private var joinCode = ""
 
@@ -15,7 +16,7 @@ struct TennisBracketLobbyView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if viewModel.isLoading && !viewModel.hasAttemptedLoad {
+            if viewModel.isLoading {
                 loadingView
             } else if viewModel.isLocked {
                 TennisBracketLiveView(viewModel: viewModel)
@@ -57,13 +58,37 @@ struct TennisBracketLobbyView: View {
         )
         .navigationTitle("Tennis Brackets")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showGroupsList = true
+                } label: {
+                    Image(systemName: "person.3.fill")
+                        .foregroundStyle(brandPurple)
+                }
+            }
+        }
         .task {
             do {
+                // Wait for any in-flight preload (FantasyHubView fires one
+                // when the Fantasy tab appears) so we don't race it. A race
+                // here bumped currentLoadToken mid-fetch and dropped the
+                // first call's user-entry result on the floor — symptom
+                // was "No bracket submitted" on the user's first ATP open.
+                while viewModel.isLoading {
+                    try? await Task.sleep(nanoseconds: 80_000_000)  // 80ms
+                }
                 if !viewModel.hasAttemptedLoad {
                     await viewModel.loadTournament()
                 } else {
                     await viewModel.recheckStatusIfNeeded()
                 }
+                // Late-bind fetch for picks: catches the case where the
+                // first loadTournament ran before auth was ready, so the
+                // entry-fetch inside loadTournament got silently skipped
+                // and the user's bracket appears as "No bracket submitted"
+                // until they re-toggle draw types.
+                await viewModel.restoreUserPicksIfMissing()
                 await viewModel.loadMyGroups()
             } catch {
                 print("[TennisBracket] Unexpected error in task: \(error)")
@@ -71,36 +96,135 @@ struct TennisBracketLobbyView: View {
         }
         .sheet(isPresented: $showCreateGroup) { createGroupSheet }
         .sheet(isPresented: $showJoinGroup) { joinGroupSheet }
+        .sheet(isPresented: $showGroupsList) { groupsListSheet }
+    }
+
+    // MARK: - Groups List Sheet (toolbar-accessed quick view)
+
+    private var groupsListSheet: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if viewModel.myGroups.isEmpty {
+                        VStack(spacing: 10) {
+                            Image(systemName: "person.3")
+                                .font(.system(size: 40))
+                                .foregroundStyle(.secondary)
+                            Text("No private groups yet")
+                                .font(.headline)
+                            Text("Create or join a group to track standings against friends.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 32)
+                    } else {
+                        ForEach(viewModel.myGroups) { group in
+                            NavigationLink {
+                                TennisBracketGroupDetailView(viewModel: viewModel, group: group)
+                            } label: {
+                                HStack {
+                                    Image(systemName: "person.3.fill")
+                                        .foregroundStyle(brandPurple)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(group.name)
+                                            .font(.subheadline.weight(.semibold))
+                                            .foregroundStyle(.primary)
+                                        Text("Code \(group.inviteCode)")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption)
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .padding(12)
+                                .background(.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                                .shadow(color: .black.opacity(0.04), radius: 2, y: 1)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
+                    HStack(spacing: 10) {
+                        Button {
+                            showGroupsList = false
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                showCreateGroup = true
+                            }
+                        } label: {
+                            Label("Create", systemImage: "plus.circle.fill")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                                .background(brandPurple.opacity(0.1))
+                                .foregroundStyle(brandPurple)
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+
+                        Button {
+                            showGroupsList = false
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                showJoinGroup = true
+                            }
+                        } label: {
+                            Label("Join", systemImage: "link.circle.fill")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                                .background(Color.blue.opacity(0.1))
+                                .foregroundStyle(.blue)
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+                    }
+                    .padding(.top, 8)
+                }
+                .padding(16)
+            }
+            .background(Color(.systemGroupedBackground))
+            .navigationTitle("Private Groups")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { showGroupsList = false }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 
     // MARK: - Grand Slam Selector
 
     private var grandSlamSelector: some View {
+        // VStack default alignment is `.center`, so each row HStack
+        // (naturally sized to fit its capsules) gets horizontally
+        // centered within the parent width. The previous ScrollView
+        // wrapper left the row left-aligned in the empty state, which
+        // looked unbalanced against the centered body content.
         VStack(spacing: 10) {
-            // Slam picker
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(GrandSlam.allCases) { slam in
-                        Button {
-                            if viewModel.selectedGrandSlam != slam {
-                                viewModel.selectedGrandSlam = slam
-                                viewModel.hasAttemptedLoad = false
-                                Task { await viewModel.loadTournament() }
-                            }
-                        } label: {
-                            Text(slam.shortName)
-                                .font(.caption.weight(.bold))
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 8)
-                                .background(viewModel.selectedGrandSlam == slam ? brandPurple : Color.gray.opacity(0.15))
-                                .foregroundStyle(viewModel.selectedGrandSlam == slam ? .white : .primary)
-                                .clipShape(Capsule())
+            HStack(spacing: 8) {
+                ForEach(GrandSlam.allCases) { slam in
+                    Button {
+                        if viewModel.selectedGrandSlam != slam {
+                            viewModel.selectedGrandSlam = slam
+                            viewModel.hasAttemptedLoad = false
+                            Task { await viewModel.loadTournament() }
                         }
+                    } label: {
+                        Text(slam.shortName)
+                            .font(.caption.weight(.bold))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(viewModel.selectedGrandSlam == slam ? brandPurple : Color.gray.opacity(0.15))
+                            .foregroundStyle(viewModel.selectedGrandSlam == slam ? .white : .primary)
+                            .clipShape(Capsule())
                     }
                 }
             }
 
-            // ATP / WTA toggle
             HStack(spacing: 8) {
                 ForEach(DrawType.allCases) { dt in
                     Button {
@@ -119,9 +243,9 @@ struct TennisBracketLobbyView: View {
                             .clipShape(Capsule())
                     }
                 }
-                Spacer()
             }
         }
+        .frame(maxWidth: .infinity)
     }
 
     // MARK: - Hero Card
@@ -689,9 +813,11 @@ struct TennisBracketLobbyView: View {
             Image(systemName: "tennisball")
                 .font(.system(size: 48))
                 .foregroundStyle(.secondary)
-            Text("Draw Not Yet Available")
+            Text("Get Ready for \(viewModel.selectedGrandSlam.displayName)")
                 .font(.title3.weight(.bold))
-            Text("The \(viewModel.selectedGrandSlam.displayName) \(viewModel.selectedDrawType.shortName) draw hasn't been released yet. Check back closer to the tournament.")
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+            Text("The \(viewModel.selectedDrawType.shortName) draw drops closer to the tournament — come back to pick every match.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

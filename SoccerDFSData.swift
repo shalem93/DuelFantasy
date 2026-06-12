@@ -30,6 +30,18 @@ enum SoccerLeague: String, Sendable {
         case .worldCup: return "wc-"
         }
     }
+
+    /// Substring matched against RG's slate `name` field to scope salary
+    /// and confirmed-starter lookups to this league only. RG names its
+    /// soccer slates with the competition in parens (e.g. "FIFA WC ESP
+    /// vs CPV (WC) ...", "Premier League ARS vs CHE (EPL)").
+    var rgSlateNameFilter: String {
+        switch self {
+        case .epl: return "(EPL)"
+        case .ucl: return "(UCL)"
+        case .worldCup: return "(WC)"
+        }
+    }
 }
 
 // MARK: - ESPN Soccer Scoreboard Codable Models
@@ -211,38 +223,51 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
             throw NSError(domain: "SoccerDFS", code: 2, userInfo: [NSLocalizedDescriptionKey: "No \(league.displayName) players available"])
         }
 
-        // 3b. Fetch confirmed starters AND recently active players in parallel
+        // 3b. Fetch starters (confirmed + ESPN-predicted) AND recently
+        // active players in parallel
         let teamIDs = teamRefs.map(\.id)
-        async let confirmedIDsTask = fetchConfirmedStarterIDs(events: events)
+        async let starterIDsTask = fetchStarterIDs(events: events)
         async let recentlyActiveIDsTask = fetchRecentlyActivePlayerIDs(teamIDs: teamIDs)
 
-        let confirmedIDs = await confirmedIDsTask
+        let (espnConfirmedIDs, espnPredictedIDs) = await starterIDsTask
         let recentlyActiveIDs = await recentlyActiveIDsTask
 
-        var markedPlayers: [DFSPlayer]
-        if !confirmedIDs.isEmpty {
-            markedPlayers = allPlayers.map { p in
-                var player = p
-                player.isConfirmedActive = confirmedIDs.contains(p.id)
-                if !recentlyActiveIDs.isEmpty {
-                    player.playedRecently = recentlyActiveIDs.contains(p.id)
-                }
-                return player
+        // RG's classic soccer slates carry `attributes.starting_lineup`
+        // (0/1) once XIs are announced — often before ESPN's
+        // `competitions[].competitors[].lineups` populates. Pull RG's set
+        // for THIS league only (filter by RG's slate name tag — "(WC)",
+        // "(EPL)", "(UCL)") so EPL-confirmed players don't leak into a
+        // World Cup slate and vice versa.
+        let rgStarterNames = await RotoGrindersSalaryProvider.shared.fetchSoccerConfirmedStarters(
+            nameContains: league.rgSlateNameFilter
+        )
+
+        // Confirmed = official XI (ESPN near kickoff, or RG's announced flag).
+        // Projected (`playedRecently`) prefers ESPN's PREDICTED XI when one
+        // exists for the player's match — that's an 11-man list per team —
+        // and falls back to recent-match starters otherwise.
+        let predictedAvailableGames: Set<String> = {
+            var gids = Set<String>()
+            for p in allPlayers where espnPredictedIDs.contains(p.id) {
+                if let gid = p.gameID { gids.insert(gid) }
             }
-            let starterCount = markedPlayers.filter { $0.isConfirmedActive }.count
-            print("[Soccer-DFS] Confirmed starters: \(starterCount)/\(markedPlayers.count) players marked from \(events.count) events")
-        } else {
-            // No lineup data available yet — keep all as unconfirmed
-            markedPlayers = allPlayers.map { p in
-                var player = p
-                player.isConfirmedActive = false
-                if !recentlyActiveIDs.isEmpty {
-                    player.playedRecently = recentlyActiveIDs.contains(p.id)
-                }
-                return player
+            return gids
+        }()
+        let markedPlayers: [DFSPlayer] = allPlayers.map { p in
+            var player = p
+            let espnSays = espnConfirmedIDs.contains(p.id)
+            let rgSays = rgStarterNames.contains(RotoGrindersSalaryProvider.normalizeName(p.name))
+            player.isConfirmedActive = espnSays || rgSays
+            if let gid = p.gameID, predictedAvailableGames.contains(gid) {
+                player.playedRecently = espnPredictedIDs.contains(p.id)
+            } else if !recentlyActiveIDs.isEmpty {
+                player.playedRecently = recentlyActiveIDs.contains(p.id)
             }
-            print("[Soccer-DFS] No confirmed lineups available yet — all \(markedPlayers.count) players unmarked")
+            return player
         }
+        let starterCount = markedPlayers.filter { $0.isConfirmedActive }.count
+        let projectedCount = markedPlayers.filter { $0.playedRecently && !$0.isConfirmedActive }.count
+        print("[Soccer-DFS] Starters: \(starterCount) confirmed (ESPN=\(espnConfirmedIDs.count), RG=\(rgStarterNames.count)), \(projectedCount) projected (predicted XI=\(espnPredictedIDs.count), recent=\(recentlyActiveIDs.count))")
 
         // 4. Build included games
         let includedGames: [DFSSlateGame] = events.compactMap { event in
@@ -263,7 +288,52 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
         let slateDate = parseESPNDate(events.first?.date ?? "") ?? Date()
         let tournamentID = "\(league.tournamentIDPrefix)\(dateKey(for: slateDate))"
         let isSingleGame = includedGames.count == 1
-        let sortedPlayers = markedPlayers.sorted(by: { $0.salary > $1.salary })
+
+        // Phase 1: pull RG LineupHQ main-slate DK salaries for THIS league
+        // only. Previously we merged across every soccer slate today,
+        // which meant EPL/INTL prices could leak into a World Cup pool
+        // when names collided. Using the per-league filter scopes the
+        // lookup to slates whose RG name contains the tag (e.g. "(WC)").
+        let socClassicSalaries = await RotoGrindersSalaryProvider.shared.fetchClassicSalariesFromMaster(
+            sport: "soc",
+            nameContains: league.rgSlateNameFilter
+        )
+        let playersWithRealSalaries: [DFSPlayer]
+        if !socClassicSalaries.isEmpty {
+            var applied = 0
+            playersWithRealSalaries = markedPlayers.map { player in
+                guard let realSalary = RotoGrindersSalaryProvider.lookupSalary(espnName: player.name, in: socClassicSalaries) else {
+                    return player
+                }
+                applied += 1
+                var updated = DFSPlayer(
+                    id: player.id, name: player.name, team: player.team,
+                    position: player.position, salary: realSalary,
+                    projectedPoints: player.projectedPoints,
+                    gameID: player.gameID, injuryStatus: player.injuryStatus
+                )
+                updated.isConfirmedActive = player.isConfirmedActive
+                updated.playedRecently = player.playedRecently
+                return updated
+            }
+            print("[Soccer-DFS] LineupHQ applied: \(applied)/\(markedPlayers.count) players matched DK prices")
+        } else {
+            playersWithRealSalaries = markedPlayers
+            print("[Soccer-DFS] No LineupHQ soccer data — keeping synthetic salaries")
+        }
+        let sortedPlayers = playersWithRealSalaries.sorted(by: { $0.salary > $1.salary })
+
+        // Phase 2: pull RG's per-match showdown salaries for THIS league.
+        // Match by the slate's team abbreviations (RG names showdown slates
+        // with the matchup, e.g. "(MEX vs RSA)", not the league tag — the
+        // name filter alone never matched them); the league name filter
+        // stays as a fallback for any oddly-tagged slates.
+        let slateTeams = Set(includedGames.flatMap { [$0.awayTeam.uppercased(), $0.homeTeam.uppercased()] })
+        let socShowdownSalaries = await RotoGrindersSalaryProvider.shared.fetchAllShowdownSalaries(
+            sport: "soc",
+            nameContains: league.rgSlateNameFilter,
+            teamFilter: slateTeams.isEmpty ? nil : slateTeams
+        )
 
         let (tournaments, sgPlayers) = buildMultiTournamentSlate(
             baseID: tournamentID,
@@ -273,7 +343,8 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
             mainRosterSlots: ["GK", "DEF", "DEF", "MID", "MID", "FWD", "FWD", "FLEX"],
             isSingleGameSlate: isSingleGame,
             includedGames: includedGames,
-            mainPlayers: sortedPlayers
+            mainPlayers: sortedPlayers,
+            showdownSalaries: socShowdownSalaries.isEmpty ? nil : socShowdownSalaries
         )
 
         let slate = DFSSlate(
@@ -291,18 +362,30 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
     /// Fetches event summary for each game and extracts confirmed starter athlete IDs.
     /// ESPN populates the "rosters" array with "starter": true once lineups are announced
     /// (typically ~1 hour before kickoff). Returns player IDs in the format "epl-{athleteID}".
-    private func fetchConfirmedStarterIDs(events: [SoccerScoreboardEvent]) async -> Set<String> {
-        await withTaskGroup(of: Set<String>.self) { group in
+    /// ESPN starter IDs split by trust level. ESPN publishes a PREDICTED XI
+    /// (same `starter: true` flag) hours or a day before kickoff and swaps in
+    /// the official lineup ~60-75 minutes out. Treating the early flags as
+    /// confirmed marked the wrong players "CS" — so starters of events within
+    /// 75 minutes of kickoff (or already underway) are CONFIRMED, anything
+    /// earlier is PREDICTED and only feeds the projected-starter tier.
+    private func fetchStarterIDs(events: [SoccerScoreboardEvent]) async -> (confirmed: Set<String>, predicted: Set<String>) {
+        await withTaskGroup(of: (Bool, Set<String>).self) { group in
             for event in events {
+                let state = event.status.type.state
+                let isNearKickoff: Bool = {
+                    if state == "in" || state == "post" { return true }
+                    guard let start = self.parseESPNDate(event.date) else { return false }
+                    return start.timeIntervalSinceNow < 75 * 60
+                }()
                 group.addTask {
                     guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/soccer/\(self.league.rawValue)/summary?event=\(event.id)") else {
-                        return []
+                        return (isNearKickoff, [])
                     }
                     guard let (data, response) = try? await self.session.data(from: url),
                           let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
                           let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                           let rostersArr = payload["rosters"] as? [[String: Any]] else {
-                        return []
+                        return (isNearKickoff, [])
                     }
 
                     var ids = Set<String>()
@@ -310,22 +393,26 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
                         guard let entries = rosterBlock["roster"] as? [[String: Any]] else { continue }
                         for entry in entries {
                             let isStarter = entry["starter"] as? Bool ?? false
-                            let subbedIn = entry["subbedIn"] as? Bool ?? false
+                            // Subs only count once the match is live/final
+                            // (they really played); pre-match a subbedIn flag
+                            // is meaningless noise.
+                            let subbedIn = (state == "in" || state == "post") && (entry["subbedIn"] as? Bool ?? false)
                             guard isStarter || subbedIn else { continue }
                             guard let athleteDict = entry["athlete"] as? [String: Any],
                                   let athleteID = athleteDict["id"] as? String else { continue }
                             ids.insert("\(self.league.playerIDPrefix)\(athleteID)")
                         }
                     }
-                    return ids
+                    return (isNearKickoff, ids)
                 }
             }
 
-            var allIDs = Set<String>()
-            for await ids in group {
-                allIDs.formUnion(ids)
+            var confirmed = Set<String>()
+            var predicted = Set<String>()
+            for await (near, ids) in group {
+                if near { confirmed.formUnion(ids) } else { predicted.formUnion(ids) }
             }
-            return allIDs
+            return (confirmed, predicted)
         }
     }
 
@@ -626,49 +713,69 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
     /// as fetchConfirmedStarterIDs but for past matches.
     func fetchRecentlyActivePlayerIDs(teamIDs: [String]) async -> Set<String> {
         let calendar = Calendar.current
-        // Fetch scoreboards from the past 10 days to find recent completed matches
-        let datesToCheck = (-10...(-1)).compactMap { calendar.date(byAdding: .day, value: $0, to: Date()) }
+        // Fetch scoreboards from recent days to find completed matches. The
+        // World Cup looks back further AND also scans international
+        // friendlies — on matchday 1 nobody has played a `fifa.world` game
+        // yet, so the pre-tournament warm-ups are the only recency signal
+        // separating likely starters from deep squad players.
+        let lookbackDays = league == .worldCup ? 14 : 10
+        let slugs: [String] = league == .worldCup
+            ? [league.rawValue, "fifa.friendly"]
+            : [league.rawValue]
+        let datesToCheck = (-lookbackDays...(-1)).compactMap { calendar.date(byAdding: .day, value: $0, to: Date()) }
         let dateStrings = datesToCheck.map { dateKey(for: $0) }
 
-        // Fetch all recent scoreboards in parallel (batch by 3-day chunks to reduce calls)
-        let recentScoreboards: [SoccerScoreboardResponse] = await withTaskGroup(of: SoccerScoreboardResponse?.self) { group in
-            for dk in dateStrings {
-                group.addTask {
-                    guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/soccer/\(self.league.rawValue)/scoreboard?dates=\(dk)") else { return nil }
-                    guard let (data, response) = try? await self.session.data(from: url),
-                          let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
-                    return try? JSONDecoder().decode(SoccerScoreboardResponse.self, from: data)
+        // Fetch all recent scoreboards in parallel, tagged with their slug so
+        // the per-event summary fetch below hits the right league endpoint.
+        let recentScoreboards: [(slug: String, sb: SoccerScoreboardResponse)] = await withTaskGroup(of: (String, SoccerScoreboardResponse?).self) { group in
+            for slug in slugs {
+                for dk in dateStrings {
+                    group.addTask {
+                        guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/soccer/\(slug)/scoreboard?dates=\(dk)") else { return (slug, nil) }
+                        guard let (data, response) = try? await self.session.data(from: url),
+                              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return (slug, nil) }
+                        return (slug, try? JSONDecoder().decode(SoccerScoreboardResponse.self, from: data))
+                    }
                 }
             }
-            var results: [SoccerScoreboardResponse] = []
-            for await result in group {
-                if let result { results.append(result) }
+            var results: [(String, SoccerScoreboardResponse)] = []
+            for await (slug, result) in group {
+                if let result { results.append((slug, result)) }
             }
             return results
         }
 
-        // Find completed events involving tonight's teams
+        // Find each tonight-team's MOST RECENT completed match. Scanning every
+        // match in the window and counting subs marked virtually a whole
+        // national-team squad as "recently active" (coaches rotate across two
+        // friendlies), which made the projected-starter badge meaningless.
         let teamIDSet = Set(teamIDs)
-        var recentEventIDs: Set<String> = []
-        for sb in recentScoreboards {
+        var latestEventByTeam: [String: (slug: String, eventID: String, date: Date)] = [:]
+        for (slug, sb) in recentScoreboards {
             for event in sb.events {
                 let state = event.status.type.state
                 guard state == "post" else { continue }
                 guard let comp = event.competitions.first else { continue }
-                let eventTeamIDs = comp.competitors.map { $0.id }
-                if eventTeamIDs.contains(where: { teamIDSet.contains($0) }) {
-                    recentEventIDs.insert(event.id)
+                guard let eventDate = parseESPNDate(event.date) else { continue }
+                for competitor in comp.competitors where teamIDSet.contains(competitor.id) {
+                    if let existing = latestEventByTeam[competitor.id], existing.date >= eventDate { continue }
+                    latestEventByTeam[competitor.id] = (slug, event.id, eventDate)
                 }
             }
         }
+        var recentEvents: [(slug: String, eventID: String)] = []
+        var seenEventIDs = Set<String>()
+        for (_, entry) in latestEventByTeam where seenEventIDs.insert(entry.eventID).inserted {
+            recentEvents.append((entry.slug, entry.eventID))
+        }
 
-        guard !recentEventIDs.isEmpty else { return [] }
+        guard !recentEvents.isEmpty else { return [] }
 
         // Fetch rosters from each recent event to find who played
         let activeIDs: Set<String> = await withTaskGroup(of: Set<String>.self) { group in
-            for eventID in recentEventIDs {
+            for (slug, eventID) in recentEvents {
                 group.addTask {
-                    guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/soccer/\(self.league.rawValue)/summary?event=\(eventID)") else {
+                    guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/soccer/\(slug)/summary?event=\(eventID)") else {
                         return []
                     }
                     guard let (data, response) = try? await self.session.data(from: url),
@@ -682,9 +789,12 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
                     for rosterBlock in rostersArr {
                         guard let entries = rosterBlock["roster"] as? [[String: Any]] else { continue }
                         for entry in entries {
+                            // STARTERS ONLY. Counting subbedIn players too
+                            // flagged ~20 of 26 squad players as "projected"
+                            // — being a late sub in a friendly isn't a
+                            // starting signal.
                             let isStarter = entry["starter"] as? Bool ?? false
-                            let subbedIn = entry["subbedIn"] as? Bool ?? false
-                            guard isStarter || subbedIn else { continue }
+                            guard isStarter else { continue }
                             guard let athleteDict = entry["athlete"] as? [String: Any],
                                   let athleteID = athleteDict["id"] as? String else { continue }
                             // Store with league prefix to match DFSPlayer.id format
@@ -701,7 +811,7 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
             return combined
         }
 
-        print("[Soccer-DFS] Found \(activeIDs.count) recently active players from \(recentEventIDs.count) recent matches (last 10 days)")
+        print("[Soccer-DFS] Found \(activeIDs.count) recently active players from \(recentEvents.count) recent matches (last \(lookbackDays) days, slugs: \(slugs.joined(separator: ",")))")
         return activeIDs
     }
 

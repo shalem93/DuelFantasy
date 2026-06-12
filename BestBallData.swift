@@ -41,9 +41,28 @@ struct BestBallLeague: Identifiable, Equatable, Hashable {
     var batterSlots: Int          // MLB: scoring batter/UTIL count; NBA/NFL: ignored
     var scoringMode: BestBallScoringMode
 
+    // NFL starting-lineup config (only relevant when sport == "NFL").
+    // Defaults match the prior hardcoded lineup; can be edited by the
+    // commissioner while the league status is still "open".
+    var nflQbStarters: Int = 1
+    var nflRbStarters: Int = 2
+    var nflWrStarters: Int = 2
+    var nflTeStarters: Int = 1
+    var nflFlexStarters: Int = 2
+    // Superflex slots accept QB/RB/WR/TE — popular best-ball variant
+    // where you can start a second QB. Defaults to 0 so existing leagues
+    // remain standard. Setting this > 0 also raises the per-team QB cap
+    // in the bot drafter so it doesn't run out of QBs.
+    var nflSflexStarters: Int = 0
+
     var memberCount: Int { draftOrder.count }
     var isFull: Bool { draftOrder.count >= maxMembers }
     var isDingersOnly: Bool { scoringMode == .dingersOnly }
+
+    /// Total starting-lineup size for NFL (sum of all per-position
+    /// counts). Used as the minimum allowed roster size when editing
+    /// settings.
+    var nflTotalStarters: Int { nflQbStarters + nflRbStarters + nflWrStarters + nflTeStarters + nflFlexStarters + nflSflexStarters }
 }
 
 struct BestBallMember: Identifiable, Equatable, Hashable {
@@ -188,7 +207,7 @@ struct BestBallPositionRequirement {
 }
 
 enum BestBallLineupConfig {
-    static func requirements(for sport: String, pitcherSlots: Int = 2, batterSlots: Int = 6, scoringMode: BestBallScoringMode = .normal) -> (starters: Int, constraints: [BestBallPositionRequirement]) {
+    static func requirements(for sport: String, pitcherSlots: Int = 2, batterSlots: Int = 6, scoringMode: BestBallScoringMode = .normal, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0) -> (starters: Int, constraints: [BestBallPositionRequirement]) {
         switch sport {
         case "NBA":
             // For NBA, total starters = pitcherSlots + batterSlots (reused as generic starters)
@@ -213,25 +232,51 @@ enum BestBallLineupConfig {
                 BestBallPositionRequirement(label: "UTIL", count: batterSlots, eligible: ["C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "OF", "DH"]),
             ])
         case "NFL":
-            return (8, [
-                BestBallPositionRequirement(label: "QB",    count: 1, eligible: ["QB"]),
-                BestBallPositionRequirement(label: "RB",    count: 2, eligible: ["RB"]),
-                BestBallPositionRequirement(label: "WR",    count: 2, eligible: ["WR"]),
-                BestBallPositionRequirement(label: "TE",    count: 1, eligible: ["TE"]),
-                BestBallPositionRequirement(label: "FLEX",  count: 1, eligible: ["RB", "WR", "TE"]),
-                BestBallPositionRequirement(label: "SFLEX", count: 1, eligible: ["QB", "RB", "WR", "TE"]),
-            ])
+            // Commissioner-configurable lineup. Standard FLEX = RB/WR/TE
+            // (no QB); Superflex (SFLEX) = QB/RB/WR/TE for leagues that
+            // want a second-QB-eligible flex slot.
+            var constraints: [BestBallPositionRequirement] = []
+            if nflQB > 0 { constraints.append(BestBallPositionRequirement(label: "QB", count: nflQB, eligible: ["QB"])) }
+            if nflRB > 0 { constraints.append(BestBallPositionRequirement(label: "RB", count: nflRB, eligible: ["RB"])) }
+            if nflWR > 0 { constraints.append(BestBallPositionRequirement(label: "WR", count: nflWR, eligible: ["WR"])) }
+            if nflTE > 0 { constraints.append(BestBallPositionRequirement(label: "TE", count: nflTE, eligible: ["TE"])) }
+            if nflFLEX > 0 { constraints.append(BestBallPositionRequirement(label: "FLEX", count: nflFLEX, eligible: ["RB", "WR", "TE"])) }
+            if nflSFLEX > 0 { constraints.append(BestBallPositionRequirement(label: "SFLEX", count: nflSFLEX, eligible: ["QB", "RB", "WR", "TE"])) }
+            return (nflQB + nflRB + nflWR + nflTE + nflFLEX + nflSFLEX, constraints)
         default:
             return (8, [])
         }
     }
 
+    /// Convenience overload that pulls NFL config straight off the
+    /// league object so callers don't have to hand-thread five Ints.
+    static func requirements(for league: BestBallLeague) -> (starters: Int, constraints: [BestBallPositionRequirement]) {
+        requirements(
+            for: league.sport,
+            pitcherSlots: league.pitcherSlots,
+            batterSlots: league.batterSlots,
+            scoringMode: league.scoringMode,
+            nflQB: league.nflQbStarters,
+            nflRB: league.nflRbStarters,
+            nflWR: league.nflWrStarters,
+            nflTE: league.nflTeStarters,
+            nflFLEX: league.nflFlexStarters,
+            nflSFLEX: league.nflSflexStarters
+        )
+    }
+
     /// Minimum positions a roster must have by end of draft.
-    static func draftMinimums(for sport: String, pitcherSlots: Int = 2, batterSlots: Int = 6) -> [String: Int] {
+    static func draftMinimums(for sport: String, pitcherSlots: Int = 2, batterSlots: Int = 6, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1) -> [String: Int] {
         switch sport {
         case "NBA": return ["PG": 1, "SG": 1, "SF": 1, "PF": 1, "C": 1]
         case "MLB": return ["SP": pitcherSlots]  // Must fill pitcher starter slots; batters handled by balanced pick logic
-        case "NFL": return ["QB": 1, "RB": 2, "WR": 2, "TE": 1]
+        case "NFL":
+            var mins: [String: Int] = [:]
+            if nflQB > 0 { mins["QB"] = nflQB }
+            if nflRB > 0 { mins["RB"] = nflRB }
+            if nflWR > 0 { mins["WR"] = nflWR }
+            if nflTE > 0 { mins["TE"] = nflTE }
+            return mins
         default: return [:]
         }
     }
@@ -250,6 +295,57 @@ enum BestBallLineupConfig {
     /// Whether a position string represents a pitcher (RP excluded from best ball drafts).
     static func isPitcher(_ position: String) -> Bool {
         ["SP", "P"].contains(position)
+    }
+
+    /// Assigns a set of scoring (starter) player IDs to ordered roster slots.
+    /// Position-specific constraints (QB/RB/WR/TE) get filled first by the
+    /// highest-scoring eligible player, then FLEX picks up whatever's left.
+    /// Returns slots in the canonical lineup order — `[("QB", id), ("RB", id),
+    /// ("RB", id), ("WR", id), ("WR", id), ("TE", id), ("FLEX", id), ("FLEX", id)]`
+    /// for the default NFL config — which is what both the matchup and roster
+    /// UIs render side-by-side.
+    static func assignStartersToSlots(
+        scoringIDs: [String],
+        positions: [String: String],
+        points: [String: Double],
+        constraints: [BestBallPositionRequirement]
+    ) -> [(label: String, playerID: String)] {
+        var remaining = scoringIDs.sorted { (points[$0] ?? 0) > (points[$1] ?? 0) }
+        var result: [(label: String, playerID: String)] = []
+
+        // Two passes: position-specific constraints first (so a top WR
+        // doesn't get stolen by a FLEX/SFLEX slot), then flex absorbs
+        // the rest. SFLEX (Superflex, QB-eligible) is also deferred so
+        // a dedicated QB slot fills before the Superflex grabs a QB.
+        let flexLabels: Set<String> = ["FLEX", "SFLEX"]
+        let primary = constraints.filter { !flexLabels.contains($0.label) }
+        let flex = constraints.filter { flexLabels.contains($0.label) }
+
+        for constraint in primary {
+            for _ in 0..<constraint.count {
+                if let idx = remaining.firstIndex(where: {
+                    if let pos = positions[$0] { return constraint.eligible.contains(pos) }
+                    return false
+                }) {
+                    result.append((label: constraint.label, playerID: remaining.remove(at: idx)))
+                }
+            }
+        }
+        for constraint in flex {
+            for _ in 0..<constraint.count {
+                if let idx = remaining.firstIndex(where: {
+                    if let pos = positions[$0] { return constraint.eligible.contains(pos) }
+                    return false
+                }) {
+                    result.append((label: constraint.label, playerID: remaining.remove(at: idx)))
+                } else if !remaining.isEmpty {
+                    // No eligible match — fall back to next-best by points so
+                    // the slot still renders rather than leaving a blank.
+                    result.append((label: constraint.label, playerID: remaining.removeFirst()))
+                }
+            }
+        }
+        return result
     }
 
     /// Human-readable scoring formula blurb for a given sport.
@@ -332,9 +428,20 @@ enum BestBallScoringEngine {
         scoringSlots: Int,
         pitcherSlots: Int = 2,
         batterSlots: Int = 6,
-        scoringMode: BestBallScoringMode = .normal
+        scoringMode: BestBallScoringMode = .normal,
+        nflQB: Int = 1,
+        nflRB: Int = 2,
+        nflWR: Int = 2,
+        nflTE: Int = 1,
+        nflFLEX: Int = 2,
+        nflSFLEX: Int = 0
     ) -> (total: Double, scoringIDs: [String]) {
-        let (starters, constraints) = BestBallLineupConfig.requirements(for: sport, pitcherSlots: pitcherSlots, batterSlots: batterSlots, scoringMode: scoringMode)
+        let (starters, constraints) = BestBallLineupConfig.requirements(
+            for: sport,
+            pitcherSlots: pitcherSlots, batterSlots: batterSlots,
+            scoringMode: scoringMode,
+            nflQB: nflQB, nflRB: nflRB, nflWR: nflWR, nflTE: nflTE, nflFLEX: nflFLEX, nflSFLEX: nflSFLEX
+        )
         let candidates = playerPoints.sorted { $0.value > $1.value }
 
         guard !constraints.isEmpty, candidates.count >= starters else {
@@ -507,7 +614,13 @@ enum BestBallBotDrafter {
         rosterSize: Int,
         scoringMode: BestBallScoringMode = .normal,
         pitcherSlots: Int = 2,
-        batterSlots: Int = 6
+        batterSlots: Int = 6,
+        nflQB: Int = 1,
+        nflRB: Int = 2,
+        nflWR: Int = 2,
+        nflTE: Int = 1,
+        nflFLEX: Int = 2,
+        nflSFLEX: Int = 0
     ) -> BestBallPlayer? {
         // Filter out pitchers for dingers-only leagues
         var candidates = available
@@ -515,7 +628,12 @@ enum BestBallBotDrafter {
             candidates = candidates.filter { !BestBallLineupConfig.isPitcher($0.position) }
         }
 
-        let minimums = BestBallLineupConfig.draftMinimums(for: sport, pitcherSlots: pitcherSlots, batterSlots: batterSlots)
+        let minimums = BestBallLineupConfig.draftMinimums(
+            for: sport,
+            pitcherSlots: pitcherSlots,
+            batterSlots: batterSlots,
+            nflQB: nflQB, nflRB: nflRB, nflWR: nflWR, nflTE: nflTE
+        )
         let pickedPositions = Dictionary(grouping: existingRoster, by: \.playerPosition)
             .mapValues { $0.count }
         let remainingPicks = rosterSize - existingRoster.count
@@ -572,6 +690,45 @@ enum BestBallBotDrafter {
             if let forced = sorted.first(where: { $0.position == mustFillPos }) {
                 return forced
             }
+        }
+
+        // NFL-specific draft logic with config-aware position caps. The
+        // generic "< 3 of same position" fallback below is fine for MLB
+        // (lots of position flexibility) and NBA, but for NFL in a 1-QB
+        // league it lets a bot stack a 3rd QB on its bench instead of
+        // grabbing the next-best RB/WR. Two phases:
+        //   1. Fill any unmet starter minimum first.
+        //   2. Pick the best available respecting per-position caps.
+        if sport == "NFL" {
+            // Phase 1: are we still missing starters?
+            if !neededPositions.isEmpty {
+                // Pick the highest-ranked player at ANY unmet position.
+                if let forced = sorted.first(where: { neededPositions.contains($0.position) }) {
+                    return forced
+                }
+            }
+            // Phase 2: useful upper bounds per position, given the
+            // configured starting lineup. Standard FLEX is RB/WR/TE
+            // only — QBs are only useful past their dedicated slot if
+            // the league has Superflex slots (which DO accept QB).
+            // Defaults err on the generous side so bots still draft
+            // depth at the skill positions.
+            let qbCap = max(nflQB, nflQB + nflSFLEX + (nflSFLEX > 0 ? 1 : 0))
+            let rbCap = max(nflRB + 2, nflRB + nflFLEX + nflSFLEX + 1)
+            let wrCap = max(nflWR + 2, nflWR + nflFLEX + nflSFLEX + 1)
+            let teCap = max(nflTE + 1, nflTE + (nflFLEX > 0 || nflSFLEX > 0 ? 1 : 0))
+            let positionCaps: [String: Int] = [
+                "QB": qbCap, "RB": rbCap, "WR": wrCap, "TE": teCap
+            ]
+            if let pick = sorted.first(where: {
+                let cap = positionCaps[$0.position] ?? Int.max
+                return (pickedPositions[$0.position] ?? 0) < cap
+            }) {
+                return pick
+            }
+            // Hard fallback (shouldn't normally reach): just take the
+            // best available.
+            return sorted.first
         }
 
         // Prefer balanced approach: underrepresented positions (< 3)
@@ -699,6 +856,16 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
 
             // Skip relief pitchers for MLB — they aren't useful in best ball
             if sportName == "MLB" && positionAbbr == "RP" { continue }
+            // Skip non-skill positions for NFL — the lineup config has
+            // no K / DEF / OL slot, so they'd just clutter the draft
+            // board. Without this, kickers dominate the top of the
+            // projection ranking because their raw stat totals (FG made,
+            // points scored, etc.) parse out higher than any skill
+            // player's per-game fantasy projection.
+            if sportName == "NFL" {
+                let skillPositions: Set<String> = ["QB", "RB", "FB", "WR", "TE"]
+                if !skillPositions.contains(positionAbbr) { continue }
+            }
 
             let projection: Double
             if let leagueProj = cache.leagueProjections[id] {
@@ -773,6 +940,14 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
 
         if sportName == "NBA" {
             parseNBALeaders(categories: categories)
+        } else if sportName == "NFL" {
+            // NFL: SUM each category's fantasy-point contribution across
+            // the player's appearances in different leaderboards. The
+            // earlier "first category wins" logic produced nonsense
+            // rankings (a kicker's points-scored total beat a QB's
+            // passing-yards total, etc.). Now Drake Maye gets credit for
+            // his passing yards AND TDs AND rushing where applicable.
+            parseNFLLeaders(categories: categories)
         } else {
             for category in categories {
                 let categoryName = category["name"] as? String ?? ""
@@ -793,6 +968,67 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
                     }
                 }
             }
+        }
+    }
+
+    /// Parse NFL leaders by category. ESPN's leaders endpoint groups by
+    /// stat category (Passing Yards, Passing TDs, Receiving Yards, etc.)
+    /// — convert each category's value into its fantasy-point contribution
+    /// using our scoring rules, then accumulate per athlete. Output is
+    /// per-game (season total / 17).
+    private func parseNFLLeaders(categories: [[String: Any]]) {
+        // ESPN sends category identifiers BOTH as `name` (camelCase like
+        // "passingYards") AND `displayName` ("Passing Yards"). Normalize
+        // both by lowercasing and stripping whitespace so a single set
+        // of substring checks matches either format. The earlier code
+        // used `c.contains("passing yards")` against the raw lowercase
+        // — which silently never matched "passingyards", so a star WR
+        // got credit for ONE category at most and projected at ~7 PPG.
+        func pointsPerUnit(for rawCategory: String) -> Double? {
+            let c = rawCategory.lowercased().replacingOccurrences(of: " ", with: "")
+            // More-specific keys first so "passingtouchdowns" doesn't
+            // collide with "passing" / "touchdowns" alone.
+            if c.contains("passingtouchdowns") || c.contains("passingtd") { return 4.0 }
+            if c.contains("passingyards") { return 0.04 }
+            if c.contains("interceptionsthrown") || c == "interceptions" { return -1.0 }
+            if c.contains("rushingtouchdowns") || c.contains("rushingtd") { return 6.0 }
+            if c.contains("rushingyards") { return 0.1 }
+            if c.contains("receivingtouchdowns") || c.contains("receivingtd") { return 6.0 }
+            if c.contains("receivingyards") { return 0.1 }
+            if c.contains("receptions") { return 1.0 }
+            if c.contains("fumbleslost") { return -2.0 }
+            return nil
+        }
+
+        var totals: [String: Double] = [:]
+        for category in categories {
+            // Try BOTH name and displayName — some ESPN deployments only
+            // populate one of them. The matcher tolerates whichever is
+            // available.
+            let nameRaw = (category["name"] as? String) ?? ""
+            let displayName = (category["displayName"] as? String) ?? ""
+            let multiplier = pointsPerUnit(for: nameRaw) ?? pointsPerUnit(for: displayName)
+            guard let multiplier else { continue }
+            guard let leaders = category["leaders"] as? [[String: Any]] else { continue }
+            for leader in leaders {
+                guard let athleteRef = leader["athlete"] as? [String: Any],
+                      let refURL = athleteRef["$ref"] as? String,
+                      let displayValue = leader["displayValue"] as? String else { continue }
+                let pathParts = refURL.split(separator: "?").first?.split(separator: "/") ?? []
+                guard let athleteID = pathParts.last.map(String.init) else { continue }
+                // ESPN occasionally returns formatted numbers like "5,409".
+                let cleaned = displayValue
+                    .trimmingCharacters(in: .whitespaces)
+                    .replacingOccurrences(of: ",", with: "")
+                guard let value = Double(cleaned) else { continue }
+                totals[athleteID, default: 0] += value * multiplier
+            }
+        }
+        // Convert season totals → per-game (17 game season). Floor at 0 so
+        // a player whose only ESPN-listed stat is INTs doesn't end up
+        // ranking below true zero-projection role players.
+        for (id, season) in totals where season > 0 {
+            cache.leagueProjections[id] = season / 17.0
         }
     }
 
@@ -1063,7 +1299,14 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
         return value / 17.0
     }
 
-    /// Determine the ESPN season year for the current sport.
+    /// Determine the ESPN season year for the current sport. For NFL,
+    /// "the season the league will play in" — which during the Mar–Jun
+    /// off-season window is the upcoming Sept kickoff (year `year`), not
+    /// last fall's season (which already ended at the Super Bowl). The
+    /// caller (fetchLeagueWideProjections) also pulls `primarySeason - 1`
+    /// as a fallback, so if ESPN hasn't published current-year leaders
+    /// yet we still get useful projections from the most recent completed
+    /// season — without that fallback being treated as the canonical one.
     private func espnSeasonYear(for sport: String) -> Int {
         let calendar = Calendar.current
         let year = calendar.component(.year, from: Date())
@@ -1072,7 +1315,9 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
         case "NBA":
             return month >= 7 ? year + 1 : year
         case "NFL":
-            return month >= 7 ? year : year - 1
+            if month >= 7 { return year }
+            if month <= 2 { return year - 1 }
+            return year                       // Mar–Jun off-season → upcoming season
         case "MLB":
             return month >= 3 ? year : year - 1
         default:
@@ -1547,12 +1792,36 @@ enum BestBallSeasonHelper {
         }
     }
 
-    static func currentSeason() -> String {
+    /// Season label for a Best Ball league created today. Pivots forward
+    /// in the off-season window so a league created in (e.g.) June 2026
+    /// is labeled "2026-27" — the upcoming season — not the just-ended
+    /// 2025-26. Sport-aware because the off-season month windows differ.
+    static func currentSeason(sport: String = "MLB") -> String {
         let year = Calendar.current.component(.year, from: Date())
         let month = Calendar.current.component(.month, from: Date())
-        if month >= 7 {
+        switch sport {
+        case "NFL":
+            // Sep–Dec: current `year` season. Jan–Feb: prior season
+            // playoffs (still labeled with last fall's start year).
+            // Mar–Aug: pivot to upcoming `year` kickoff.
+            if month >= 7 || (month >= 3 && month <= 6) {
+                return "\(year)-\(String(year + 1).suffix(2))"
+            } else if month <= 2 {
+                return "\(year - 1)-\(String(year).suffix(2))"
+            }
             return "\(year)-\(String(year + 1).suffix(2))"
-        } else {
+        case "NBA":
+            // Oct–Jun: same logic as before. Jul–Sep is off-season →
+            // upcoming season starts in Oct of current year.
+            if month >= 7 {
+                return "\(year)-\(String(year + 1).suffix(2))"
+            }
+            return "\(year - 1)-\(String(year).suffix(2))"
+        default:
+            // MLB and other Mar–Sep sports — current year is the season.
+            if month >= 7 {
+                return "\(year)-\(String(year + 1).suffix(2))"
+            }
             return "\(year - 1)-\(String(year).suffix(2))"
         }
     }
@@ -1606,8 +1875,21 @@ enum BestBallSeasonHelper {
             let raw = calendar.date(from: DateComponents(year: startYear, month: 3, day: 25)) ?? Date()
             return calendar.startOfDay(for: raw)
         case "NFL":
-            // NFL runs Sep→Feb. If before July, the season started last September.
-            let startYear = month < 7 ? year - 1 : year
+            // NFL runs Sep→Feb. From March through August the season has
+            // wrapped (Super Bowl is early February) and the "current"
+            // season should pivot forward to the upcoming September
+            // kickoff. Otherwise off-season leagues would score against
+            // last year's box scores — exactly the bug a user saw when
+            // a June-created NFL Best Ball graded itself against the
+            // prior season's Week 18.
+            let startYear: Int
+            if month >= 7 {
+                startYear = year                  // Jul–Dec: this year's season
+            } else if month <= 2 {
+                startYear = year - 1              // Jan–Feb: last year's playoffs
+            } else {
+                startYear = year                  // Mar–Jun: upcoming season starts Sep `year`
+            }
             return thursdayOnOrAfter(calendar.date(from: DateComponents(year: startYear, month: 9, day: 4)) ?? Date(), calendar: calendar)
         default:
             return Date()
@@ -1634,6 +1916,11 @@ enum BestBallSeasonHelper {
 
         let (start, _) = weekDateRange(sport: sport, week: 1)
         let days = calendar.dateComponents([.day], from: start, to: today).day ?? 0
+        // If we're before the season's Week 1 (off-season period after
+        // the prior season ended), days will be negative; floor at week
+        // 1 so the UI shows "Week 1 of N" until kickoff instead of a
+        // negative or huge-week number.
+        if days < 0 { return 1 }
         return max(1, (days / 7) + 1)
     }
 

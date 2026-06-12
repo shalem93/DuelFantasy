@@ -118,6 +118,8 @@ struct GolfPlayerDetailView: View {
                     HStack(spacing: 6) {
                         Image(systemName: isSelected ? "checkmark.circle.fill" : "plus.circle")
                         Text(isSelected ? "Selected" : "Add")
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                     .font(.subheadline.weight(.semibold))
                     .padding(.horizontal, 16)
@@ -126,6 +128,7 @@ struct GolfPlayerDetailView: View {
                     .foregroundStyle(isSelected ? .white : .primary)
                     .clipShape(Capsule())
                 }
+                .fixedSize(horizontal: true, vertical: false)
             }
         }
         .padding(20)

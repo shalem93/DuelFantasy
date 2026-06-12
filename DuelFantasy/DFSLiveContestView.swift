@@ -17,6 +17,14 @@ struct DFSLiveContestView: View {
         viewModel.sport == "PGA"
     }
 
+    /// True iff at least one of the contest's games was reported by ESPN
+    /// as postponed/suspended/canceled. Used to surface a "PPD" badge and
+    /// a "PUSH" status pill instead of stranding the contest in shimmer.
+    private var isPostponed: Bool {
+        guard !viewModel.liveGameInfo.isEmpty else { return false }
+        return viewModel.liveGameInfo.values.contains(where: { $0.isPostponed })
+    }
+
     private var allGamesFinal: Bool {
         guard let tournament = viewModel.tournament else { return false }
         // Check if already settled locally
@@ -97,7 +105,15 @@ struct DFSLiveContestView: View {
     private var liveStatusHeader: some View {
         VStack(spacing: 14) {
             HStack {
-                if allGamesFinal {
+                if isPostponed {
+                    HStack(spacing: 6) {
+                        Image(systemName: "cloud.rain.fill")
+                            .foregroundStyle(.white)
+                        Text("PPD")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.white)
+                    }
+                } else if allGamesFinal {
                     HStack(spacing: 6) {
                         Image(systemName: "checkmark.seal.fill")
                             .foregroundStyle(.white)
@@ -184,6 +200,24 @@ struct DFSLiveContestView: View {
                 }
                 let displayTotal = viewModel.livePlayerPoints.isEmpty ? result.lineupPoints : userLiveTotal
 
+                // Compute rank LIVE against the loaded leaderboard so it
+                // matches the score we're displaying. `result.rank` is
+                // tied to whatever lineup `latestResult` was built for —
+                // when the user switches between their multiple lineups
+                // (or when an earlier lineup's history record is still
+                // cached), `result.rank` and `displayTotal` can come from
+                // different lineups, producing "#1 of 2" alongside the
+                // worse lineup's 12.0 FPTS while the actual rank should
+                // be #2. Falling back to result.rank only when the live
+                // leaderboard hasn't loaded yet.
+                let displayRank: Int = {
+                    if !viewModel.leaderboardEntries.isEmpty {
+                        let higher = viewModel.leaderboardEntries.filter { $0.points > displayTotal }.count
+                        return higher + 1
+                    }
+                    return result.rank
+                }()
+
                 // Time remaining for user's entry
                 let userFieldEntry = viewModel.fieldEntries.first(where: { $0.isCurrentUser })
                 let userTimeLabel: String = {
@@ -198,12 +232,20 @@ struct DFSLiveContestView: View {
                         Text("RANK")
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(.white.opacity(0.6))
-                        Text("#\(result.rank)")
+                        Text("#\(displayRank)")
                             .font(.title.weight(.bold).monospacedDigit())
                             .foregroundStyle(.white)
                             .lineLimit(1)
                             .fixedSize()
-                        Text("of \(result.totalEntries)")
+                        // Prefer the CURRENT tournament's entryCount over
+                        // `result.totalEntries`. The latter is captured into
+                        // `latestResult` from `max(tournament.entryCount,
+                        // fieldEntries.count)` — so if the user navigates
+                        // from a 5-Man into an H2H before fieldEntries get
+                        // reset to 2, the "of 5" sticks around inside the
+                        // H2H header even after the leaderboard correctly
+                        // shows 2 entries.
+                        Text("of \(viewModel.tournament?.entryCount ?? result.totalEntries)")
                             .font(.caption2)
                             .foregroundStyle(.white.opacity(0.6))
                     }
@@ -224,7 +266,14 @@ struct DFSLiveContestView: View {
                         Text("STATUS")
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(.white.opacity(0.6))
-                        if allGamesFinal {
+                        if isPostponed {
+                            Text("PUSH")
+                                .font(.title3.weight(.bold))
+                                .foregroundStyle(.white)
+                            Text("RR ±0")
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.6))
+                        } else if allGamesFinal {
                             Text("\(result.rrDelta >= 0 ? "+" : "")\(result.rrDelta)")
                                 .font(.title.weight(.bold).monospacedDigit())
                                 .foregroundStyle(result.rrDelta >= 0 ? Color(red: 0.4, green: 1.0, blue: 0.5) : Color(red: 1.0, green: 0.5, blue: 0.5))
@@ -515,8 +564,17 @@ struct DFSLiveContestView: View {
     @State private var showPlayerSearch: Bool = false
     @State private var playerSearchText: String = ""
 
-    /// Entries to display: top N plus any user entries pinned at bottom if outside that range
+    /// Entries to display: top N plus any user entries pinned at bottom if outside that range.
+    /// Pre-lock, only the user's own rows are returned — bots are hidden so the
+    /// user can't see/compare opposing lineups while their own is still editable.
     private var visibleLeaderboardEntries: [DFSLeaderboardEntry] {
+        let isLocked: Bool = {
+            guard let t = viewModel.tournament else { return false }
+            return viewModel.isTournamentLocked(t)
+        }()
+        if !isLocked {
+            return viewModel.leaderboardEntries.filter { $0.isCurrentUser }
+        }
         let all = viewModel.leaderboardEntries
         let topSlice = Array(all.prefix(leaderboardPageSize))
         let topSliceIDs = Set(topSlice.map(\.id))
@@ -529,25 +587,51 @@ struct DFSLiveContestView: View {
     }
 
     private var playersByID: [String: DFSPlayer] {
-        // Use the slate-wide salary snapshot saved at contest creation time as the source
-        // of truth. This covers every player on the slate (not just the user's 6 picks),
-        // so bot lineups display the exact same prices that were offered during lineup
-        // building — even for players the user didn't draft. Falls back to the user's
-        // entry-record salaries (if the slate snapshot wasn't saved), then activePlayers.
-        let canonicalSalaries: [String: Int] = {
+        // Priority order for the salary every row (user + bot) displays:
+        //   1. The user's frozen lineup snapshot — for every player the user
+        //      drafted, use the exact price they paid. This is ground truth:
+        //      "this is what was on screen when they submitted."
+        //   2. The tournament's slate snapshot — covers players the user
+        //      didn't pick. Frozen at first submitter time.
+        //   3. activePlayers (current pool) — last-resort fallback when
+        //      neither snapshot has the player.
+        // Reversing (1) and (2) means a bad tournament-level snapshot (e.g.
+        // $16K Wemby from the SG-fallback ceiling, written before RG loaded)
+        // overrides the user's correct $12.8K view — making bot rows display
+        // higher prices than the user's row in the same contest.
+        let userLineupSalaries: [String: Int] = {
             guard let tid = viewModel.activeTournamentID else { return [:] }
-            if let slate = viewModel.tournamentPlayerSalaries[tid], !slate.isEmpty {
-                return slate
+            // Merge salaries from ALL of the user's entries for this
+            // tournament, not just the active lineup. With multi-lineup
+            // support, lineup #2 may contain Towns at $10.4K while the
+            // view is currently focused on lineup #1 (no Towns) — without
+            // the merge, Towns falls back to the tournament snapshot
+            // ($13.4K) and bot rows display the wrong price.
+            let entries = viewModel.userEntryRecords[tid] ?? []
+            var merged: [String: Int] = [:]
+            for entry in entries {
+                guard let saved = entry.lineupPlayerSalaries else { continue }
+                for (pid, sal) in saved where sal > 0 {
+                    if merged[pid] == nil { merged[pid] = sal }
+                }
             }
-            if let entry = viewModel.entryRecord(for: tid, lineupNumber: viewModel.activeLineupNumber),
-               let saved = entry.lineupPlayerSalaries {
-                return saved
-            }
-            return [:]
+            return merged
+        }()
+        let tournamentSlateSalaries: [String: Int] = {
+            guard let tid = viewModel.activeTournamentID else { return [:] }
+            return viewModel.tournamentPlayerSalaries[tid] ?? [:]
         }()
         var dict: [String: DFSPlayer] = [:]
         for p in viewModel.activePlayers {
-            if let canonical = canonicalSalaries[p.id], canonical > 0, canonical != p.salary {
+            let canonical: Int
+            if let userSal = userLineupSalaries[p.id], userSal > 0 {
+                canonical = userSal
+            } else if let slateSal = tournamentSlateSalaries[p.id], slateSal > 0 {
+                canonical = slateSal
+            } else {
+                canonical = 0
+            }
+            if canonical > 0, canonical != p.salary {
                 var fixed = DFSPlayer(
                     id: p.id, name: p.name, team: p.team, position: p.position,
                     salary: canonical, projectedPoints: p.projectedPoints,
@@ -892,7 +976,7 @@ struct DFSLiveContestView: View {
     }
 
     private var isSoccer: Bool {
-        viewModel.sport == "EPL" || viewModel.sport == "UCL"
+        viewModel.sport == "EPL" || viewModel.sport == "UCL" || viewModel.sport == "WC"
     }
 
     private func expandedBoxScore(fieldEntry: DFSFieldEntry) -> some View {

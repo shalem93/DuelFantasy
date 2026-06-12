@@ -8,6 +8,31 @@ final class PlayoffTiersViewModel {
     var userPicks: [Int: PlayoffTiersPlayer] = [:]  // tier (1-6) → selected player
     var leaderboardEntries: [PlayoffTiersLeaderboardEntry] = []
     var livePlayerPoints: [String: Double] = [:]  // accumulated playoff FPTS per player
+
+    // MARK: - Score cache (kills the 0.0 flash between sessions/visits)
+
+    private var pointsCacheKey: String? {
+        guard let tid = tournament?.id else { return nil }
+        return "tiersPointsCache-\(tid)"
+    }
+
+    /// Load the last successfully fetched scores from disk when the in-memory
+    /// dict is empty (cold launch / VM reset) so standings render with real
+    /// numbers immediately instead of 0.0 until the next ESPN fetch lands.
+    func hydratePointsCacheIfNeeded() {
+        guard livePlayerPoints.isEmpty, let key = pointsCacheKey,
+              let data = UserDefaults.standard.data(forKey: key),
+              let cached = try? JSONDecoder().decode([String: Double].self, from: data),
+              !cached.isEmpty else { return }
+        livePlayerPoints = cached
+        print("[PlayoffTiers] Hydrated \(cached.count) cached player scores")
+    }
+
+    func persistPointsCache() {
+        guard let key = pointsCacheKey, !livePlayerPoints.isEmpty,
+              let data = try? JSONEncoder().encode(livePlayerPoints) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
     var fieldEntries: [PlayoffTiersEntry] = []
     var eliminatedTeams: Set<String> = []
 
@@ -252,6 +277,40 @@ final class PlayoffTiersViewModel {
         hasAttemptedLoad = true
     }
 
+    /// Re-fetch the user's submitted entry from Supabase if `userPicks` is
+    /// empty but auth is now available. Mirrors the SoccerTiers fix — the
+    /// FantasyHubView launch task often fires `loadTournament` before auth
+    /// has propagated to this VM, the entry-fetch inside `loadTournament`
+    /// gets silently skipped, and `hasAttemptedLoad` is then force-set so
+    /// no retry ever runs. Call from the lobby's `.task` after auth has
+    /// had time to settle. Wrapped in `isLoading` so the lobby shows a
+    /// spinner instead of empty content while the fetch is in flight.
+    func restoreUserPicksIfMissing() async {
+        guard userPicks.isEmpty, !hasSubmitted else { return }
+        guard let token = accessToken, let uid = userID else { return }
+        let tournamentID = tournament?.id ?? PlayoffTiersTournament.currentSeasonID()
+        isLoading = true
+        defer { isLoading = false }
+        guard let record = try? await SupabaseService.shared.fetchUserPlayoffTiersEntry(
+            tournamentID: tournamentID, userID: uid, accessToken: token
+        ) else { return }
+        hasSubmitted = true
+        for pickData in record.picks {
+            let pick = pickData.toModel()
+            var foundPlayer: PlayoffTiersPlayer?
+            for tier in tiers {
+                if let player = tier.first(where: { $0.id == pick.playerID }) {
+                    foundPlayer = player
+                    break
+                }
+            }
+            if let player = foundPlayer {
+                userPicks[pick.tier] = player
+            }
+        }
+        print("[PlayoffTiers] Restored \(userPicks.count) picks via late-bind fetch")
+    }
+
     // MARK: - Pick Management
 
     func selectPlayer(tier: Int, player: PlayoffTiersPlayer) {
@@ -406,9 +465,28 @@ final class PlayoffTiersViewModel {
 
         guard !allPlayerIDs.isEmpty else { return }
 
-        // Fetch accumulated playoff scores
+        // Show last-known scores instantly while the (slow, multi-boxscore)
+        // ESPN fetch runs — otherwise every cold open flashes 0.0 for every
+        // player until the fetch completes.
+        hydratePointsCacheIfNeeded()
+        if leaderboardEntries.isEmpty && !livePlayerPoints.isEmpty && !fieldEntries.isEmpty {
+            leaderboardEntries = PlayoffTiersEngine.computeLeaderboard(
+                entries: fieldEntries,
+                playerPoints: livePlayerPoints,
+                currentUserID: userID
+            )
+        }
+
+        // Fetch accumulated playoff scores. NEVER overwrite good scores with
+        // an empty result — a failed/204 ESPN fetch was zeroing the whole
+        // standings while the screen sat open.
         let scores = await espnProvider.fetchPlayoffScores(playerIDs: allPlayerIDs)
-        livePlayerPoints = scores
+        if !scores.isEmpty {
+            livePlayerPoints = scores
+            persistPointsCache()
+        } else if !livePlayerPoints.isEmpty {
+            print("[PlayoffTiers] Score fetch returned empty — keeping \(livePlayerPoints.count) existing scores")
+        }
 
         // Fetch eliminated teams
         eliminatedTeams = await espnProvider.fetchEliminatedTeams()
@@ -418,7 +496,7 @@ final class PlayoffTiersViewModel {
             for playerIndex in 0..<tiers[tierIndex].count {
                 let player = tiers[tierIndex][playerIndex]
                 tiers[tierIndex][playerIndex].isEliminated = eliminatedTeams.contains(player.team)
-                tiers[tierIndex][playerIndex].totalFantasyPoints = scores[player.id] ?? 0
+                tiers[tierIndex][playerIndex].totalFantasyPoints = livePlayerPoints[player.id] ?? 0
             }
         }
 
