@@ -1051,7 +1051,19 @@ final class PlayoffTiersViewModel {
     // MARK: - Groups
 
     /// Leaderboard filtered to only members of the current group
+    /// Members' actual entries, fetched directly when the group detail opens.
+    /// The global leaderboard only contains entries present in the loaded
+    /// field — another member's real entry isn't guaranteed to be there.
+    var currentGroupEntries: [PlayoffTiersEntry] = []
+
     var groupLeaderboard: [PlayoffTiersLeaderboardEntry] {
+        if !currentGroupEntries.isEmpty {
+            return PlayoffTiersEngine.computeLeaderboard(
+                entries: currentGroupEntries,
+                playerPoints: livePlayerPoints,
+                currentUserID: userID
+            )
+        }
         guard !currentGroupMembers.isEmpty else { return [] }
         let memberUserIDs = Set(currentGroupMembers.map { $0.userID })
         let filtered = leaderboardEntries.filter { entry in
@@ -1202,6 +1214,29 @@ final class PlayoffTiersViewModel {
             print("[PlayoffTiers] Failed to load group members: \(error)")
             currentGroupMembers = []
         }
+
+        // Fetch each member's actual entry so standings include everyone
+        // who submitted, regardless of what the global field holds.
+        var entries: [PlayoffTiersEntry] = []
+        for member in currentGroupMembers {
+            guard let rec = try? await SupabaseService.shared.fetchUserPlayoffTiersEntry(
+                tournamentID: group.tournamentID, userID: member.userID, accessToken: token
+            ) else { continue }
+            entries.append(PlayoffTiersEntry(
+                id: UUID(uuidString: rec.id) ?? UUID(),
+                tournamentID: rec.tournamentID,
+                userID: rec.userID,
+                entryName: member.displayName,
+                picks: rec.picks.map { $0.toModel() },
+                totalPoints: rec.totalPoints,
+                rank: rec.rank,
+                isBot: false,
+                isCurrentUser: member.userID == userID
+            ))
+        }
+        currentGroupEntries = entries
+        hydratePointsCacheIfNeeded()
+        print("[PlayoffTiers] Group detail: \(currentGroupMembers.count) members, \(entries.count) entries fetched")
     }
 
     func leaveGroup(_ group: PlayoffTiersGroup) async {

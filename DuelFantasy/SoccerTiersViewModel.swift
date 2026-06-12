@@ -1037,8 +1037,23 @@ final class SoccerTiersViewModel {
 
     // MARK: - Groups
 
+    /// Members' actual entries, fetched directly from the entries table when
+    /// the group detail opens. The global `leaderboardEntries` only contains
+    /// entries that happen to be in the loaded 1,000-row field — another
+    /// member's real entry isn't guaranteed to be there, which silently
+    /// dropped them from group standings.
+    var currentGroupEntries: [SoccerTiersEntry] = []
+
     /// Leaderboard filtered to only members of the current group
     var groupLeaderboard: [SoccerTiersLeaderboardEntry] {
+        // Preferred path: score the directly-fetched member entries.
+        if !currentGroupEntries.isEmpty {
+            return SoccerTiersEngine.computeLeaderboard(
+                entries: currentGroupEntries,
+                playerPoints: livePlayerPoints,
+                currentUserID: userID
+            )
+        }
         guard !currentGroupMembers.isEmpty else { return [] }
         let memberUserIDs = Set(currentGroupMembers.map { $0.userID })
         let filtered = leaderboardEntries.filter { entry in
@@ -1199,6 +1214,31 @@ final class SoccerTiersViewModel {
             print("[SoccerTiers] Failed to load group members: \(error)")
             currentGroupMembers = []
         }
+
+        // Fetch each member's actual entry directly so group standings show
+        // everyone who submitted — independent of what the global field holds.
+        var entries: [SoccerTiersEntry] = []
+        for member in currentGroupMembers {
+            guard let rec = try? await SupabaseService.shared.fetchUserSoccerTiersEntry(
+                tournamentID: group.tournamentID, userID: member.userID, accessToken: token
+            ) else { continue }
+            entries.append(SoccerTiersEntry(
+                id: UUID(uuidString: rec.id) ?? UUID(),
+                tournamentID: rec.tournamentID,
+                userID: rec.userID,
+                entryName: member.displayName,
+                picks: rec.picks.map { $0.toModel() },
+                totalPoints: rec.totalPoints,
+                rank: rec.rank,
+                isBot: false,
+                isCurrentUser: member.userID == userID
+            ))
+        }
+        currentGroupEntries = entries
+        // Make sure scores exist for the standings even if the live view
+        // hasn't been opened this session.
+        hydratePointsCacheIfNeeded()
+        print("[SoccerTiers] Group detail: \(currentGroupMembers.count) members, \(entries.count) entries fetched")
     }
 
     func leaveGroup(_ group: SoccerTiersGroup) async {

@@ -1300,7 +1300,21 @@ final class GolfTiersViewModel {
 
     // MARK: - Groups
 
+    /// Members' actual entries, fetched directly when the group detail opens.
+    /// The global leaderboard only contains entries present in the loaded
+    /// field — another member's real entry isn't guaranteed to be there.
+    var currentGroupEntries: [GolfTiersEntry] = []
+
     var groupLeaderboard: [GolfTiersLeaderboardEntry] {
+        if !currentGroupEntries.isEmpty {
+            return GolfTiersEngine.computeLeaderboard(
+                entries: currentGroupEntries,
+                golferScores: liveGolferScores,
+                golferStatuses: liveGolferStatuses,
+                golferRoundScores: liveGolferRounds,
+                currentUserID: userID
+            )
+        }
         guard !currentGroupMembers.isEmpty else { return [] }
         let memberUserIDs = Set(currentGroupMembers.map { $0.userID })
         let filtered = leaderboardEntries.filter { entry in
@@ -1701,6 +1715,28 @@ final class GolfTiersViewModel {
             print("[GolfTiers] Failed to load group members: \(error)")
             currentGroupMembers = []
         }
+
+        // Fetch each member's actual entry so standings include everyone
+        // who submitted, regardless of what the global field holds.
+        var entries: [GolfTiersEntry] = []
+        for member in currentGroupMembers {
+            guard let rec = try? await SupabaseService.shared.fetchUserGolfTiersEntry(
+                tournamentID: group.tournamentID, userID: member.userID, accessToken: token
+            ) else { continue }
+            entries.append(GolfTiersEntry(
+                id: UUID(uuidString: rec.id) ?? UUID(),
+                tournamentID: rec.tournamentID,
+                userID: rec.userID,
+                entryName: member.displayName,
+                picks: rec.picks.map { $0.toModel() },
+                totalScore: Int(rec.totalPoints),
+                rank: rec.rank,
+                isBot: false,
+                isCurrentUser: member.userID == userID
+            ))
+        }
+        currentGroupEntries = entries
+        print("[GolfTiers] Group detail: \(currentGroupMembers.count) members, \(entries.count) entries fetched")
     }
 
     func leaveGroup(_ group: GolfTiersGroup) async {

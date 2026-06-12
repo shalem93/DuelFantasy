@@ -211,27 +211,60 @@ struct SoccerTiersGroupDetailView: View {
             } else {
                 VStack(spacing: 0) {
                     ForEach(entries) { entry in
-                        HStack(spacing: 12) {
-                            Text("\(entry.rank)")
-                                .font(.subheadline.weight(.bold).monospacedDigit())
-                                .foregroundStyle(entry.rank <= 3 ? brandPurple : .secondary)
-                                .frame(width: 24, alignment: .center)
-
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(entry.entryName)
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(entry.isCurrentUser ? brandPurple : .primary)
-                                Text("\(entry.picks.count) picks")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                        DisclosureGroup {
+                            VStack(spacing: 4) {
+                                ForEach(entry.picks.sorted(by: { $0.tier < $1.tier }), id: \.playerID) { pick in
+                                    HStack(spacing: 10) {
+                                        Text("T\(pick.tier)")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .foregroundStyle(.white)
+                                            .frame(width: 26, height: 18)
+                                            .background(brandPurple.opacity(0.8))
+                                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            Text(pick.playerName)
+                                                .font(.caption.weight(.medium))
+                                                .lineLimit(1)
+                                            Text(pick.playerCountry)
+                                                .font(.system(size: 9))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        let pts = entry.playerPoints[pick.playerID] ?? 0
+                                        Text(String(format: "%.1f", pts))
+                                            .font(.caption.weight(.semibold).monospacedDigit())
+                                            .foregroundStyle(pts > 0 ? brandPurple : .secondary)
+                                    }
+                                    .padding(.vertical, 2)
+                                }
                             }
+                            .padding(.leading, 24)
+                            .padding(.bottom, 6)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Text("\(entry.rank)")
+                                    .font(.subheadline.weight(.bold).monospacedDigit())
+                                    .foregroundStyle(entry.rank <= 3 ? brandPurple : .secondary)
+                                    .frame(width: 24, alignment: .center)
 
-                            Spacer()
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(entry.entryName)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(entry.isCurrentUser ? brandPurple : .primary)
+                                    Text("\(entry.picks.count) picks")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
 
-                            Text(String(format: "%.1f", entry.totalPoints))
-                                .font(.subheadline.weight(.bold).monospacedDigit())
-                                .foregroundStyle(.primary)
+                                Spacer()
+
+                                Text(String(format: "%.1f", entry.totalPoints))
+                                    .font(.subheadline.weight(.bold).monospacedDigit())
+                                    .foregroundStyle(.primary)
+                            }
+                            .contentShape(Rectangle())
                         }
+                        .tint(.secondary)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 10)
                         .background(entry.isCurrentUser ? brandPurple.opacity(0.08) : .clear)
