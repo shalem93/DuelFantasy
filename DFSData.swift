@@ -498,7 +498,13 @@ func buildMultiTournamentSlate(
     includedGames: [DFSSlateGame],
     mainPlayers: [DFSPlayer],
     singleGameSalaryCap: Int = 50000,
-    showdownSalaries: [String: Int]? = nil
+    showdownSalaries: [String: Int]? = nil,
+    // Per-game DK showdown salaries keyed by ESPN game ID. Preferred over the
+    // flat `showdownSalaries` for multi-game days (MLB): looking each player up
+    // only against THEIR game's slate avoids cross-game name collisions — e.g.
+    // a globally-merged map mapping star "Julio Rodriguez" (SEA) onto a cheap
+    // "J. Rodriguez" from another game via the fuzzy name fallback.
+    perGameShowdownSalaries: [String: [String: Int]]? = nil
 ) -> (tournaments: [DFSTournament], singleGamePlayers: [String: [DFSPlayer]]) {
     var tournaments: [DFSTournament] = []
     var sgPlayers: [String: [DFSPlayer]] = [:]
@@ -593,6 +599,10 @@ func buildMultiTournamentSlate(
 
     // 2. Per-game single-game tournaments — all 8 field sizes per game
     for game in includedGames {
+        // Prefer this game's own showdown salaries (no cross-game name
+        // collisions); fall back to the flat map for sports that don't
+        // supply a per-game breakdown.
+        let gameShowdown = perGameShowdownSalaries?[game.id] ?? showdownSalaries
         let preFilterCount = mainPlayers.filter { $0.gameID == game.id }.count
         let gamePlayers = mainPlayers
             .filter { $0.gameID == game.id }
@@ -608,7 +618,7 @@ func buildMultiTournamentSlate(
             }
             .map { player in
                 let sgSalary: Int
-                if let showdown = showdownSalaries,
+                if let showdown = gameShowdown,
                    let dkPrice = RotoGrindersSalaryProvider.lookupSalary(espnName: player.name, in: showdown) {
                     sgSalary = dkPrice
                 } else if isMLBSlate && player.position.uppercased() == "SP" {
@@ -899,13 +909,12 @@ struct ESPNNBADFSSlateProvider: DFSSlateProvider {
                 }
                 print("[NBA-DFS] sameSlate=true (\(matchCount)/\(deduped.count)), applied=\(applied), calibrated=\(calibrated), range=$\(rgMin)-$\(rgMax)")
             } else {
-                // Slates don't match — keep FPPG-based salaries from estimatedSalary
-                print("[NBA-DFS] sameSlate=false (\(matchCount)/\(deduped.count)), keeping estimated salaries")
-                finalPlayers = deduped
+                // RG data is for a different slate — no real prices for today's
+                // games yet. Don't offer a slate built on estimated salaries.
+                throw NSError(domain: "NBADFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's NBA slate"])
             }
         } else {
-            print("[NBA-DFS] No real salary data available (DFF + RG both empty) — using FPPG-estimated salaries")
-            finalPlayers = deduped
+            throw NSError(domain: "NBADFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's NBA slate"])
         }
 
         let slateDate = events.first?.date ?? Date()
@@ -1493,11 +1502,17 @@ actor RotoGrindersSalaryProvider {
     /// the salary providers.
     func fetchDraftKingsDirect(sport: String) async -> [String: Int] {
         // DK's sport codes are mostly the same as ours, lowercased.
+        // NOTE: DraftKings files WNBA draft groups under Sport "NBA" with a
+        // " (WNBA)" suffix on ContestStartTimeSuffix — there is no "WNBA" sport
+        // param (querying sport=WNBA returns an unfiltered lobby). So for WNBA
+        // we query the NBA lobby and filter to the WNBA-suffixed groups; for
+        // regular NBA we exclude them.
+        let wantWNBA = sport.lowercased() == "wnba"
         let dkSportCode: String
         switch sport.lowercased() {
         case "ufc", "mma": dkSportCode = "MMA"
         case "mlb": dkSportCode = "MLB"
-        case "nba": dkSportCode = "NBA"
+        case "nba", "wnba": dkSportCode = "NBA"
         case "nhl": dkSportCode = "NHL"
         case "nfl": dkSportCode = "NFL"
         case "epl", "ucl", "wc", "soc", "soccer": dkSportCode = "SOC"
@@ -1523,13 +1538,28 @@ actor RotoGrindersSalaryProvider {
         // Prefer non-tier (classic/showdown) groups over Tiers/Pickem.
         // Sort by start time so we hit the soonest contest first.
         let candidates = draftGroups
-            .compactMap { group -> (id: Int, gameType: String, startISO: String)? in
+            .compactMap { group -> (id: Int, gameType: String, startISO: String, suffix: String, gameCount: Int)? in
                 guard let id = group["DraftGroupId"] as? Int else { return nil }
                 let gameType = (group["GameTypeId"] as? Int).map(String.init) ?? ""
                 let startISO = (group["StartDate"] as? String) ?? ""
-                return (id, gameType, startISO)
+                let suffix = ((group["ContestStartTimeSuffix"] as? String) ?? "").uppercased()
+                let gameCount = (group["GameCount"] as? Int) ?? 0
+                return (id, gameType, startISO, suffix, gameCount)
             }
-            .sorted { $0.startISO < $1.startISO }
+            // WNBA shares the NBA lobby — keep only the " (WNBA)" groups for
+            // WNBA, and drop them for plain NBA so the two don't cross-pollute.
+            .filter { wantWNBA ? $0.suffix.contains("WNBA") : !$0.suffix.contains("WNBA") }
+            // For WNBA, prefer the main classic slate (most games, no "POINTS"/
+            // "TIERS" pricing variant) so we land on real salaries first.
+            .sorted {
+                if wantWNBA {
+                    let aMain = !$0.suffix.contains("POINTS") && !$0.suffix.contains("TIER")
+                    let bMain = !$1.suffix.contains("POINTS") && !$1.suffix.contains("TIER")
+                    if aMain != bMain { return aMain }
+                    if $0.gameCount != $1.gameCount { return $0.gameCount > $1.gameCount }
+                }
+                return $0.startISO < $1.startISO
+            }
 
         var salaries: [String: Int] = [:]
         for candidate in candidates.prefix(5) {
@@ -3051,13 +3081,20 @@ struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
             for player in deduped {
                 // Two-way batter entry: salary feeds only have the pitcher price for this player.
                 // Keep the estimated batter salary instead of applying the pitcher price.
-                if twoWayBatterIDs.contains(player.id) && player.position != "SP" && player.position != "RP" {
+                // NOTE: `twoWayBatterIDs` holds only the BASE id (the batter); the
+                // pitcher is the "-sp" sibling, which is NOT in this set. So this
+                // branch only ever matches the batter half. We must remap it to a
+                // batter slot EVEN IF it's currently typed "SP" — when the two-way
+                // conversion left it as SP (or the day's DK feed lists Ohtani only
+                // as a pitcher), the old `!= "SP"` guard skipped it, leaving the
+                // batter stuck as a second SP that can't fill 1B in late swap.
+                if twoWayBatterIDs.contains(player.id) {
                     // The generic remap can't be used here: on days the player
                     // pitches, the DK feed lists him only as "SP" (Ohtani), which
                     // would turn the batter entry back into a pitcher. Accept only
                     // batter tokens from DK; if none, fall back to 1B (DK
-                    // classifies Ohtani as "1B/OF") — a raw UTIL/DH position fits
-                    // no main-slate slot and leaves the entry undraftable.
+                    // classifies Ohtani as "1B/OF") — a raw UTIL/DH/SP position fits
+                    // no main-slate batter slot and leaves the entry undraftable.
                     let batterTokens: Set<String> = ["C", "1B", "2B", "3B", "SS", "OF"]
                     var batterPos = player.position
                     if !batterTokens.contains(batterPos) {
@@ -3166,8 +3203,7 @@ struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
             if !salaryRange.isEmpty { logMsg += " (range $\(salaryRange.min() ?? 0)-$\(salaryRange.max() ?? 0))" }
             print(logMsg)
         } else {
-            print("[MLB-DFS] No salary data available — using estimated salaries")
-            finalPlayers = deduped
+            throw NSError(domain: "MLBDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's MLB slate"])
         }
 
         let slateDate = events.first?.date ?? Date()
@@ -3219,11 +3255,33 @@ struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
             print("[MLB-DFS] Removed \(sortedPlayers.count - sortedPlayersFiltered.count) players from postponed/excluded games")
         }
 
-        // Phase 2: pull per-fight/per-game showdown salaries from RG's
-        // slate-specific JSON. Eliminates the in-app `mlbShowdownSalary()`
-        // curve for any player we can match by name; the curve still runs
-        // as a fallback for players RG doesn't list.
-        let mlbShowdownSalaries = await RotoGrindersSalaryProvider.shared.fetchAllShowdownSalaries(sport: "mlb")
+        // Phase 2: pull showdown salaries from RG's slate-specific JSON,
+        // PER GAME. A globally-merged map (every MLB showdown that day in one
+        // dict) collides on common names: with the fuzzy first-initial+last-
+        // name fallback in lookupSalary, star "Julio Rodriguez" (SEA) matched
+        // a cheap "J. Rodriguez" from a different game and priced at $3,400.
+        // Scoping each game to its own slate eliminates the cross-game bleed;
+        // the in-app `mlbShowdownSalary()` curve still runs as a fallback for
+        // players RG doesn't list.
+        let mlbPerGameShowdownSalaries: [String: [String: Int]] = await {
+            await withTaskGroup(of: (String, [String: Int]).self) { group in
+                for game in includedGames {
+                    group.addTask {
+                        let salaries = await RotoGrindersSalaryProvider.shared.fetchShowdownSalariesForGame(
+                            sport: "mlb",
+                            awayHashtag: game.awayTeam,
+                            homeHashtag: game.homeTeam
+                        )
+                        return (game.id, salaries)
+                    }
+                }
+                var byGame: [String: [String: Int]] = [:]
+                for await (gameID, salaries) in group where !salaries.isEmpty {
+                    byGame[gameID] = salaries
+                }
+                return byGame
+            }
+        }()
 
         // MLB never has a single-game-only slate (always many games per day)
         let (tournaments, sgPlayers) = buildMultiTournamentSlate(
@@ -3235,7 +3293,7 @@ struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
             isSingleGameSlate: false,
             includedGames: includedGames,
             mainPlayers: sortedPlayersFiltered,
-            showdownSalaries: mlbShowdownSalaries.isEmpty ? nil : mlbShowdownSalaries
+            perGameShowdownSalaries: mlbPerGameShowdownSalaries.isEmpty ? nil : mlbPerGameShowdownSalaries
         )
 
         let slate = DFSSlate(
@@ -3657,7 +3715,14 @@ struct ESPNMLBDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
             }
         }
 
-        let allGamesFinal = allFetchedAreFinal && !results.isEmpty && failedGames.count <= results.count
+        // A game we couldn't fetch is NOT assumed done unless its start is long
+        // past (a broken/stale event). ESPN endpoints 404 for games that haven't
+        // started, so a staggered slate's late game must keep the slate LIVE
+        // until it actually finishes rather than be tolerated as a failed fetch
+        // (which would settle the contest before the late game is played).
+        let staleFetchCutoff: TimeInterval = 8 * 3600
+        let unfetchedStillPending = failedGames.contains { Date().timeIntervalSince($0.startTime) < staleFetchCutoff }
+        let allGamesFinal = allFetchedAreFinal && !results.isEmpty && !unfetchedStillPending
         
         print("[MLB-Score] Total: \(results.count)/\(games.count) games fetched, \(pointsByPlayerID.count) player scores, failed=\(failedGames.count)")
 
@@ -3786,8 +3851,30 @@ struct ESPNMLBDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
         let playStats = extractPlayByPlayStats(payload: payload)
 
         var results: [(String, Double, DFSPlayerLiveStats)] = []
-        // Track which player IDs we've already scored (for two-way player detection)
-        var seenPlayerIDs = Set<String>()
+
+        // Pre-pass: collect every athlete that appears in a BATTING category.
+        // A two-way player (Ohtani) shows up in both batting and pitching; we
+        // route his pitching line to the "-sp" DFS entry and his batting line to
+        // the base id. This must be ORDER-INDEPENDENT: ESPN doesn't guarantee
+        // batting is listed before pitching, and when a two-way player is the
+        // starting pitcher his pitching category can come first — the old
+        // "seen batting already?" check then failed, the "-sp" entry was never
+        // created, and the batter slot rendered pitching stats ("5/6.0").
+        var battingAthleteIDs = Set<String>()
+        for teamBlock in playersArr {
+            guard let statistics = teamBlock["statistics"] as? [[String: Any]] else { continue }
+            for statCategory in statistics {
+                let categoryName = (statCategory["type"] as? String)
+                    ?? (statCategory["name"] as? String) ?? ""
+                guard categoryName.lowercased().contains("bat") else { continue }
+                guard let athletes = statCategory["athletes"] as? [[String: Any]] else { continue }
+                for athlete in athletes {
+                    if let info = athlete["athlete"] as? [String: Any], let id = info["id"] as? String {
+                        battingAthleteIDs.insert(id)
+                    }
+                }
+            }
+        }
 
         for teamBlock in playersArr {
             guard let statistics = teamBlock["statistics"] as? [[String: Any]] else { continue }
@@ -3838,17 +3925,17 @@ struct ESPNMLBDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
 
                     let fantasy: Double
                     let basePlayerID = "mlb-\(athleteID)"
-                    // Two-way players: if this player already has a batting entry and now
-                    // appears in pitching, use the "-sp" suffix for the SP DFS entry.
-                    // ESPN boxscores always list batting before pitching, so this correctly
-                    // assigns batting stats to "mlb-{id}" and pitching stats to "mlb-{id}-sp".
+                    // Two-way players: pitching stats go to the "-sp" SP entry,
+                    // batting stats to the base id. Detect two-way by whether the
+                    // athlete also appears in a batting category (order-independent
+                    // — see battingAthleteIDs pre-pass). A pure pitcher isn't in
+                    // that set, so his pitching stays on the base id.
                     let playerID: String
-                    if isPitchingCategory && seenPlayerIDs.contains(basePlayerID) {
+                    if isPitchingCategory && battingAthleteIDs.contains(athleteID) {
                         playerID = basePlayerID + "-sp"
                     } else {
                         playerID = basePlayerID
                     }
-                    seenPlayerIDs.insert(basePlayerID)
 
                     if isPitchingCategory {
                         // FanDuel Pitching: IP*3 + K*3 + W*6 + ER*-3
@@ -3980,6 +4067,27 @@ struct ESPNNCAAMDFSSlateProvider: DFSSlateProvider {
             throw NSError(domain: "NCAAMDFS", code: 2, userInfo: [NSLocalizedDescriptionKey: "No players found for March Madness games"])
         }
 
+        // Require real DraftKings/LineupHQ prices — don't offer a slate built on
+        // our own performance-rating estimates. Apply DK college-basketball
+        // ("cbb") prices and bail if none are posted yet.
+        let cbbSalaries = await RotoGrindersSalaryProvider.shared.fetchClassicSalariesFromMaster(sport: "cbb")
+        var dkApplied = 0
+        let pricedPlayers: [DFSPlayer] = deduped.map { player in
+            guard let realSalary = RotoGrindersSalaryProvider.lookupSalary(espnName: player.name, in: cbbSalaries) else { return player }
+            dkApplied += 1
+            var p = DFSPlayer(
+                id: player.id, name: player.name, team: player.team,
+                position: player.position, salary: realSalary,
+                projectedPoints: player.projectedPoints,
+                gameID: player.gameID, injuryStatus: player.injuryStatus
+            )
+            p.isConfirmedActive = player.isConfirmedActive
+            return p
+        }
+        guard dkApplied > 0 else {
+            throw NSError(domain: "NCAAMDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's NCAAM slate"])
+        }
+
         let slateDate = events.first?.date ?? Date()
         let tournamentID = "ncaam-\(dateKey(for: slateDate))"
 
@@ -4010,7 +4118,7 @@ struct ESPNNCAAMDFSSlateProvider: DFSSlateProvider {
                     state: competition.status.type.state
                 )
             },
-            players: deduped.sorted(by: { $0.salary > $1.salary })
+            players: pricedPlayers.sorted(by: { $0.salary > $1.salary })
         )
         cache.setSlate(slate, key: "ncaam")
         return slate
@@ -4414,7 +4522,14 @@ struct ESPNNCAAMDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
             }
         }
 
-        let allGamesFinal = allFetchedAreFinal && !results.isEmpty && failedGames.count <= results.count
+        // A game we couldn't fetch is NOT assumed done unless its start is long
+        // past (a broken/stale event). ESPN endpoints 404 for games that haven't
+        // started, so a staggered slate's late game must keep the slate LIVE
+        // until it actually finishes rather than be tolerated as a failed fetch
+        // (which would settle the contest before the late game is played).
+        let staleFetchCutoff: TimeInterval = 8 * 3600
+        let unfetchedStillPending = failedGames.contains { Date().timeIntervalSince($0.startTime) < staleFetchCutoff }
+        let allGamesFinal = allFetchedAreFinal && !results.isEmpty && !unfetchedStillPending
 
         let snapshot = DFSScoreSnapshot(
             playerFantasyPoints: pointsByPlayerID,
@@ -4783,21 +4898,10 @@ struct ESPNNHLDFSSlateProvider: DFSSlateProvider {
                 print("[NHL-DFS] sameSlate=true (\(matchCount)/\(deduped.count)), applied=\(applied), calibrated=\(calibrated), skater=$\(skaterMin)-$\(skaterMax), goalie=$\(goalieMin)-$\(goalieMax)")
                 useRealSalaries = true
             } else {
-                print("[NHL-DFS] sameSlate=false (\(matchCount)/\(deduped.count)), keeping estimated salaries — marking all unconfirmed")
-                finalPlayers = deduped.map { p in
-                    var player = p
-                    player.isConfirmedActive = false
-                    return player
-                }
-                useRealSalaries = false
+                throw NSError(domain: "NHLDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's NHL slate"])
             }
         } else {
-            finalPlayers = deduped.map { p in
-                var player = p
-                player.isConfirmedActive = false
-                return player
-            }
-            useRealSalaries = false
+            throw NSError(domain: "NHLDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's NHL slate"])
         }
 
         // Mark confirmed starting goalies from scoreboard probables. Probables
@@ -5669,7 +5773,14 @@ struct ESPNNHLDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
             }
         }
 
-        let allGamesFinal = allFetchedAreFinal && !results.isEmpty && failedGames.count <= results.count
+        // A game we couldn't fetch is NOT assumed done unless its start is long
+        // past (a broken/stale event). ESPN endpoints 404 for games that haven't
+        // started, so a staggered slate's late game must keep the slate LIVE
+        // until it actually finishes rather than be tolerated as a failed fetch
+        // (which would settle the contest before the late game is played).
+        let staleFetchCutoff: TimeInterval = 8 * 3600
+        let unfetchedStillPending = failedGames.contains { Date().timeIntervalSince($0.startTime) < staleFetchCutoff }
+        let allGamesFinal = allFetchedAreFinal && !results.isEmpty && !unfetchedStillPending
 
         print("[NHL-Score] Total: \(results.count)/\(games.count) games fetched, \(pointsByPlayerID.count) player scores, failed=\(failedGames.count)")
 
@@ -6563,6 +6674,8 @@ struct ESPNPlayerGameLogProvider {
     private static func parsePlayerID(_ playerID: String) -> (espnID: String, sportPath: String) {
         if playerID.hasPrefix("ncaam-") {
             return (String(playerID.dropFirst(6)), "basketball/mens-college-basketball")
+        } else if playerID.hasPrefix("wnba-") {
+            return (String(playerID.dropFirst(5)), "basketball/wnba")
         } else if playerID.hasPrefix("nba-") {
             return (String(playerID.dropFirst(4)), "basketball/nba")
         } else if playerID.hasPrefix("mlb-") {
@@ -8035,7 +8148,13 @@ struct ESPNDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
             }
         }
 
-        let allGamesFinal = !hasMockGames && allFetchedAreFinal && !results.isEmpty && failedNonMockGames.count <= results.count
+        // A real game we couldn't fetch is NOT assumed done unless its start is
+        // long past (a broken/stale event). A staggered slate's late game (e.g.
+        // a midnight kickoff) must keep the slate LIVE until it finishes instead
+        // of being tolerated as a failed fetch and settling the contest early.
+        let staleFetchCutoff: TimeInterval = 8 * 3600
+        let unfetchedStillPending = failedNonMockGames.contains { Date().timeIntervalSince($0.startTime) < staleFetchCutoff }
+        let allGamesFinal = !hasMockGames && allFetchedAreFinal && !results.isEmpty && !unfetchedStillPending
 
         let snapshot = DFSScoreSnapshot(
             playerFantasyPoints: pointsByPlayerID,
@@ -8183,6 +8302,899 @@ struct ESPNDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
                         Double(to) * 1.0
 
                     let playerID = "nba-\(athleteID)"
+                    let stats = DFSPlayerLiveStats(
+                        name: athleteName,
+                        points: pts, rebounds: reb, assists: ast,
+                        steals: stl, blocks: blk, turnovers: to,
+                        minutes: min,
+                        fgm: fgm, fga: fga,
+                        threePM: threePM, threePA: threePA,
+                        ftm: ftm, fta: fta,
+                        fantasyPoints: fantasy,
+                        gameStatus: gameStatus,
+                        gameFinal: gameFinal
+                    )
+                    results.append((playerID, fantasy, stats))
+                }
+            }
+        }
+        return results
+    }
+}
+
+// MARK: - WNBA DFS Slate Provider
+//
+// Faithful clone of `ESPNNBADFSSlateProvider` with WNBA substitutions:
+// ESPN endpoints use `basketball/wnba`, player/tournament IDs use the
+// `wnba-` prefix, salary lookups pass sport `"wnba"`, the shared roster
+// cache uses a distinct `"wnba"` slate key, and logs use `[WNBA-DFS]`.
+// Roster/scoring config (50000 cap, 8-player classic, showdown) and the
+// DraftKings basketball scoring formula are IDENTICAL to NBA.
+
+struct ESPNWNBADFSSlateProvider: DFSSlateProvider {
+    private let session: URLSession
+    private let cache = ESPNRosterCache.shared
+
+    init(session: URLSession = .shared) {
+        self.session = session
+    }
+
+    func fetchSlate() async throws -> DFSSlate {
+        // Return cached slate if recent
+        if let cached = cache.getSlate(key: "wnba") {
+            return cached
+        }
+
+        // Start fetching real DraftKings salaries in parallel with ESPN data
+        async let rgSalaries = RotoGrindersSalaryProvider.shared.fetchSalaries(sport: "wnba", maxClassicSalary: 13000)
+
+        var events = try await fetchUpcomingWNBAEvents()
+        guard !events.isEmpty else {
+            throw NSError(domain: "DFS", code: 1)
+        }
+
+        // Build team abbreviation → event ID mapping
+        var teamToGameID: [String: String] = [:]
+        for event in events {
+            guard let competition = event.competitions.first else { continue }
+            for competitor in competition.competitors {
+                teamToGameID[competitor.team.abbreviation] = event.id
+            }
+        }
+
+        let teamRefs = Array(uniqueTeams(from: events).prefix(30))
+
+        // Fetch all rosters in parallel using TaskGroup. We need TWO outputs
+        // from this pass: the top-9-per-team pool that becomes the slate's
+        // primary player list (unchanged behavior), AND a FULL-roster name
+        // lookup table so Phase 2.5 can resolve injected RG players to
+        // their real ESPN IDs. Without the full-roster table, bench players
+        // get stub IDs like `wnba-<dkDraftableId>` and ESPN box scores can't
+        // match them at scoring time → empty stats.
+        let rostersResult: (top9: [DFSPlayer], fullByName: [String: DFSPlayer]) = try await withThrowingTaskGroup(of: [DFSPlayer].self) { group in
+            for team in teamRefs {
+                let gameID = teamToGameID[team.abbreviation]
+                group.addTask {
+                    return try await self.fetchRoster(teamID: team.id, teamAbbreviation: team.abbreviation, gameID: gameID)
+                }
+            }
+            var top9Pool: [DFSPlayer] = []
+            var fullLookup: [String: DFSPlayer] = [:]
+            for try await roster in group {
+                top9Pool.append(contentsOf: roster.prefix(9))
+                for player in roster {
+                    let key = RotoGrindersSalaryProvider.normalizeName(player.name)
+                    if fullLookup[key] == nil { fullLookup[key] = player }
+                }
+            }
+            return (top9Pool, fullLookup)
+        }
+        let players = rostersResult.top9
+        let fullWNBARosterByName = rostersResult.fullByName
+
+        var deduped = deduplicatePlayers(players)
+        guard !deduped.isEmpty else {
+            throw NSError(domain: "DFS", code: 2)
+        }
+
+        // Apply real DraftKings salaries from DFF/RotoGrinders where available.
+        // Only use real data when the slate clearly matches (>30% players found).
+        // When slates don't match, keep the FPPG-based estimatedSalary values.
+        let realSalaries = await rgSalaries
+
+        // Align the slate to the SOONEST day DraftKings actually priced. ESPN's
+        // window (today + tomorrow) can surface a lone early-week game DK hasn't
+        // posted, while DK's next slate is a day later. Pick the earliest day we
+        // can price — a single game is "priced" if DK posts its showdown slate,
+        // a multi-game day is "priced" if classic salaries match its players —
+        // and restrict events + the player pool to it. This keeps today's single
+        // game when DK has its showdown, but yields an unpriced orphan game to a
+        // posted later-day slate.
+        do {
+            let cal = Calendar.current
+            let daysAsc = Set(events.map { cal.startOfDay(for: $0.date) }).sorted()
+            var chosenDay: Date? = nil
+            if daysAsc.count > 1 {
+                for day in daysAsc {
+                    let dayEvents = events.filter { cal.startOfDay(for: $0.date) == day }
+                    if dayEvents.count == 1, let comp = dayEvents.first?.competitions.first,
+                       let away = comp.competitors.first(where: { $0.homeAway == "away" })?.team.abbreviation,
+                       let home = comp.competitors.first(where: { $0.homeAway == "home" })?.team.abbreviation {
+                        let sd = await RotoGrindersSalaryProvider.shared.fetchShowdownPlayersForGame(
+                            sport: "wnba", awayHashtag: away, homeHashtag: home
+                        )
+                        if !sd.isEmpty { chosenDay = day; break }
+                    } else if dayEvents.count > 1, !realSalaries.isEmpty {
+                        let dayIDs = Set(dayEvents.map { $0.id })
+                        let matched = deduped.filter {
+                            dayIDs.contains($0.gameID ?? "")
+                            && RotoGrindersSalaryProvider.lookupSalary(espnName: $0.name, in: realSalaries) != nil
+                        }.count
+                        if matched >= 5 { chosenDay = day; break }
+                    }
+                }
+            }
+            if let chosenDay {
+                let kept = events.filter { cal.startOfDay(for: $0.date) == chosenDay }
+                if !kept.isEmpty && kept.count < events.count {
+                    let keepIDs = Set(kept.map { $0.id })
+                    print("[WNBA-DFS] DK-day alignment: \(events.count) games across window → \(kept.count) on DK-priced day \(dateKey(for: chosenDay))")
+                    events = kept
+                    deduped = deduped.filter { keepIDs.contains($0.gameID ?? "") }
+                }
+            }
+        }
+
+        // Build the game list + single-game detection up front so we can fall
+        // back to DraftKings SHOWDOWN (captain) pricing when there's no classic
+        // main slate. On a single-game WNBA night DK only publishes showdown
+        // pricing; the old code required classic salaries and threw — which hid
+        // the user's already-entered contest. Mirror UFC: price off showdown.
+        let slateDate = events.first?.date ?? Date()
+        let tournamentID = "wnba-\(dateKey(for: slateDate))"
+        let includedGames: [DFSSlateGame] = events.compactMap { event in
+            guard let competition = event.competitions.first else { return nil }
+            guard let away = competition.competitors.first(where: { $0.homeAway == "away" }) else { return nil }
+            guard let home = competition.competitors.first(where: { $0.homeAway == "home" }) else { return nil }
+            return DFSSlateGame(
+                id: event.id,
+                awayTeam: away.team.abbreviation,
+                homeTeam: home.team.abbreviation,
+                startTime: event.date,
+                state: competition.status.type.state
+            )
+        }
+        // Single-game slate: the entire day has only 1 game scheduled. Use
+        // total games (not active) so it doesn't flip mid-slate as games finish.
+        let isSingleGame = includedGames.count == 1
+
+        // Pull DK showdown (captain) pricing up front for single-game nights —
+        // both to price the main pool when no classic slate exists and to feed
+        // the captain-mode tournament + Phase 2.5 augmentation below.
+        var wnbaSlatePlayers: [RotoGrindersSalaryProvider.LineupHQSlatePlayer] = []
+        var showdownUtilSalaries: [String: Int] = [:]
+        if isSingleGame, let firstGame = includedGames.first {
+            let slatePlayers = await RotoGrindersSalaryProvider.shared.fetchShowdownPlayersForGame(
+                sport: "wnba", awayHashtag: firstGame.awayTeam, homeHashtag: firstGame.homeTeam
+            )
+            if !slatePlayers.isEmpty {
+                wnbaSlatePlayers = slatePlayers
+                for p in slatePlayers { showdownUtilSalaries[p.normalizedName] = p.utilSalary }
+            }
+        }
+
+        // Decide which salary map prices the slate. Classic main-slate salaries
+        // win when they actually match this slate (>30%); otherwise fall back to
+        // single-game showdown pricing. Only give up (show "no slate") when
+        // neither source is usable.
+        let classicMatch = realSalaries.isEmpty ? 0 :
+            deduped.filter { RotoGrindersSalaryProvider.lookupSalary(espnName: $0.name, in: realSalaries) != nil }.count
+        let classicMatchRate = Double(classicMatch) / Double(max(1, deduped.count))
+        let salarySource: [String: Int]
+        let pricingMode: String
+        if !realSalaries.isEmpty && classicMatchRate > 0.30 {
+            salarySource = realSalaries
+            pricingMode = "classic"
+        } else if isSingleGame && !showdownUtilSalaries.isEmpty {
+            salarySource = showdownUtilSalaries
+            pricingMode = "showdown"
+        } else {
+            throw NSError(domain: "WNBADFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's WNBA slate"])
+        }
+
+        let rgMin = salarySource.values.min() ?? 3500
+        let rgMax = salarySource.values.max() ?? 13000
+        let allFPPGs = deduped.map { $0.projectedPoints }
+        let fppgMin = allFPPGs.min() ?? 0
+        let fppgMax = max(fppgMin + 1, allFPPGs.max() ?? 50)
+        var applied = 0
+        var calibrated = 0
+        let finalPlayers: [DFSPlayer] = deduped.map { player in
+            if let realSalary = RotoGrindersSalaryProvider.lookupSalary(espnName: player.name, in: salarySource) {
+                applied += 1
+                var matched = DFSPlayer(
+                    id: player.id, name: player.name, team: player.team,
+                    position: player.position, salary: realSalary,
+                    projectedPoints: player.projectedPoints,
+                    gameID: player.gameID, injuryStatus: player.injuryStatus
+                )
+                matched.isConfirmedActive = true
+                return matched
+            }
+            calibrated += 1
+            let fppgFraction = min(1.0, max(0, (player.projectedPoints - fppgMin) / (fppgMax - fppgMin)))
+            let curved = pow(fppgFraction, 0.85)
+            let salary = rgMin + Int(curved * Double(rgMax - rgMin))
+            let roundedSalary = (salary / 100) * 100
+            var unmatched = DFSPlayer(
+                id: player.id, name: player.name, team: player.team,
+                position: player.position, salary: max(rgMin, roundedSalary),
+                projectedPoints: player.projectedPoints,
+                gameID: player.gameID, injuryStatus: player.injuryStatus
+            )
+            unmatched.isConfirmedActive = false
+            return unmatched
+        }
+        print("[WNBA-DFS] priced \(applied)/\(deduped.count) (calibrated \(calibrated)) via \(pricingMode), range=$\(rgMin)-$\(rgMax)")
+
+        var sortedPlayers = finalPlayers.sorted(by: { $0.salary > $1.salary })
+
+        // Showdown pricing for the captain-mode tournament. Single-game nights
+        // already fetched it above; multi-game slates fetch the per-player DK
+        // map as a fallback.
+        let dkShowdownSalaries: [String: Int]? = await {
+            if isSingleGame { return showdownUtilSalaries.isEmpty ? nil : showdownUtilSalaries }
+            let names = sortedPlayers.map(\.name)
+            let dk = await RotoGrindersSalaryProvider.shared.fetchDKSalaries(sport: "wnba", slatePlayerNames: names)
+            return dk.isEmpty ? nil : dk
+        }()
+
+        // Phase 2.5: augment the player pool with any RG-slate player not
+        // already in our ESPN-derived list. Without this, slate-builder
+        // bench players never show up even though DK lists them as eligible.
+        // We create a stub `DFSPlayer` keyed off the DK draftableId so live
+        // scoring can still match by name to ESPN box scores once the game
+        // starts.
+        print("[WNBA-DFS-2.5] candidate slate players: \(wnbaSlatePlayers.count), pool before augmentation: \(sortedPlayers.count)")
+        if !wnbaSlatePlayers.isEmpty {
+            let ourNames = Set(sortedPlayers.map { RotoGrindersSalaryProvider.normalizeName($0.name) })
+            var augmented = sortedPlayers
+            var injectedNames: [String] = []
+            var skippedAlreadyInPool = 0
+            let firstGameID = includedGames.first?.id ?? ""
+            var resolvedFromRoster = 0
+            for rgPlayer in wnbaSlatePlayers {
+                let normalized = RotoGrindersSalaryProvider.normalizeName(rgPlayer.fullName)
+                if ourNames.contains(normalized) {
+                    skippedAlreadyInPool += 1
+                    continue
+                }
+                // Prefer the ESPN-roster match — bench players are on their
+                // team's full ESPN roster, just outside the top-9 pool. Using
+                // the ESPN ID means live box-score scoring will match them
+                // naturally during the game. Fall back to a DK draftableId
+                // stub only when ESPN has no record of them.
+                let rosterMatch = fullWNBARosterByName[normalized]
+                let resolvedID = rosterMatch?.id ?? "wnba-\(rgPlayer.dkPlayerID ?? rgPlayer.rgPlayerID ?? rgPlayer.normalizedName)"
+                let resolvedTeam = rosterMatch?.team ?? ""
+                let resolvedProjection = rosterMatch?.projectedPoints ?? 0
+                if rosterMatch != nil { resolvedFromRoster += 1 }
+                augmented.append(DFSPlayer(
+                    id: resolvedID,
+                    name: rgPlayer.fullName,
+                    team: resolvedTeam,
+                    position: rgPlayer.position,
+                    salary: rgPlayer.utilSalary,
+                    projectedPoints: resolvedProjection,
+                    gameID: firstGameID,
+                    injuryStatus: nil
+                ))
+                injectedNames.append(rgPlayer.fullName)
+            }
+            print("[WNBA-DFS-2.5] resolved-from-roster: \(resolvedFromRoster)/\(injectedNames.count) — these will have live ESPN box-score stats")
+            if !injectedNames.isEmpty {
+                let preview = injectedNames.prefix(10).joined(separator: ", ")
+                print("[WNBA-DFS-2.5] injected \(injectedNames.count) DK-eligible players missing from ESPN pool: \(preview)\(injectedNames.count > 10 ? "…" : "")")
+            } else {
+                print("[WNBA-DFS-2.5] no missing players to inject (slate had \(wnbaSlatePlayers.count), \(skippedAlreadyInPool) already in pool)")
+            }
+            // Re-sort by salary so the augmented list flows back through the builder correctly.
+            sortedPlayers = augmented.sorted(by: { $0.salary > $1.salary })
+        }
+
+        let (tournaments, sgPlayers) = buildMultiTournamentSlate(
+            baseID: tournamentID,
+            league: "WNBA",
+            mainSalaryCap: 50000,
+            mainLineupSize: 8,
+            mainRosterSlots: nil,
+            isSingleGameSlate: isSingleGame,
+            includedGames: includedGames,
+            mainPlayers: sortedPlayers,
+            showdownSalaries: dkShowdownSalaries
+        )
+
+        let slate = DFSSlate(
+            tournaments: tournaments,
+            includedGames: includedGames,
+            players: sortedPlayers,
+            singleGamePlayers: sgPlayers
+        )
+        cache.setSlate(slate, key: "wnba")
+        return slate
+    }
+
+    private func fetchUpcomingWNBAEvents() async throws -> [NBAScoreboardEvent] {
+        let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date()
+        let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: Date()) ?? Date()
+        let dateKeys = [dateKey(for: yesterday), dateKey(for: Date()), dateKey(for: tomorrow)]
+
+        // Fetch all 3 days in parallel
+        let allScoreboards: [NBAScoreboardResponse] = await withTaskGroup(of: NBAScoreboardResponse?.self) { group in
+            for dk in dateKeys {
+                group.addTask {
+                    guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard?dates=\(dk)") else {
+                        return nil
+                    }
+                    guard let (data, response) = try? await self.session.data(from: url),
+                          let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                        return nil
+                    }
+                    return try? JSONDecoder.dfsDecoder.decode(NBAScoreboardResponse.self, from: data)
+                }
+            }
+            var results: [NBAScoreboardResponse] = []
+            for await result in group {
+                if let result { results.append(result) }
+            }
+            return results
+        }
+
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+
+        var preEvents: [NBAScoreboardEvent] = []
+        var liveEvents: [NBAScoreboardEvent] = []
+        var postEvents: [NBAScoreboardEvent] = []
+
+        for scoreboard in allScoreboards {
+            for event in scoreboard.events {
+                guard let competition = event.competitions.first else { continue }
+                let state = competition.status.type.state
+                // Accept "pre" games from today or later. A game that is "pre" but
+                // whose scheduled start has already passed (delayed tip-off) must
+                // still be included — ESPN's state is authoritative.
+                if state == "pre" && calendar.startOfDay(for: event.date) >= today {
+                    preEvents.append(event)
+                } else if state == "in" {
+                    liveEvents.append(event)
+                } else if state == "post" {
+                    postEvents.append(event)
+                }
+            }
+        }
+
+        // If there are live games, include them AND finished/upcoming games from the same day
+        // so that all players from the full slate are available for scoring
+        if !liveEvents.isEmpty {
+            let liveDay = calendar.startOfDay(for: liveEvents.first!.date)
+            let sameDayPost = postEvents.filter { calendar.startOfDay(for: $0.date) == liveDay }
+            let sameDayPre = preEvents.filter { calendar.startOfDay(for: $0.date) == liveDay }
+            return (liveEvents + sameDayPost + sameDayPre).sorted(by: { $0.date < $1.date })
+        }
+
+        // All-day slate: if there are finished (post) games from today AND upcoming (pre)
+        // games from today, include BOTH so the slate doesn't shrink when early games
+        // finish before late games start.
+        if !preEvents.isEmpty {
+            let earliestPreDay = preEvents.map { calendar.startOfDay(for: $0.date) }.min()!
+            let sameDayPost = postEvents.filter { calendar.startOfDay(for: $0.date) == earliestPreDay }
+            let sameDayPre = preEvents.filter { calendar.startOfDay(for: $0.date) == earliestPreDay }
+            if !sameDayPost.isEmpty {
+                return (sameDayPre + sameDayPost).sorted(by: { $0.date < $1.date })
+            }
+            // No games have started yet. Return the FULL upcoming window (today
+            // + tomorrow) rather than collapsing to the earliest day — the
+            // caller (fetchSlate) aligns the slate to whichever day DraftKings
+            // has actually priced. DK frequently posts tomorrow's main slate
+            // when today has only a lone early game it never made a slate for.
+            return preEvents.sorted(by: { $0.date < $1.date })
+        }
+
+        // No live or pre games — return today's finished (post) games so the tournament
+        // can still be loaded for settlement.
+        if !postEvents.isEmpty {
+            let calendar = Calendar.current
+            let today = calendar.startOfDay(for: Date())
+            let todaysPost = postEvents.filter { calendar.startOfDay(for: $0.date) == today }
+            if !todaysPost.isEmpty {
+                return todaysPost.sorted(by: { $0.date < $1.date })
+            }
+            // If no games today, return the most recent day's finished games
+            let groupedByDay = Dictionary(grouping: postEvents) { calendar.startOfDay(for: $0.date) }
+            if let mostRecentDay = groupedByDay.keys.sorted().last {
+                return (groupedByDay[mostRecentDay] ?? []).sorted(by: { $0.date < $1.date })
+            }
+        }
+
+        return []
+    }
+
+    private func uniqueTeams(from events: [NBAScoreboardEvent]) -> [NBATeamRef] {
+        var seen = Set<String>()
+        var result: [NBATeamRef] = []
+
+        for event in events {
+            guard let competition = event.competitions.first else { continue }
+            for competitor in competition.competitors {
+                let id = competitor.team.id
+                guard seen.insert(id).inserted else { continue }
+                result.append(NBATeamRef(id: id, abbreviation: competitor.team.abbreviation))
+            }
+        }
+
+        return result
+    }
+
+    private func fetchRoster(teamID: String, teamAbbreviation: String, gameID: String? = nil) async throws -> [DFSPlayer] {
+        // Check cache first
+        if let cached = cache.getRoster(teamID: teamID, gameID: gameID) {
+            return cached
+        }
+
+        let performanceRatings = try await fetchPerformanceRatings(teamID: teamID)
+        guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/teams/\(teamID)/roster") else {
+            return []
+        }
+
+        let (data, response) = try await session.data(from: url)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            return []
+        }
+
+        guard let roster = try? JSONDecoder().decode(NBARosterResponse.self, from: data) else {
+            return []
+        }
+
+        let players = roster.athletes.map { athlete in
+            let position = athlete.position?.abbreviation ?? "UTIL"
+            let fppg = performanceRatings[athlete.id] ?? 0.0
+            let salary = estimatedSalary(for: athlete.id, position: position, rating: fppg)
+            let projection = projectedPoints(for: salary, position: position, rating: fppg)
+
+            // Parse injury status
+            let injuryStatus: String?
+            if let injury = athlete.injuries?.first, let status = injury.status {
+                switch status.lowercased() {
+                case "out": injuryStatus = "O"
+                case "day-to-day": injuryStatus = "GTD"
+                case "questionable": injuryStatus = "Q"
+                case "doubtful": injuryStatus = "D"
+                case "probable": injuryStatus = "P"
+                default: injuryStatus = nil
+                }
+            } else {
+                injuryStatus = nil
+            }
+
+            return DFSPlayer(
+                id: "wnba-\(athlete.id)",
+                name: athlete.fullName,
+                team: teamAbbreviation,
+                position: position,
+                salary: salary,
+                projectedPoints: projection,
+                gameID: gameID,
+                injuryStatus: injuryStatus
+            )
+        }
+        .sorted { $0.projectedPoints > $1.projectedPoints }
+
+        cache.setRoster(teamID: teamID, gameID: gameID, players: players)
+        return players
+    }
+
+    /// Per-player stats parsed from ESPN: FPPG (fantasy points per game), GP, and minutes
+    struct PlayerStatProfile {
+        let fppg: Double          // fantasy points per game using DK formula
+        let gamesPlayed: Int
+        let minutesPerGame: Double
+        let ppg: Double
+    }
+
+    /// Fetch actual per-player stats from ESPN and compute fantasy point averages.
+    /// Returns [athleteID: PlayerStatProfile] for all players on the team.
+    private func fetchPerformanceRatings(teamID: String) async throws -> [String: Double] {
+        // Check cache first
+        if let cached = cache.getRatings(teamID: teamID) {
+            return cached
+        }
+
+        let profiles = try await fetchPlayerStatProfiles(teamID: teamID)
+        // Convert to simple ratings dictionary for cache compatibility
+        // Use FPPG directly as the "rating" — salary function will handle mapping
+        let ratings = profiles.mapValues { $0.fppg }
+        cache.setRatings(teamID: teamID, ratings: ratings)
+        return ratings
+    }
+
+    /// Parsed stat profiles cache (separate from the simple ratings cache)
+    private func fetchPlayerStatProfiles(teamID: String) async throws -> [String: PlayerStatProfile] {
+        guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/teams/\(teamID)/athletes/statistics") else {
+            return [:]
+        }
+        let (data, response) = try await session.data(from: url)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            return [:]
+        }
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let results = json["results"] as? [[String: Any]] else {
+            return [:]
+        }
+
+        var profiles: [String: PlayerStatProfile] = [:]
+
+        // results[0] contains all players with full statistics
+        guard let firstResult = results.first,
+              let leaders = firstResult["leaders"] as? [[String: Any]] else {
+            return [:]
+        }
+
+        for leader in leaders {
+            guard let athlete = leader["athlete"] as? [String: Any],
+                  let athleteID = athlete["id"] as? String else { continue }
+
+            guard let statistics = leader["statistics"] as? [[String: Any]] else { continue }
+
+            // Parse stats from all 3 sections (general, offensive, defensive)
+            var ppg: Double = 0, rpg: Double = 0, apg: Double = 0
+            var spg: Double = 0, bpg: Double = 0, topg: Double = 0
+            var gp: Int = 0, mpg: Double = 0
+            var threepmg: Double = 0
+
+            for section in statistics {
+                guard let stats = section["stats"] as? [[String: Any]] else { continue }
+                for stat in stats {
+                    guard let name = stat["name"] as? String,
+                          let value = stat["value"] as? Double else { continue }
+                    switch name {
+                    case "avgPoints": ppg = value
+                    case "avgRebounds": rpg = value
+                    case "avgAssists": apg = value
+                    case "avgSteals": spg = value
+                    case "avgBlocks": bpg = value
+                    case "avgTurnovers": topg = value
+                    case "gamesPlayed": gp = Int(value)
+                    case "avgMinutes": mpg = value
+                    case "avgThreePointFieldGoalsMade": threepmg = value
+                    default: break
+                    }
+                }
+            }
+
+            // Compute DK-style fantasy points per game
+            // DK NBA/WNBA: PTS×1 + REB×1.25 + AST×1.5 + STL×2 + BLK×2 + TO×-0.5 + 3PM×0.5
+            let fppg = ppg * 1.0
+                + rpg * 1.25
+                + apg * 1.5
+                + spg * 2.0
+                + bpg * 2.0
+                - topg * 0.5
+                + threepmg * 0.5
+
+            profiles[athleteID] = PlayerStatProfile(
+                fppg: fppg,
+                gamesPlayed: gp,
+                minutesPerGame: mpg,
+                ppg: ppg
+            )
+        }
+
+        return profiles
+    }
+
+    /// Map fantasy points per game to DK-style salary.
+    /// DK salary range: $3,500 - $12,500
+    private func estimatedSalary(for playerID: String, position: String, rating: Double) -> Int {
+        // rating is now FPPG (fantasy points per game)
+        let fppg = rating
+
+        let salary: Int
+        if fppg >= 50 {
+            // Superstars: steep curve at the top
+            let fraction = min(1.0, (fppg - 50.0) / 15.0)
+            salary = 10000 + Int(fraction * 2500.0)
+        } else if fppg >= 40 {
+            let fraction = (fppg - 40.0) / 10.0
+            salary = 8000 + Int(fraction * 2000.0)
+        } else if fppg >= 25 {
+            let fraction = (fppg - 25.0) / 15.0
+            salary = 5500 + Int(fraction * 2500.0)
+        } else if fppg >= 15 {
+            let fraction = (fppg - 15.0) / 10.0
+            salary = 4000 + Int(fraction * 1500.0)
+        } else {
+            let fraction = max(0, fppg) / 15.0
+            salary = 3500 + Int(fraction * 500.0)
+        }
+
+        // Round to nearest $100 with small stable jitter
+        let stableHash = playerID.utf8.reduce(0) { ($0 &* 31) &+ Int($1) }
+        let jitter = (abs(stableHash % 3) - 1) * 100  // -100, 0, or +100
+        let rounded = ((salary + jitter + 50) / 100) * 100
+        return max(3500, min(12500, rounded))
+    }
+
+    /// Project fantasy points based on actual FPPG from ESPN stats.
+    private func projectedPoints(for salary: Int, position: String, rating: Double) -> Double {
+        // rating is now FPPG — use it directly with slight regression to mean
+        let fppg = rating
+        // Players with no stats at all shouldn't get a free projection boost
+        guard fppg > 0 else { return 0.0 }
+        // Regress slightly toward position average to account for variance
+        let positionAvg: Double
+        switch position {
+        case "PG": positionAvg = 28.0
+        case "SG", "SF": positionAvg = 25.0
+        case "PF", "C": positionAvg = 27.0
+        default: positionAvg = 20.0
+        }
+        // 85% actual FPPG + 15% position average (mild regression)
+        let projected = fppg * 0.85 + positionAvg * 0.15
+        return (projected * 10).rounded() / 10
+    }
+
+    private func deduplicatePlayers(_ players: [DFSPlayer]) -> [DFSPlayer] {
+        var seen = Set<String>()
+        return players.filter { seen.insert($0.id).inserted }
+    }
+
+    private func dateKey(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = "yyyyMMdd"
+        return formatter.string(from: date)
+    }
+}
+
+// MARK: - WNBA DFS Live Scoring Provider
+//
+// Faithful clone of the NBA live scoring provider (`ESPNDFSLiveScoringProvider`)
+// with WNBA substitutions: ESPN summary endpoint uses `basketball/wnba` and
+// player IDs use the `wnba-` prefix. The DraftKings basketball box-score
+// scoring formula is IDENTICAL to NBA.
+
+struct ESPNWNBADFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
+    private let session: URLSession
+    init(session: URLSession = .shared) {
+        self.session = session
+    }
+
+    /// Result from fetching a single game's live data
+    private struct GameFetchResult: Sendable {
+        let gameID: String
+        let gameInfo: DFSGameLiveInfo
+        let playerResults: [(String, Double, DFSPlayerLiveStats)]
+        let isFinal: Bool
+    }
+
+    nonisolated func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
+        // Return cached snapshot if recent enough and for the same set of games
+        let gameIDs = Set(games.map { $0.id })
+        if let cached = LiveScoreCache.shared.get(gameIDs: gameIDs) {
+            return cached
+        }
+
+        // Fetch all game summaries in parallel
+        let results: [GameFetchResult] = await withTaskGroup(of: GameFetchResult?.self) { group in
+            for game in games {
+                guard !game.id.starts(with: "mock-") else { continue }
+                group.addTask {
+                    guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/summary?event=\(game.id)") else {
+                        return nil
+                    }
+
+                    guard let (data, response) = try? await self.session.data(from: url),
+                          let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                          let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                        return nil
+                    }
+
+                    let state = self.extractState(fromSummaryPayload: payload)
+                    let gameInfo = self.extractGameLiveInfo(fromSummaryPayload: payload, game: game)
+                    let gameStatus = gameInfo.displayStatus
+                    let gameFinal = gameInfo.state == "post"
+                    let playerResults = self.extractPlayerStats(fromSummaryPayload: payload, gameStatus: gameStatus, gameFinal: gameFinal)
+
+                    return GameFetchResult(
+                        gameID: game.id,
+                        gameInfo: gameInfo,
+                        playerResults: playerResults,
+                        isFinal: state == "post"
+                    )
+                }
+            }
+
+            var collected: [GameFetchResult] = []
+            for await result in group {
+                if let result { collected.append(result) }
+            }
+            return collected
+        }
+
+        var pointsByPlayerID: [String: Double] = [:]
+        var statsByPlayerID: [String: DFSPlayerLiveStats] = [:]
+        var gameLiveInfoByID: [String: DFSGameLiveInfo] = [:]
+
+        let hasMockGames = games.contains { $0.id.starts(with: "mock-") }
+        let fetchedGameIDs = Set(results.map { $0.gameID })
+        let failedNonMockGames = games.filter { !$0.id.starts(with: "mock-") && !fetchedGameIDs.contains($0.id) }
+
+        var allFetchedAreFinal = true
+
+        for result in results {
+            gameLiveInfoByID[result.gameID] = result.gameInfo
+            if !result.isFinal { allFetchedAreFinal = false }
+            for (playerID, fantasy, stats) in result.playerResults {
+                pointsByPlayerID[playerID] = fantasy
+                statsByPlayerID[playerID] = stats
+            }
+        }
+
+        // A real game we couldn't fetch is NOT assumed done unless its start is
+        // long past (a broken/stale event). A staggered slate's late game (e.g.
+        // a midnight kickoff) must keep the slate LIVE until it finishes instead
+        // of being tolerated as a failed fetch and settling the contest early.
+        let staleFetchCutoff: TimeInterval = 8 * 3600
+        let unfetchedStillPending = failedNonMockGames.contains { Date().timeIntervalSince($0.startTime) < staleFetchCutoff }
+        let allGamesFinal = !hasMockGames && allFetchedAreFinal && !results.isEmpty && !unfetchedStillPending
+
+        let snapshot = DFSScoreSnapshot(
+            playerFantasyPoints: pointsByPlayerID,
+            playerLiveStats: statsByPlayerID,
+            gameLiveInfo: gameLiveInfoByID,
+            allGamesFinal: allGamesFinal
+        )
+        LiveScoreCache.shared.set(snapshot, gameIDs: gameIDs)
+        return snapshot
+    }
+
+    nonisolated private func extractState(fromSummaryPayload payload: [String: Any]) -> String? {
+        guard let header = payload["header"] as? [String: Any],
+              let competitions = header["competitions"] as? [[String: Any]],
+              let competition = competitions.first,
+              let status = competition["status"] as? [String: Any],
+              let type = status["type"] as? [String: Any],
+              let state = type["state"] as? String else {
+            return nil
+        }
+        return state
+    }
+
+    nonisolated private func extractGameLiveInfo(fromSummaryPayload payload: [String: Any], game: DFSSlateGame) -> DFSGameLiveInfo {
+        var awayScore = 0
+        var homeScore = 0
+        var clock = "0:00"
+        var period = 1
+        var state = "pre"
+
+        if let header = payload["header"] as? [String: Any],
+           let competitions = header["competitions"] as? [[String: Any]],
+           let competition = competitions.first {
+
+            // Game state
+            if let status = competition["status"] as? [String: Any],
+               let typeInfo = status["type"] as? [String: Any],
+               let stateStr = typeInfo["state"] as? String {
+                state = stateStr
+            }
+
+            // Clock and period
+            if let status = competition["status"] as? [String: Any] {
+                clock = status["displayClock"] as? String ?? "0:00"
+                period = status["period"] as? Int ?? 1
+            }
+
+            // Team scores
+            if let competitors = competition["competitors"] as? [[String: Any]] {
+                for competitor in competitors {
+                    let score = Int(competitor["score"] as? String ?? "0") ?? 0
+                    let homeAway = competitor["homeAway"] as? String ?? ""
+                    if homeAway == "home" { homeScore = score }
+                    else { awayScore = score }
+                }
+            }
+        }
+
+        return DFSGameLiveInfo(
+            id: game.id,
+            awayTeam: game.awayTeam,
+            homeTeam: game.homeTeam,
+            awayScore: awayScore,
+            homeScore: homeScore,
+            clock: clock,
+            period: period,
+            state: state
+        )
+    }
+
+    nonisolated private func extractPlayerStats(
+        fromSummaryPayload payload: [String: Any],
+        gameStatus: String,
+        gameFinal: Bool
+    ) -> [(String, Double, DFSPlayerLiveStats)] {
+        guard let boxscore = payload["boxscore"] as? [String: Any],
+              let players = boxscore["players"] as? [[String: Any]] else {
+            return []
+        }
+
+        var results: [(String, Double, DFSPlayerLiveStats)] = []
+        for teamBlock in players {
+            guard let statistics = teamBlock["statistics"] as? [[String: Any]] else { continue }
+            for statCategory in statistics {
+                guard let labels = statCategory["labels"] as? [String],
+                      let athletes = statCategory["athletes"] as? [[String: Any]] else { continue }
+
+                // Build label index
+                var labelIndex: [String: Int] = [:]
+                for (i, label) in labels.enumerated() {
+                    labelIndex[label.uppercased()] = i
+                }
+
+                for athlete in athletes {
+                    guard let athleteInfo = athlete["athlete"] as? [String: Any],
+                          let athleteID = athleteInfo["id"] as? String,
+                          let values = athlete["stats"] as? [String] else { continue }
+
+                    let athleteName = (athleteInfo["displayName"] as? String)
+                        ?? (athleteInfo["shortName"] as? String)
+                        ?? "Player \(athleteID)"
+
+                    func doubleStat(_ key: String) -> Double {
+                        guard let idx = labelIndex[key], idx < values.count else { return 0 }
+                        return Double(values[idx]) ?? 0
+                    }
+                    func intStat(_ key: String) -> Int {
+                        Int(doubleStat(key))
+                    }
+                    func strStat(_ key: String) -> String {
+                        guard let idx = labelIndex[key], idx < values.count else { return "0" }
+                        return values[idx]
+                    }
+
+                    let pts = intStat("PTS")
+                    let reb = intStat("REB")
+                    let ast = intStat("AST")
+                    let stl = intStat("STL")
+                    let blk = intStat("BLK")
+                    let to = intStat("TO")
+                    let min = strStat("MIN")
+
+                    // Parse FG, 3PT, FT split stats
+                    let fgStr = strStat("FG")
+                    let fgParts = fgStr.split(separator: "-")
+                    let fgm = fgParts.count >= 1 ? Int(fgParts[0]) ?? 0 : 0
+                    let fga = fgParts.count >= 2 ? Int(fgParts[1]) ?? 0 : 0
+
+                    let threeStr = strStat("3PT")
+                    let threeParts = threeStr.split(separator: "-")
+                    let threePM = threeParts.count >= 1 ? Int(threeParts[0]) ?? 0 : 0
+                    let threePA = threeParts.count >= 2 ? Int(threeParts[1]) ?? 0 : 0
+
+                    let ftStr = strStat("FT")
+                    let ftParts = ftStr.split(separator: "-")
+                    let ftm = ftParts.count >= 1 ? Int(ftParts[0]) ?? 0 : 0
+                    let fta = ftParts.count >= 2 ? Int(ftParts[1]) ?? 0 : 0
+
+                    let fantasy =
+                        Double(pts) * 1.0 +
+                        Double(reb) * 1.2 +
+                        Double(ast) * 1.5 +
+                        Double(stl) * 3.0 +
+                        Double(blk) * 3.0 -
+                        Double(to) * 1.0
+
+                    let playerID = "wnba-\(athleteID)"
                     let stats = DFSPlayerLiveStats(
                         name: athleteName,
                         points: pts, rebounds: reb, assists: ast,
