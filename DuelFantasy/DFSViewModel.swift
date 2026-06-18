@@ -9842,9 +9842,26 @@ final class DFSViewModel {
             // on-conflict=tournament_id,entry_name doesn't collapse
             // them server-side. Dedupe here.
             let dedupedServerResults: [DFSTournamentResultRecord] = {
+                // Extract the lineup number ("Username #2" → 2; 1–20 only).
+                func lineupNumToken(_ name: String) -> String {
+                    if let hashRange = name.range(of: "#"),
+                       let num = Int(name[hashRange.upperBound...].trimmingCharacters(in: .whitespaces)),
+                       num >= 1 && num <= 20 {
+                        return String(num)
+                    }
+                    return ""
+                }
                 var bestByKey: [String: DFSTournamentResultRecord] = [:]
                 for r in serverResults {
-                    let lineupKey = "\(r.tournamentID)|\(r.lineupPlayerIDs.joined(separator: ","))"
+                    // Key on tid + playerIDs + LINEUP NUMBER. The lineup number
+                    // is essential: two SEPARATE entries of an IDENTICAL lineup
+                    // (the user submitted the same players as #1 AND #2) share
+                    // tid+playerIDs, so without the number they collapsed to one
+                    // — the duplicate lineup then took minutes to reappear once
+                    // the slower multi-lineup settle path restored it. A bad+good
+                    // re-settle of the SAME lineup keeps the same number, so it
+                    // still collapses (the original purpose of this dedup).
+                    let lineupKey = "\(r.tournamentID)|\(r.lineupPlayerIDs.joined(separator: ","))|\(lineupNumToken(r.entryName))"
                     if let existing = bestByKey[lineupKey] {
                         let existingDate = existing.createdAt ?? .distantPast
                         let newDate = r.createdAt ?? .distantPast
