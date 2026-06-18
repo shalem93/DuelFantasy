@@ -8115,8 +8115,18 @@ final class DFSViewModel {
         // Build DFSPlayer objects from scoring snapshot for salary-constrained bot lineup generation
         // All sports use $50K salary cap (DraftKings standard)
         let salaryCap: Int = tournament?.salaryCap ?? 50000
+        // Bots MUST match the user's lineup format. The re-settle guard clears +
+        // re-settles whenever saved-bot size ≠ the user's entry size — so a
+        // hardcoded per-sport guess that's wrong (e.g. WNBA classic = 7 but the
+        // switch had no `wnba` case → defaulted to 8) causes a perpetual
+        // clear→re-settle flip-flop (grade appears, then vanishes on the next
+        // refresh). The user's own submitted lineup is the source of truth, so
+        // size bots to it and a mismatch can never happen, for ANY sport.
         let botLineupSize: Int
-        if isSingleGame {
+        let userEntrySize = userEntry.lineupPlayerIDs.count
+        if userEntrySize > 0 {
+            botLineupSize = userEntrySize
+        } else if isSingleGame {
             botLineupSize = 6
         } else {
             switch sportPrefix {
@@ -8127,6 +8137,7 @@ final class DFSViewModel {
             case "nfl": botLineupSize = 9
             case "cfb": botLineupSize = 8
             case "ufc": botLineupSize = 6   // DK showdown — 6 fighters, no position slots
+            case "wnba": botLineupSize = 7  // WNBA classic
             default: botLineupSize = 8  // NBA
             }
         }

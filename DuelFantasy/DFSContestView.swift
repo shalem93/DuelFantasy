@@ -278,6 +278,19 @@ struct DFSContestView: View {
                                 await wnbaViewModel.loadSlate(force: true)
                                 await wnbaViewModel.refreshLive()
                             }
+                            // Retry settlement for ended-but-unsettled contests
+                            // across ALL sports. Settlement otherwise only runs
+                            // once on cold launch — so a contest whose games
+                            // finalized AFTER launch (e.g. a late/cross-midnight
+                            // WC or WNBA game) stays a LIVE 0.0 card until the
+                            // app is relaunched, because neither this refresh nor
+                            // refreshLive settles it. Detached so the tap stays
+                            // responsive; settlement skips already-settled tids.
+                            for vm in [viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
+                                       eplViewModel, uclViewModel, wcViewModel, ufcViewModel,
+                                       nflViewModel, cfbViewModel, ncaamViewModel, wnbaViewModel] {
+                                Task.detached { [vm] in await vm.checkAndSettleUnsettledTournaments() }
+                            }
                         }
                     } label: {
                         Image(systemName: "arrow.clockwise")
