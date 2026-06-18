@@ -7701,13 +7701,15 @@ final class DFSViewModel {
 
                     if countOK && userNamesGood && hasRealScores && botsHaveScores && allUserScored {
                         // Server has good data from a proper settlement — use it.
-                        // Also clear any stale exclusion: an earlier run may have
-                        // wrongly ghosted this contest (the settled flag got
-                        // clobbered during a sync mid-self-heal), so un-ghost it
-                        // now that we've confirmed the server can grade it.
+                        // NOTE: do NOT un-exclude here. `excludedTournamentIDs`
+                        // is also how a deliberate admin delete sticks (the
+                        // read-time filter in `dfsHistory` drops excluded rows),
+                        // and a deleted contest with good server data would be
+                        // wrongly resurrected. Wrong auto-ghosting is prevented
+                        // at the source now (the ghost hatch gates on
+                        // isTournamentFinished), so no good contest gets excluded.
                         print("[DFS-\(sport)] self-heal \(tid): server good (results=\(serverResults.count)) — marking settled + adding to history")
                         markTournamentSettled(tid)
-                        Self.unexcludeTournament(tid)
                         await addServerResultToHistoryIfMissing(tournamentID: tid, token: token, userID: userID)
                     } else {
                         print("[DFS-\(sport)] self-heal \(tid): server settled but data check FAILED (countOK=\(countOK) namesGood=\(userNamesGood) realScores=\(hasRealScores) botsHaveScores=\(botsHaveScores) allUserScored=\(allUserScored)) — re-settling")
