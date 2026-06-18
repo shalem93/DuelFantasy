@@ -7692,9 +7692,11 @@ final class DFSViewModel {
 
                     if countOK && userNamesGood && hasRealScores && botsHaveScores && allUserScored {
                         // Server has good data from a proper settlement — use it
+                        print("[DFS-\(sport)] self-heal \(tid): server good (results=\(serverResults.count)) — marking settled + adding to history")
                         markTournamentSettled(tid)
                         await addServerResultToHistoryIfMissing(tournamentID: tid, token: token, userID: userID)
                     } else {
+                        print("[DFS-\(sport)] self-heal \(tid): server settled but data check FAILED (countOK=\(countOK) namesGood=\(userNamesGood) realScores=\(hasRealScores) botsHaveScores=\(botsHaveScores) allUserScored=\(allUserScored)) — re-settling")
                         // Server was settled with bad/incomplete/duplicated data — re-settle properly
                         if tid.hasPrefix("pga-") {
                             await settleUnsettledPastGolfTournament(
@@ -9506,8 +9508,17 @@ final class DFSViewModel {
     private func addServerResultToHistoryIfMissing(tournamentID: String, token: String, userID: String) async {
         do {
             let allResults = try await SupabaseService.shared.fetchTournamentResults(tournamentID: tournamentID, accessToken: token)
-            let userResults = allResults.filter { $0.userID == userID && $0.isCurrentUser }
-            guard !userResults.isEmpty else { return }
+            // Match on userID ONLY — that already isolates the user's own rows.
+            // The previous `&& $0.isCurrentUser` could drop the user's result
+            // when the server row had that flag false/null, leaving the contest
+            // marked settled (gone from active cards) but with NO Past Results
+            // row — it just vanished. The settlement quality-check that gates
+            // this path matches on userID only, so this now agrees with it.
+            let userResults = allResults.filter { $0.userID == userID }
+            guard !userResults.isEmpty else {
+                print("[DFS-\(sport)] addServerResultToHistory \(tournamentID): server has \(allResults.count) results but NONE for this user — cannot add to history")
+                return
+            }
 
             let serverTournament = try? await SupabaseService.shared.fetchTournament(tournamentID: tournamentID, accessToken: token)
             let title = serverTournament?.title ?? "Tournament"
