@@ -1663,6 +1663,15 @@ final class DFSViewModel {
         set.insert(tournamentID)
         UserDefaults.standard.set((try? JSONEncoder().encode(set)) ?? Data(), forKey: excludedTournamentsKey)
     }
+    /// Reverse a `excludeTournament` — used when a contest that was wrongly
+    /// ghosted (e.g. the settled flag got clobbered mid-self-heal) turns out to
+    /// have good server results after all.
+    static func unexcludeTournament(_ tournamentID: String) {
+        var set = excludedTournamentIDs
+        guard set.contains(tournamentID) else { return }
+        set.remove(tournamentID)
+        UserDefaults.standard.set((try? JSONEncoder().encode(set)) ?? Data(), forKey: excludedTournamentsKey)
+    }
 
     var settledTournaments: Set<String> {
         guard let decoded = try? JSONDecoder().decode(Set<String>.self, from: settledTournamentData) else {
@@ -7691,9 +7700,14 @@ final class DFSViewModel {
                         || userResults2.allSatisfy { $0.totalPoints == 0 }  // all-zero handled separately
 
                     if countOK && userNamesGood && hasRealScores && botsHaveScores && allUserScored {
-                        // Server has good data from a proper settlement — use it
+                        // Server has good data from a proper settlement — use it.
+                        // Also clear any stale exclusion: an earlier run may have
+                        // wrongly ghosted this contest (the settled flag got
+                        // clobbered during a sync mid-self-heal), so un-ghost it
+                        // now that we've confirmed the server can grade it.
                         print("[DFS-\(sport)] self-heal \(tid): server good (results=\(serverResults.count)) — marking settled + adding to history")
                         markTournamentSettled(tid)
+                        Self.unexcludeTournament(tid)
                         await addServerResultToHistoryIfMissing(tournamentID: tid, token: token, userID: userID)
                     } else {
                         print("[DFS-\(sport)] self-heal \(tid): server settled but data check FAILED (countOK=\(countOK) namesGood=\(userNamesGood) realScores=\(hasRealScores) botsHaveScores=\(botsHaveScores) allUserScored=\(allUserScored)) — re-settling")
@@ -7730,7 +7744,14 @@ final class DFSViewModel {
                 // as a perpetual LIVE 0.0 card that can never resolve. Non-golf
                 // events finish same-day, so >1 day past + unsettleable = ghost.
                 // PGA has its own 7-day ghost in refreshLive (multi-day events).
-                if !tid.hasPrefix("pga-"), !settledTournaments.contains(tid) {
+                //
+                // Gate on isTournamentFinished (settled OR already in history),
+                // NOT just the settled flag: the good-data branch above adds the
+                // result to history but its settled flag can be clobbered by a
+                // concurrent sync during its `await`, which used to make this
+                // hatch wrongly ghost a perfectly-graded contest (a settled WNBA
+                // single game vanished from Past Results and got excluded).
+                if !tid.hasPrefix("pga-"), !isTournamentFinished(tid) {
                     let staleDays = now.timeIntervalSince(lockTime) / (24 * 3600)
                     if staleDays > 1 {
                         print("[DFS-\(sport)] \(tid): \(String(format: "%.1f", staleDays))d past and ungradeable (no ESPN scores) — ghosting from active")
