@@ -233,6 +233,39 @@ private struct SettledSyncModifier: ViewModifier {
     }
 }
 
+/// Settled-set write-back for the DFS view models that SettledSyncModifier
+/// doesn't cover (epl, ucl, wc, ufc, nfl, cfb, ncaam, wnba). ONLY the settled
+/// set — NOT history. History write-back from these VMs caused a clobber storm
+/// (syncHistoryData is a plain overwrite and applyServerHistory prunes), so
+/// history persists via the cross-sport merge instead. But the settled set is
+/// tiny and effectively append-only, and it's the durable half of
+/// `isTournamentFinished`. Without this, a self-healed WNBA/NCAAM contest's
+/// settled flag never reached the shared store, so a graded contest kept
+/// wobbling between a Past Result and a LIVE 0.0 card as syncs re-ran.
+private struct ExtraSettledSyncModifier: ViewModifier {
+    @Bindable var epl: DFSViewModel
+    @Bindable var ucl: DFSViewModel
+    @Bindable var wc: DFSViewModel
+    @Bindable var ufc: DFSViewModel
+    @Bindable var nfl: DFSViewModel
+    @Bindable var cfb: DFSViewModel
+    @Bindable var ncaam: DFSViewModel
+    @Bindable var wnba: DFSViewModel
+    var syncSettled: (Data) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: epl.settledTournamentData) { _, v in syncSettled(v) }
+            .onChange(of: ucl.settledTournamentData) { _, v in syncSettled(v) }
+            .onChange(of: wc.settledTournamentData) { _, v in syncSettled(v) }
+            .onChange(of: ufc.settledTournamentData) { _, v in syncSettled(v) }
+            .onChange(of: nfl.settledTournamentData) { _, v in syncSettled(v) }
+            .onChange(of: cfb.settledTournamentData) { _, v in syncSettled(v) }
+            .onChange(of: ncaam.settledTournamentData) { _, v in syncSettled(v) }
+            .onChange(of: wnba.settledTournamentData) { _, v in syncSettled(v) }
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject private var auth: AuthViewModel
     @Environment(\.scenePhase) private var scenePhase
@@ -576,6 +609,12 @@ struct ContentView: View {
                 golfTiers: golfTiersViewModel,
                 soccerTiers: soccerTiersViewModel,
                 syncRR: syncRRScore, syncHistory: syncHistoryData, syncSettled: syncSettledData
+            ))
+            .modifier(ExtraSettledSyncModifier(
+                epl: eplDFSViewModel, ucl: uclDFSViewModel, wc: wcDFSViewModel,
+                ufc: ufcDFSViewModel, nfl: nflDFSViewModel, cfb: cfbDFSViewModel,
+                ncaam: ncaamDFSViewModel, wnba: wnbaDFSViewModel,
+                syncSettled: syncSettledData
             ))
             .onChange(of: dfsHistoryData) { _, v in syncHistoryData(v) }
             .onChange(of: settledTournamentData) { _, v in syncSettledData(v) }
