@@ -1215,7 +1215,11 @@ struct DFSPastStandingsView: View {
         let isMVP = isSingleGameTournament && index == 0
         HStack(spacing: 0) {
             HStack(spacing: 4) {
-                let pos = slotPosition(for: playerID)
+                // A batter-row player must never badge "SP" — that leaks in from
+                // a two-way player's "-sp" pitcher sibling (or today's pool typing
+                // Ohtani as a pitcher). Treat SP here as a batter slot.
+                let rawPos = slotPosition(for: playerID)
+                let pos = rawPos == "SP" ? "1B" : rawPos
                 let slotText = isMVP ? "MVP" : (pos.isEmpty ? "\(index + 1)" : pos)
                 let isWide = isMVP || slotText.count > 2
                 Text(slotText)
@@ -1621,16 +1625,47 @@ struct DFSPastStandingsView: View {
     /// Treats $0 as missing so it falls through to the next source.
     /// Falls back to a minimum salary floor so every player always shows a price.
     private func salaryForPlayer(_ playerID: String, in record: DFSTournamentResultRecord) -> Int? {
-        if let sal = record.playerSalaries?[playerID], sal > 0 {
-            return sal
+        let direct = rawSalary(playerID, in: record)
+        // MLB two-way player (Ohtani): the lineup carries TWO entries for the
+        // same person — one scored as a batter, one as a pitcher — and the
+        // per-id salaries stored at submit time were sometimes swapped, so the
+        // batter row showed the pitcher's price and vice versa. Matching by id
+        // suffix isn't reliable (the stored ids/keys vary), so detect the pair
+        // the same way the section split does: same last name + OPPOSITE role
+        // (role read from the box-score stat shape). DK always prices the
+        // pitcher higher than the hitter, so assign max→pitcher, min→batter.
+        if isMLB, let mySal = direct {
+            let ids = record.lineupPlayerIDs
+            let names = record.lineupPlayerNames
+            func lastNameForLineupID(_ id: String) -> String {
+                let idx = ids.firstIndex(of: id)
+                let stored = (idx != nil && idx! < names.count) ? names[idx!] : id
+                return lastName(resolvePlayerName(storedName: stored, playerID: id)).lowercased()
+            }
+            let myName = lastNameForLineupID(playerID)
+            let myIsPitcher = isMLBPitcher(viewModel.pastTournamentPlayerStats[playerID])
+            if !myName.isEmpty {
+                for otherID in ids where otherID != playerID {
+                    guard lastNameForLineupID(otherID) == myName else { continue }
+                    let otherIsPitcher = isMLBPitcher(viewModel.pastTournamentPlayerStats[otherID])
+                    guard otherIsPitcher != myIsPitcher, let otherSal = rawSalary(otherID, in: record) else { continue }
+                    return myIsPitcher ? max(mySal, otherSal) : min(mySal, otherSal)
+                }
+            }
         }
-        if let sal = viewModel.pastTournamentSlateSalaries[playerID], sal > 0 {
-            return sal
-        }
+        if let direct { return direct }
         // Last resort: show minimum salary floor for the sport so no player is priceless
         if isNHL { return 4500 }
         if isMLB { return 2000 }
         return 3500
+    }
+
+    /// Direct salary lookup (per-entry record, then tournament slate). Treats
+    /// $0 as missing. No floor fallback — callers add that.
+    private func rawSalary(_ playerID: String, in record: DFSTournamentResultRecord) -> Int? {
+        if let sal = record.playerSalaries?[playerID], sal > 0 { return sal }
+        if let sal = viewModel.pastTournamentSlateSalaries[playerID], sal > 0 { return sal }
+        return nil
     }
 
 }

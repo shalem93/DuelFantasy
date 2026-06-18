@@ -696,10 +696,18 @@ struct ContentView: View {
             // merge across all VMs, so each one keeping its own results
             // is sufficient.
             Task { @MainActor in
+                // MUST include ncaam + wnba. The merged blob this produces is
+                // written back as the source of truth (syncHistoryData), and the
+                // merge only contributes rows from the VMs passed here. Omitting
+                // the WNBA/NCAAM VMs meant a freshly self-healed WNBA Past Result
+                // (which lives only on the WNBA VM until it propagates) was
+                // dropped from the merged blob and overwritten — flipping the
+                // settled contest back to a LIVE 0.0 card.
                 let allVMs: [DFSViewModel] = [
                     dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
                     eplDFSViewModel, uclDFSViewModel, wcDFSViewModel,
-                    ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel
+                    ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel,
+                    ncaamDFSViewModel, wnbaDFSViewModel
                 ]
                 if let userID = auth.userID, let token = auth.accessToken {
                     await DFSViewModel.syncAllSportsHistoryFromServer(
@@ -886,10 +894,14 @@ struct ContentView: View {
                     // Only ONCE — token churn must not re-spawn this (the
                     // primary sync is the .task(id: userID) above).
                     guard !didFireTokenHistorySync else { return }
+                    // Include ncaam + wnba (see the launch sync above) — the
+                    // merged blob overwrites the source of truth, so a VM left
+                    // out here has its rows erased.
                     let allVMs: [DFSViewModel] = [
                         dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
                         eplDFSViewModel, uclDFSViewModel, wcDFSViewModel,
-                        ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel
+                        ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel,
+                        ncaamDFSViewModel, wnbaDFSViewModel
                     ]
                     if let userID = auth.userID, let token = auth.accessToken {
                         didFireTokenHistorySync = true
@@ -1870,10 +1882,15 @@ struct ContentView: View {
                 // RR + Contests page already merge across VMs via the
                 // canonical-owner filter, so we don't need to fan the
                 // updated blob back to every other VM during the sync.
+                // Include ncaam + wnba: this merge writes the FileBlob via
+                // syncHistoryData, so it must carry the WNBA/NCAAM VMs or it
+                // can never capture their freshly-settled rows into the shared
+                // blob (and the contest cards keep flashing in/out).
                 let allDFSVMs: [DFSViewModel] = [
                     dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
                     eplDFSViewModel, uclDFSViewModel, wcDFSViewModel,
-                    ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel
+                    ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel,
+                    ncaamDFSViewModel, wnbaDFSViewModel
                 ]
                 if let userID = auth.userID, let token = auth.accessToken {
                     await DFSViewModel.syncAllSportsHistoryFromServer(

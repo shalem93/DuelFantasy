@@ -9726,6 +9726,12 @@ final class DFSViewModel {
         // tap" loop the user reported.
         if let onMergedHistory {
             func canonicalSport(for tid: String) -> String? {
+                // IMPORTANT: do NOT give wnba- a dedicated owner. Several merge
+                // callers pass only the original 10 VMs (no WNBA VM). If wnba-
+                // had owner "WNBA", such a merge would match NO VM in its list
+                // and DROP every wnba- row — wiping that history on each 10-VM
+                // sync. With no case (nil owner), a wnba- row is contributed by
+                // whatever VM holds it in the shared blob, so no merge deletes it.
                 if tid.hasPrefix("nba-") || tid.hasPrefix("ncaam-") { return "NBA" }
                 if tid.hasPrefix("nhl-") { return "NHL" }
                 if tid.hasPrefix("mlb-") { return "MLB" }

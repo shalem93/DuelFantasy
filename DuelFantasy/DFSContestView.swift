@@ -332,7 +332,8 @@ struct DFSContestView: View {
             let allVMs: [DFSViewModel] = [
                 viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
                 eplViewModel, uclViewModel, wcViewModel,
-                ufcViewModel, nflViewModel, cfbViewModel
+                ufcViewModel, nflViewModel, cfbViewModel,
+                ncaamViewModel, wnbaViewModel
             ]
             if let userID = viewModel.userID, let token = viewModel.accessToken {
                 await DFSViewModel.syncAllSportsHistoryFromServer(
