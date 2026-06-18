@@ -1010,10 +1010,100 @@ final class DFSViewModel {
         }
 
         var changedAny = false
+        let isSoccerSlate = sport == "EPL" || sport == "UCL" || sport == "WC"
+        let minPoolSalary = pool.map(\.salary).min() ?? 3500
         for i in fieldEntries.indices {
             let entry = fieldEntries[i]
             guard !entry.isCurrentUser, !entry.isRealUser else { continue }
             var ids = entry.playerIDs
+
+            if isSoccerSlate {
+                // SOCCER: re-draft every OPEN slot (game not started AND not yet
+                // a confirmed starter) from the confirmed pool within the bot's
+                // FREED budget (cap minus locked confirmed/started salary). The
+                // generation pass reserves budget by parking unconfirmed slots
+                // on cheap placeholders, so here we can afford the best available
+                // confirmed starters — biased to LATER games so late-game studs
+                // (Díaz/Suárez) get real exposure. A per-bot deterministic RNG
+                // spreads the field (not every bot grabs the same stud) and keeps
+                // picks stable across refreshes (no leaderboard churn). Slots
+                // whose game's XI isn't out yet have no confirmed candidates and
+                // simply keep their placeholder until a later refresh.
+                var openSlots: [Int] = []
+                var lockedSalary = 0
+                var selected = Set<String>()
+                for slot in ids.indices {
+                    let cur = byID[ids[slot]]
+                    if let cur, !gameHasStarted(cur.gameID), !cur.isConfirmedActive {
+                        openSlots.append(slot)
+                    } else {
+                        if let cur { lockedSalary += cur.salary }
+                        selected.insert(ids[slot])
+                    }
+                }
+                guard !openSlots.isEmpty else { continue }
+                var budgetLeft = cap - lockedSalary
+                // Fill scarcer positions first (GK) so a tight slot isn't starved.
+                let ordered = openSlots.sorted {
+                    (candidatesByPos[byID[ids[$0]]?.position ?? ""]?.count ?? 0) <
+                    (candidatesByPos[byID[ids[$1]]?.position ?? ""]?.count ?? 0)
+                }
+                // Per-(bot,slot) deterministic pick from a STABLE key (the bot's
+                // NAME + slot index) — NOT entry.id, which is a fresh per-device
+                // UUID. The field is persisted and SHARED across every real user,
+                // so every device must compute the identical result; seeding off
+                // the stable, server-persisted name guarantees that. Per-slot
+                // (rather than a sequential RNG) makes each pick independent of
+                // how many other slots a given refresh happens to optimize, so
+                // progressive optimization across staggered games still converges.
+                func pickUnit(_ slot: Int) -> Double {
+                    var h: UInt64 = 14695981039346656037
+                    for b in entry.name.utf8 { h = (h ^ UInt64(b)) &* 1099511628211 }
+                    h = (h ^ UInt64(slot &+ 1)) &* 1099511628211
+                    return Double(h >> 11) / Double(UInt64(1) << 53)
+                }
+                var remaining = ordered.count
+                var rowChanged = false
+                for slot in ordered {
+                    remaining -= 1
+                    guard let cur = byID[ids[slot]] else { continue }
+                    let pos = cur.position
+                    let reserve = remaining * minPoolSalary
+                    // SAME-GAME upgrade: only replace the placeholder with a
+                    // confirmed starter from ITS OWN game. This keeps the bot's
+                    // late-game allocation intact — a slot the bot reserved for
+                    // the last game (Colombia) stays a cheap placeholder until
+                    // that XI posts, THEN upgrades to a confirmed Colombia
+                    // starter (Díaz/Suárez). Without this, the slot would get
+                    // filled by an earlier-confirmed game and the late-game
+                    // studs would never get exposure (the 0% bug).
+                    let affordable = (candidatesByPos[pos] ?? []).filter {
+                        $0.gameID == cur.gameID && !selected.contains($0.id) && $0.salary <= budgetLeft - reserve
+                    }
+                    guard !affordable.isEmpty else { continue }
+                    // Weighted pick: r*r biases toward higher projection within
+                    // the game; the stable per-bot hash spreads ownership.
+                    let r = pickUnit(slot)
+                    let idx = min(affordable.count - 1, Int(Double(affordable.count) * r * r))
+                    let pick = affordable[idx]
+                    if pick.id != ids[slot] { rowChanged = true }
+                    ids[slot] = pick.id
+                    selected.insert(pick.id)
+                    budgetLeft -= pick.salary
+                }
+                if rowChanged {
+                    fieldEntries[i] = DFSFieldEntry(
+                        id: entry.id, name: entry.name, playerIDs: ids,
+                        isCurrentUser: false, isRealUser: false, realUserID: nil
+                    )
+                    changedAny = true
+                }
+                continue
+            }
+
+            // NON-soccer (MLB, …): original 1-for-1 swap — replace each
+            // not-started, unconfirmed slot with the best affordable confirmed
+            // starter of the same position. Unchanged behavior.
             var selected = Set(ids)
             var usedSalary = ids.reduce(0) { $0 + (byID[$1]?.salary ?? 0) }
             var rowChanged = false
@@ -2952,6 +3042,23 @@ final class DFSViewModel {
             // while still letting high-projection late-game stars surface.
             var baseProj = p.projectedPoints
             if isSoccer && p.isConfirmedActive { baseProj *= 1.5 }
+            // Soccer staggered slates: an UNCONFIRMED player is a later-game
+            // slot whose XI isn't out yet — a placeholder the late-swap pass
+            // will upgrade to a confirmed starter once that game's lineup
+            // posts. Bias bots toward CHEAP unconfirmed fills, scaled by price:
+            //   (a) stops bots over-rostering expensive non-starters (the $8K
+            //       Ollie Watkins problem — he isn't confirmed but his price
+            //       pulled him into 16% of lineups), and
+            //   (b) reserves salary so the late swap can actually afford the
+            //       confirmed late-game studs (Luis Díaz $9.5K, Suárez $8K)
+            //       that were landing at 0% because the budget was already
+            //       spent on early-game certainties.
+            if isSoccer && !p.isConfirmedActive {
+                // priceFactor ~1.0 when the player costs an average slot's
+                // worth of cap, higher when pricier. Pricier => bigger cut.
+                let priceFactor = Double(p.salary) / (Double(salaryCap) / Double(max(1, lineupSize)))
+                baseProj *= max(0.35, 1.0 - 0.45 * priceFactor)
+            }
             let newProj = max(baseProj + noise, 0.5)
             var scrambledPlayer = DFSPlayer(
                 id: p.id, name: p.name, team: p.team, position: p.position,
@@ -4640,13 +4747,15 @@ final class DFSViewModel {
 
         // BOT late swap: before scoring, swap each bot's not-yet-started,
         // unconfirmed picks for confirmed starters (DNP avoidance). Started-game
-        // players are pinned. IN-MEMORY ONLY (no per-refresh server write) so it
-        // can never destabilize the field/build path — the live leaderboard
-        // reflects the swaps; final settlement re-derives independently. Only
-        // runs once the field is actually built, and is idempotent. No-op for
-        // non-late-swap slates.
+        // players are pinned. The swap is DETERMINISTIC (per-bot-name seeded), so
+        // every device computes the identical in-memory field from the same shared
+        // saved bots — live standings stay consistent across users with NO server
+        // write. The AUTHORITATIVE shared final field is produced at settlement
+        // (`upgradeSoccerBotsForSettlement`), which runs whenever the app opens
+        // after games — so late-game exposure no longer depends on a client being
+        // open during each game's confirm→kickoff window. In-memory only here.
         if supportsLateSwap && !allGamesStarted && fieldEntries.count >= 5 {
-            applyLateSwapBotOptimization()
+            _ = applyLateSwapBotOptimization()
         }
 
         let leaderboard = DFSEngine.computeLeaderboard(
@@ -7872,7 +7981,7 @@ final class DFSViewModel {
                 } else {
                     pos = "SP"    // Pitcher (minutes field is IP like "6.0")
                 }
-            } else if sportPrefix == "epl" || sportPrefix == "ucl" {
+            } else if sportPrefix == "epl" || sportPrefix == "ucl" || sportPrefix == "wc" {
                 // Soccer: position encoded as "GK:90'" or "DEF:85'" in minutes field
                 let mins = snapshot.playerLiveStats[pid]?.minutes ?? ""
                 if let colonIdx = mins.firstIndex(of: ":") {
@@ -8329,6 +8438,83 @@ final class DFSViewModel {
             return total
         }
 
+        // SETTLEMENT-TIME late swap for ALL late-swap sports (client-window-
+        // independent). A staggered slate generates bots at the EARLIEST game's
+        // lock, so later games are filled with cheap UNCONFIRMED placeholders. If
+        // no client was open during a late game's confirm→lock window, those never
+        // got upgraded live — so here, at settlement (which runs whenever the app
+        // opens after games), any placeholder that turned out to be a DNP (didn't
+        // appear in the boxscore) is upgraded to a player who ACTUALLY PLAYED in
+        // the same roster slot. Ranked by SALARY (a pre-game value proxy, NEVER by
+        // points → no hindsight) with a deterministic per-bot-name hash so every
+        // user settles to the IDENTICAL field (same bot in 1st/2nd/3rd for all).
+        // High-salary studs who played (late-game forwards, late MLB bats, etc.)
+        // thus get realistic exposure. Players who appeared are kept as drafted.
+        // Applies to every late-swap sport (NBA/NHL/MLB/NFL/CFB/soccer) — i.e.
+        // multi-game, non-single-game, excluding UFC/PGA. Where the settlement
+        // position derivation is coarse (NHL skater-vs-goalie; football all-UTIL),
+        // matching falls back to "any appeared player" so DNP slots still upgrade.
+        let isLateSwapSettle = !isSingleGame && !["ufc", "pga"].contains(sportPrefix)
+        let appearedIDs = Set(allPlayers.map(\.id))
+        // Deterministic salary for ranking/budget (NEVER Int.random — every device
+        // must agree): canonical tournament price, else a stable id-hash estimate.
+        func detSal(_ id: String) -> Int {
+            if let s = tournamentSalaries[id], s > 0 { return s }
+            var h: UInt64 = 14695981039346656037
+            for b in id.utf8 { h = (h ^ UInt64(b)) &* 1099511628211 }
+            return 3000 + Int(h % 5000) // $3000–$8000, deterministic
+        }
+        // All appeared players, ordered by salary desc then id (stable tiebreak so
+        // dict-iteration order can't make two devices diverge).
+        let appearedSorted: [String] = allPlayers.map(\.id)
+            .sorted { detSal($0) != detSal($1) ? detSal($0) > detSal($1) : $0 < $1 }
+        let posByID = Dictionary(allPlayers.map { ($0.id, $0.position) }, uniquingKeysWith: { a, _ in a })
+        // Does an appeared player's derived position fill this roster slot?
+        func posFillsSlot(_ pos: String, _ slot: String) -> Bool {
+            switch sportPrefix {
+            case "epl", "ucl", "wc": return slot == "FLEX" ? pos != "GK" : pos == slot
+            case "mlb": let p: Set<String> = ["SP", "RP", "P"]; return slot == "P" ? p.contains(pos) : !p.contains(pos)
+            case "nhl": return slot == "G" ? pos == "G" : pos != "G"
+            default: return false // football/ncaam: positions are all UTIL → fall back to any
+            }
+        }
+        // Precompute the candidate list per distinct slot name (salary-sorted),
+        // with a permissive fallback to all appeared players when none match.
+        var candsBySlot: [String: [String]] = [:]
+        if isLateSwapSettle, let slots = botRosterSlots {
+            for slot in Set(slots) {
+                let matched = appearedSorted.filter { posFillsSlot(posByID[$0] ?? "", slot) }
+                candsBySlot[slot] = matched.isEmpty ? appearedSorted : matched
+            }
+        }
+        func upgradeBotLineup(_ botName: String, _ ids: [String]) -> [String] {
+            guard isLateSwapSettle else { return ids }
+            let slots = botRosterSlots
+            var newIDs = ids
+            var used = Set(ids)
+            var usedSalary = ids.reduce(0) { $0 + detSal($1) }
+            for i in ids.indices {
+                let pid = ids[i]
+                if appearedIDs.contains(pid) { continue } // played → keep as drafted
+                let curSal = detSal(pid)
+                let pool: [String] = (slots != nil && i < slots!.count) ? (candsBySlot[slots![i]] ?? appearedSorted) : appearedSorted
+                let cands = pool.filter { !used.contains($0) && (usedSalary - curSal + detSal($0)) <= salaryCap }
+                guard !cands.isEmpty else { continue }
+                // Deterministic per-(bot,slot) pick; r*r biases toward top salary
+                // while the bot-name hash spreads exposure across the field.
+                var h: UInt64 = 14695981039346656037
+                for b in botName.utf8 { h = (h ^ UInt64(b)) &* 1099511628211 }
+                h = (h ^ UInt64(i &+ 1)) &* 1099511628211
+                let r = Double(h >> 11) / Double(UInt64(1) << 53)
+                let idx = min(cands.count - 1, Int(Double(cands.count) * r * r))
+                let pick = cands[idx]
+                newIDs[i] = pick
+                used.remove(pid); used.insert(pick)
+                usedSalary += detSal(pick) - curSal
+            }
+            return newIDs
+        }
+
         if let savedBots = savedBotField, !savedBots.isEmpty {
             // Only use enough saved bots to fill remaining slots (don't exceed entryCount)
             let botsToUse = max(0, entryCount - totalRealEntries)
@@ -8348,9 +8534,12 @@ final class DFSViewModel {
             }
             print("[DFS] Using \(validSavedBots.count) of \(savedBots.count) saved bot lineups for \(tournamentID) (entryCount=\(entryCount), realEntries=\(totalRealEntries), wrongSize=\(invalidCount))")
             for bot in validSavedBots {
-                let botTotal = lineupTotal(bot.playerIDs)
-                let pnames = bot.playerIDs.map { playerNameLookup[$0] ?? $0 }
-                let ppts = Dictionary(uniqueKeysWithValues: bot.playerIDs.enumerated().map { (i, pid) in
+                // Upgrade DNP placeholders to players who appeared, in the same
+                // slot — all late-swap sports; no-op for single-game/UFC/PGA.
+                let lineupIDs = upgradeBotLineup(bot.name, bot.playerIDs)
+                let botTotal = lineupTotal(lineupIDs)
+                let pnames = lineupIDs.map { playerNameLookup[$0] ?? $0 }
+                let ppts = Dictionary(uniqueKeysWithValues: lineupIDs.enumerated().map { (i, pid) in
                     let raw = (snapshot.playerFantasyPoints[pid] ?? 0)
                     return (pid, (isSingleGame && i == 0) ? raw * 1.5 : raw)
                 })
@@ -8364,7 +8553,7 @@ final class DFSViewModel {
                 // Without (1)+(2), bots saved with prices from a different RG fetch
                 // moment than the user submission display higher prices for the same
                 // player ($13K Towns next to user's $10K Towns in the same contest).
-                let psals = Dictionary(uniqueKeysWithValues: bot.playerIDs.enumerated().map { (i, pid) -> (String, Int) in
+                let psals = Dictionary(uniqueKeysWithValues: lineupIDs.enumerated().map { (i, pid) -> (String, Int) in
                     let userSal = userStoredSalaries[pid] ?? 0
                     let tourneySal = tournamentSalaries[pid] ?? 0
                     let savedSal = bot.playerSalaries?[pid] ?? 0
@@ -8379,7 +8568,7 @@ final class DFSViewModel {
                 })
                 field.append(SimEntry(
                     name: bot.name,
-                    playerIDs: bot.playerIDs,
+                    playerIDs: lineupIDs,
                     playerNames: pnames,
                     playerPoints: ppts,
                     playerSalaries: psals,
