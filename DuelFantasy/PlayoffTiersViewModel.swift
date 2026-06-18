@@ -68,13 +68,17 @@ final class PlayoffTiersViewModel {
     // MARK: - Local Bot Cache
     private static let botCacheKey = "playoff_tiers_bot_cache"
 
+    // Bot fields (hundreds–thousands of entries) live on disk via FileBlobStore,
+    // NOT UserDefaults — they were a prime contributor to the 4MB CFPreferences
+    // overflow that silently dropped all other defaults writes (rr_score, etc.).
     private func saveBotCacheLocally(_ botPicksData: [[String: Any]], tournamentID: String) {
         guard let data = try? JSONSerialization.data(withJSONObject: botPicksData) else { return }
-        UserDefaults.standard.set(data, forKey: "\(Self.botCacheKey)_\(tournamentID)")
+        FileBlobStore.shared.save(key: "\(Self.botCacheKey)_\(tournamentID)", data: data)
     }
 
     private func loadBotCacheLocally(tournamentID: String) -> [[String: Any]]? {
-        guard let data = UserDefaults.standard.data(forKey: "\(Self.botCacheKey)_\(tournamentID)"),
+        let data = FileBlobStore.shared.load(key: "\(Self.botCacheKey)_\(tournamentID)")
+        guard !data.isEmpty,
               let parsed = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return nil }
         return parsed
     }
@@ -507,8 +511,11 @@ final class PlayoffTiersViewModel {
             currentUserID: userID
         )
 
-        // Check if playoffs are complete → settle
-        if tournament.status == "live" {
+        // Check if playoffs are complete → settle. Fire from "locked" too,
+        // not just "live": if the live transition was ever missed (app wasn't
+        // open when games started), a finished postseason would otherwise
+        // never grade and the contest would hang unsettled forever.
+        if tournament.status == "live" || tournament.status == "locked" {
             let complete = await espnProvider.checkPlayoffsComplete()
             if complete {
                 await settle()

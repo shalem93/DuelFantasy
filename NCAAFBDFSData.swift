@@ -157,13 +157,10 @@ struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
                 }
                 print("[CFB-DFS] sameSlate=true (\(matchCount)/\(deduped.count)), applied=\(applied), calibrated=\(calibrated), range=$\(rgMin)-$\(rgMax)")
             } else {
-                // Slates don't match -- keep estimated salaries
-                print("[CFB-DFS] sameSlate=false (\(matchCount)/\(deduped.count)), keeping estimated salaries")
-                finalPlayers = deduped
+                throw NSError(domain: "CFBDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's CFB slate"])
             }
         } else {
-            print("[CFB-DFS] No real salary data available -- using estimated salaries")
-            finalPlayers = deduped
+            throw NSError(domain: "CFBDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's CFB slate"])
         }
 
         let sortedPlayers = finalPlayers.sorted(by: { $0.salary > $1.salary })

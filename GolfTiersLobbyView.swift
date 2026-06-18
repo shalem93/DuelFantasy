@@ -8,6 +8,10 @@ struct GolfTiersLobbyView: View {
     @State private var showGroupsList = false
     @State private var newGroupName = ""
     @State private var joinCode = ""
+    // Present group detail as a sheet — the in-scroll NavigationLink wasn't
+    // pushing reliably from this nested context, so a sheet (with its own
+    // NavigationStack) guarantees the freshly-created group is tappable.
+    @State private var selectedGroup: GolfTiersGroup?
 
     private var darkGreen: Color {
         Color(red: 0.05, green: 0.45, blue: 0.25)
@@ -88,6 +92,16 @@ struct GolfTiersLobbyView: View {
             joinGroupSheet
         }
         .sheet(isPresented: $showGroupsList) { groupsListSheet }
+        .sheet(item: $selectedGroup) { group in
+            NavigationStack {
+                GolfTiersGroupDetailView(viewModel: viewModel, group: group)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("Done") { selectedGroup = nil }
+                        }
+                    }
+            }
+        }
     }
 
     // MARK: - Groups List Sheet (toolbar-accessed quick view)
@@ -867,8 +881,8 @@ struct GolfTiersLobbyView: View {
             } else {
                 VStack(spacing: 0) {
                     ForEach(viewModel.myGroups) { group in
-                        NavigationLink {
-                            GolfTiersGroupDetailView(viewModel: viewModel, group: group)
+                        Button {
+                            selectedGroup = group
                         } label: {
                             groupRow(group)
                         }
@@ -914,6 +928,9 @@ struct GolfTiersLobbyView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+        // Make the ENTIRE cell tappable (incl. the Spacer whitespace), not just
+        // the icon/text — a transparent area doesn't register hits otherwise.
+        .contentShape(Rectangle())
     }
 
     // MARK: - Create Group Sheet

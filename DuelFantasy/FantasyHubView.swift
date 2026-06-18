@@ -44,7 +44,11 @@ struct FantasyHubView: View {
     /// the section flickered to empty for the duration of the next fetch.
     /// We still refresh in the background on each appearance, but the
     /// UI renders the cached blob instantly.
-    @AppStorage("fantasyPastResultsCache") private var fantasyPastResultsCache: Data = Data()
+    // On disk, not UserDefaults: this caches every fantasy/tiers past result and
+    // was a major contributor to the 4MB CFPreferences overflow that silently
+    // dropped writes AND returned corrupt reads (`decode: bad range`) for other
+    // keys — scrambling the live RR aggregation. FileBlob auto-migrates it.
+    @FileBlob("fantasyPastResultsCache") private var fantasyPastResultsCache: Data
     /// True only when we have neither cached data nor a completed fetch.
     /// Used to show a loading indicator instead of the "No past results"
     /// empty state during the cold-load window.
@@ -355,19 +359,24 @@ struct FantasyHubView: View {
                 .foregroundStyle(.secondary)
                 .padding(.leading, 4)
 
-            // NBA Playoff Tiers
-            NavigationLink {
-                PlayoffTiersLobbyView(viewModel: playoffTiersViewModel)
-            } label: {
-                gameTypeCard(
-                    title: "NBA Playoff Tiers",
-                    subtitle: "Pick 1 player from each of 6 tiers for the entire NBA postseason",
-                    icon: "basketball.fill",
-                    gradient: [Color(red: 0.10, green: 0.15, blue: 0.30), Color(red: 0.15, green: 0.25, blue: 0.50)],
-                    status: playoffTiersCardStatus
-                )
+            // NBA Playoff Tiers — only offered while it's still joinable.
+            // Once the postseason locks/finishes (e.g. the season's over after
+            // the Finals), it drops out of GAME TYPES; an in-progress entry
+            // shows under ACTIVE CONTESTS and a finished one under PAST RESULTS.
+            if showPlayoffTiersGameTypeCard {
+                NavigationLink {
+                    PlayoffTiersLobbyView(viewModel: playoffTiersViewModel)
+                } label: {
+                    gameTypeCard(
+                        title: "NBA Playoff Tiers",
+                        subtitle: "Pick 1 player from each of 6 tiers for the entire NBA postseason",
+                        icon: "basketball.fill",
+                        gradient: [Color(red: 0.10, green: 0.15, blue: 0.30), Color(red: 0.15, green: 0.25, blue: 0.50)],
+                        status: playoffTiersCardStatus
+                    )
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
 
             // Best Ball Fantasy (season-long, multi-sport)
             NavigationLink {
@@ -470,6 +479,15 @@ struct FantasyHubView: View {
         case "settled": return .settled
         default: return .open
         }
+    }
+
+    /// Show NBA Playoff Tiers in GAME TYPES only while it's still joinable
+    /// (status "open"). Once it locks/goes live/settles — or there's no active
+    /// postseason tournament at all (off-season) — it's hidden from the
+    /// launcher. Participants still reach a live entry via ACTIVE CONTESTS and
+    /// a finished one via PAST RESULTS.
+    private var showPlayoffTiersGameTypeCard: Bool {
+        playoffTiersViewModel.tournament?.status == "open"
     }
 
     private var golfTiersCardStatus: GameStatus {

@@ -14,6 +14,14 @@ struct GameOnApp: App {
     @StateObject private var auth = AuthViewModel()
     @Environment(\.scenePhase) private var scenePhase
 
+    init() {
+        // Drop any oversized legacy blobs out of UserDefaults BEFORE anything
+        // reads/writes it. The CFPreferences domain has a 4MB ceiling; once
+        // exceeded, writes fail silently and reads corrupt (`decode: bad range`),
+        // which destabilized the RR total. Caches regenerate; settings are tiny.
+        FileBlobStore.sweepOversizedDefaults()
+    }
+
     var body: some Scene {
         WindowGroup {
             Group {

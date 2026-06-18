@@ -215,28 +215,16 @@ struct ESPNUFCDFSSlateProvider: DFSSlateProvider {
         let tournamentID = "ufc-\(dateKey(for: slateDate))"
         let isSingleGame = includedGames.count == 1
 
-        // Captain-mode detection. Three signals, any of which flips us
-        // into MVP + 5 FLEX:
-        //   1. LineupHQ master has ONLY showdown slates (no classic).
-        //   2. We never got real DK salary data from any source —
-        //      historically every UFC special event we can't reach via
-        //      our normal scrapers ends up being a captain-mode-only
-        //      contest. Default to captain mode rather than the
-        //      classic-only fallback so the lineup shape matches DK.
-        //   3. The card has 7+ fights — DK only publishes classic
-        //      contests for ~3-fight Fight Night cards; everything
-        //      bigger is showdown-only.
-        let lineupHQCaptain = await RotoGrindersSalaryProvider.shared.detectCaptainMode(sport: "mma", date: resolvedDate)
-        let noRealSalaries = rgSalaries.isEmpty
-        let bigCard = fights.count >= 7
-        let isCaptainMode = lineupHQCaptain || noRealSalaries || bigCard
-        if isCaptainMode {
-            let reason: String
-            if lineupHQCaptain { reason = "LineupHQ master has only showdown slates" }
-            else if noRealSalaries { reason = "no real salary data available" }
-            else { reason = "\(fights.count)-fight card" }
-            print("[UFC-DFS] Captain mode detected (\(reason)) — using MVP + 5 FLEX roster")
-        }
+        // Slate format comes straight from what DraftKings/LineupHQ actually
+        // offers for this card — captain (showdown) ONLY when there's a
+        // showdown slate and NO classic one. The old fight-count heuristic was
+        // wrong in BOTH directions: DK runs big Fight Night cards (12+ fights)
+        // as CLASSIC (6 fighters) and numbered PPVs as showdown. Detecting from
+        // the real slate keeps drafting AND grading congruent with what was
+        // played (the captain flag is also persisted on the tournament so
+        // settlement grades it the same way).
+        let isCaptainMode = await RotoGrindersSalaryProvider.shared.detectCaptainMode(sport: "mma", date: resolvedDate)
+        print("[UFC-DFS] Slate format from LineupHQ: \(isCaptainMode ? "captain (MVP + 5 FLEX)" : "classic (6 fighters)")")
         let rosterSlots: [String]? = isCaptainMode
             ? ["MVP", "FLEX", "FLEX", "FLEX", "FLEX", "FLEX"]
             : nil
@@ -246,6 +234,14 @@ struct ESPNUFCDFSSlateProvider: DFSSlateProvider {
         // same date the main salary fetch resolved against so we hit
         // the right LineupHQ bucket for PPV cards.
         let ufcShowdownSalaries = await RotoGrindersSalaryProvider.shared.fetchAllShowdownSalaries(sport: "ufc", date: resolvedDate)
+
+        // Don't offer a UFC slate built on prices we made up. If neither the
+        // classic/main salary feed NOR the per-fight showdown feed returned
+        // real DraftKings/LineupHQ prices, the card hasn't been posted yet —
+        // wait and show nothing rather than ship estimated salaries.
+        guard !rgSalaries.isEmpty || !ufcShowdownSalaries.isEmpty else {
+            throw NSError(domain: "UFCDFS", code: 3, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post this UFC slate"])
+        }
 
         let (tournaments, sgPlayers) = buildMultiTournamentSlate(
             baseID: tournamentID,
@@ -548,7 +544,15 @@ struct ESPNUFCDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
         var allComps: [String: UFCScoreboardCompetition] = [:]  // compID → competition
         var eventIDForComp: [String: String] = [:]  // compID → eventID
 
-        for dk in [yesterday, today, tomorrow] {
+        // CRITICAL: always include the DATES of the games we were asked to score.
+        // The fixed yesterday/today/tomorrow window can't reach a PAST card (e.g.
+        // settling a UFC event from 2+ days ago), so its competitions are never
+        // found and every fighter scores 0 — which silently aborted settlement
+        // and stranded those contests in "Upcoming" forever.
+        var queryDates = Set([yesterday, today, tomorrow])
+        for g in games { queryDates.insert(Self.dateKey(for: g.startTime)) }
+
+        for dk in queryDates {
             guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard?dates=\(dk)") else { continue }
             guard let (data, response) = try? await session.data(from: url),
                   let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),

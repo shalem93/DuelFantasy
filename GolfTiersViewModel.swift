@@ -83,13 +83,16 @@ final class GolfTiersViewModel {
     // MARK: - Local Bot Cache
     private static let botCacheKey = "golf_tiers_bot_cache"
 
+    // Bot fields on disk via FileBlobStore (not UserDefaults) — keeps the
+    // CFPreferences domain under its 4MB ceiling so other defaults persist.
     private func saveBotCacheLocally(_ botPicksData: [[String: Any]], tournamentID: String) {
         guard let data = try? JSONSerialization.data(withJSONObject: botPicksData) else { return }
-        UserDefaults.standard.set(data, forKey: "\(Self.botCacheKey)_\(tournamentID)")
+        FileBlobStore.shared.save(key: "\(Self.botCacheKey)_\(tournamentID)", data: data)
     }
 
     private func loadBotCacheLocally(tournamentID: String) -> [[String: Any]]? {
-        guard let data = UserDefaults.standard.data(forKey: "\(Self.botCacheKey)_\(tournamentID)"),
+        let data = FileBlobStore.shared.load(key: "\(Self.botCacheKey)_\(tournamentID)")
+        guard !data.isEmpty,
               let parsed = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return nil }
         return parsed
     }

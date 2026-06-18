@@ -17,6 +17,10 @@ create table if not exists public.dfs_tournaments (
     created_at timestamptz not null default now()
 );
 
+-- Captain/showdown flag, persisted at draft time so settlement grades the slate
+-- with the SAME format it was played as (MVP 1.5x) instead of re-deriving it.
+alter table public.dfs_tournaments add column if not exists is_single_game boolean;
+
 create table if not exists public.dfs_entries (
     id uuid primary key default gen_random_uuid(),
     tournament_id text not null references public.dfs_tournaments(id) on delete cascade,

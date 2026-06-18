@@ -30,12 +30,31 @@ struct DFSPastStandingsView: View {
         result.tournamentId?.hasPrefix("nhl-") == true
     }
     private var isSingleGameTournament: Bool {
+        // UFC main slates are captain mode (MVP + 5 FLEX) even without a "-sg-"
+        // in the tid, so treat any UFC contest as single-game for MVP scoring
+        // and slot labels.
         result.tournamentId?.contains("-sg-") == true
+            || result.tournamentId?.hasPrefix("ufc-") == true
     }
     private var isSoccer: Bool {
         result.tournamentId?.hasPrefix("epl-") == true
             || result.tournamentId?.hasPrefix("ucl-") == true
             || result.tournamentId?.hasPrefix("wc-") == true
+    }
+
+    /// Resolve a player's roster position for the slot badge. Live pool first
+    /// (works for today's contest); a two-way "-sp" id is always the pitcher;
+    /// MLB falls back to batter/pitcher from the box-score stat shape. Empty
+    /// when unknown (caller falls back to a numeric label).
+    private func slotPosition(for playerID: String) -> String {
+        if playerID.hasSuffix("-sp") { return "SP" }
+        if let p = viewModel.activePlayers.first(where: { $0.id == playerID }), !p.position.isEmpty {
+            return p.position
+        }
+        if isMLB {
+            return isMLBPitcher(viewModel.pastTournamentPlayerStats[playerID]) ? "SP" : ""
+        }
+        return ""
     }
     private var isUFC: Bool {
         result.tournamentId?.hasPrefix("ufc-") == true
@@ -46,6 +65,7 @@ struct DFSPastStandingsView: View {
         if isNHL { return "NHL" }
         if isUFC { return "UFC" }
         if result.tournamentId?.hasPrefix("ncaam-") == true { return "NCAAM" }
+        if result.tournamentId?.hasPrefix("wnba-") == true { return "WNBA" }
         if result.tournamentId?.hasPrefix("epl-") == true { return "EPL" }
         if result.tournamentId?.hasPrefix("ucl-") == true { return "UCL" }
         if result.tournamentId?.hasPrefix("wc-") == true { return "WC" }
@@ -615,8 +635,9 @@ struct DFSPastStandingsView: View {
             let isMVP = isSingleGame && index == 0
             let fpts = perPlayerPts[playerID] ?? 0  // already includes 1.5x MVP multiplier from settlement
             let stats = viewModel.pastTournamentPlayerStats[playerID]
-            let slotLabel = isMVP ? "MVP" : (isSingleGame ? "FLEX" : "\(index + 1)")
-            let isWideSlot = isMVP || slotLabel == "FLEX"
+            let bbPos = slotPosition(for: playerID)
+            let slotLabel = isMVP ? "MVP" : (isSingleGame ? "FLEX" : (bbPos.isEmpty ? "\(index + 1)" : bbPos))
+            let isWideSlot = isMVP || slotLabel == "FLEX" || slotLabel.count > 2
 
             HStack(spacing: 0) {
                 HStack(spacing: 4) {
@@ -1194,8 +1215,9 @@ struct DFSPastStandingsView: View {
         let isMVP = isSingleGameTournament && index == 0
         HStack(spacing: 0) {
             HStack(spacing: 4) {
-                let slotText = isMVP ? "MVP" : "\(index + 1)"
-                let isWide = isMVP
+                let pos = slotPosition(for: playerID)
+                let slotText = isMVP ? "MVP" : (pos.isEmpty ? "\(index + 1)" : pos)
+                let isWide = isMVP || slotText.count > 2
                 Text(slotText)
                     .font(.system(size: isMVP ? 7 : 8, weight: .bold))
                     .foregroundStyle(isMVP ? .black : .white)
@@ -1262,7 +1284,8 @@ struct DFSPastStandingsView: View {
         let isMVP = isSingleGameTournament && index == 0
         HStack(spacing: 0) {
             HStack(spacing: 4) {
-                let slotText = isMVP ? "MVP" : "\(index + 1)"
+                // Pitchers always badge "SP" (the SP roster slot / two-way "-sp").
+                let slotText = isMVP ? "MVP" : "SP"
                 let isWide = isMVP
                 Text(slotText)
                     .font(.system(size: isMVP ? 7 : 8, weight: .bold))

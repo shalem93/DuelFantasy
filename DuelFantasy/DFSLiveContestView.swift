@@ -8,6 +8,7 @@ struct DFSLiveContestView: View {
     /// navigation. Callers that pass nil get the legacy behavior.
     var expectedTournamentID: String? = nil
     var expectedLineupNumber: Int? = nil
+    @State private var showLateSwap = false
 
     private var brandPurple: Color {
         Color(red: 0.48, green: 0.23, blue: 0.93)
@@ -68,6 +69,10 @@ struct DFSLiveContestView: View {
                     if let error = viewModel.error {
                         errorBanner(error)
                     }
+                    if viewModel.supportsLateSwap && viewModel.allowsLineupEditing
+                        && viewModel.currentUserEntry != nil {
+                        lateSwapBanner
+                    }
                     yourLineupCard
                     leaderboardSection
                     if !isPGA {
@@ -95,9 +100,65 @@ struct DFSLiveContestView: View {
         )
         // Trigger an immediate refresh on view appearance so the user doesn't
         // have to wait up to 35s for the parent polling cycle to publish their rank.
+        // Ensure the slate (player pool) is loaded first — landing here with an
+        // empty pool (e.g. a synthetic/instance tournament after a cold start
+        // where the fetch never completed) would otherwise sit in shimmer with
+        // nothing triggering a load.
         .task {
+            await viewModel.loadSlateIfNeeded()
             await viewModel.refreshLive()
         }
+        .sheet(isPresented: $showLateSwap) {
+            NavigationStack {
+                DFSLineupBuilderView(viewModel: viewModel)
+                    .navigationTitle("Late Swap")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button("Cancel") {
+                                viewModel.editingLineupNumber = nil
+                                showLateSwap = false
+                            }
+                        }
+                    }
+            }
+        }
+    }
+
+    // MARK: - Late Swap Banner
+
+    private var lateSwapBanner: some View {
+        Button {
+            viewModel.startLateSwap(lineupNumber: viewModel.activeLineupNumber)
+            showLateSwap = true
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Late Swap available")
+                        .font(.subheadline.weight(.bold))
+                        .foregroundStyle(.white)
+                    Text("Edit any spot whose game hasn't started yet")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.85))
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.8))
+            }
+            .padding(14)
+            .background(
+                LinearGradient(
+                    colors: [Color(red: 0.48, green: 0.23, blue: 0.93), Color(red: 0.30, green: 0.15, blue: 0.70)],
+                    startPoint: .leading, endPoint: .trailing
+                )
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Live Status Header
@@ -382,7 +443,7 @@ struct DFSLiveContestView: View {
                                 // the raw ID (e.g. "mlb-41169"). Substitute a friendlier
                                 // placeholder until activePlayers / entry names resolve.
                                 let resolvedName: String = {
-                                    let rawPrefixes = ["nba-", "pga-", "ncaam-", "mlb-", "nhl-", "epl-", "ucl-", "wc-", "ufc-", "cfb-", "nfl-"]
+                                    let rawPrefixes = ["nba-", "pga-", "ncaam-", "wnba-", "mlb-", "nhl-", "epl-", "ucl-", "wc-", "ufc-", "cfb-", "nfl-"]
                                     if rawPrefixes.contains(where: { player.name.hasPrefix($0) }) {
                                         return "Loading…"
                                     }
@@ -407,7 +468,11 @@ struct DFSLiveContestView: View {
                                         .background(Color(red: 0.0, green: 0.5, blue: 0.2))
                                         .clipShape(Capsule())
                                 }
-                                if let own = ownershipPct[player.id] {
+                                // Ownership % only once this player's game has
+                                // started — pre-game ownership is meaningless and
+                                // shifts as later lineups release (more bots can
+                                // still draft these players).
+                                if viewModel.isPlayerLocked(player), let own = ownershipPct[player.id] {
                                     Text("\(Int(own.rounded()))%")
                                         .font(.system(size: 8, weight: .medium))
                                         .foregroundStyle(.white)
@@ -861,7 +926,8 @@ struct DFSLiveContestView: View {
                             .font(.system(size: 10))
                             .foregroundStyle(.green)
                     }
-                    if let own {
+                    // Ownership % only once the player's game has started.
+                    if viewModel.isPlayerLocked(player), let own {
                         Text("\(Int(own.rounded()))%")
                             .font(.system(size: 8, weight: .medium))
                             .foregroundStyle(.white)
@@ -1044,8 +1110,12 @@ struct DFSLiveContestView: View {
             .padding(.vertical, 4)
 
             let isSingleGame = viewModel.tournament?.isSingleGame == true
+            // Arrange into roster-slot order with a slot label per player (both SP
+            // at top, then C/1B/2B…; a two-way batter shows "1B" not "—").
+            let arrangedLineup = viewModel.arrangedLineupForDisplay(fieldEntry.playerIDs)
 
-            ForEach(Array(fieldEntry.playerIDs.enumerated()), id: \.element) { index, playerID in
+            ForEach(Array(arrangedLineup.enumerated()), id: \.offset) { index, arranged in
+                let playerID = arranged.playerID
                 let player = playersByID[playerID]
                 let liveStats = viewModel.livePlayerStats[playerID]
                 let livePts = viewModel.livePlayerPoints[playerID]
@@ -1058,12 +1128,20 @@ struct DFSLiveContestView: View {
                 let gameStartedOrDone = playerGameState == "in" || playerGameState == "post"
                 let rawFPTS = livePts ?? (gameStartedOrDone ? 0.0 : player?.projectedPoints ?? 0)
                 let displayFPTS = isMVP ? rawFPTS * 1.5 : rawFPTS
+                // True once THIS player's game has started (start-time-aware, so
+                // it survives a stale "pre" liveGameInfo state).
+                let playerGameLocked = player.map { viewModel.isPlayerLocked($0) } ?? false
+                // Hide opponents' / bots' not-yet-started picks until their game
+                // begins: an opponent's player whose game hasn't started is masked
+                // (name, salary, ownership, projection all concealed) so the live
+                // field can't be copied and later-game spots stay fluid.
+                let hideOpponentPick = !fieldEntry.isCurrentUser && !playerGameLocked
 
                 HStack(spacing: 0) {
                     // Player name + game status
                     VStack(alignment: .leading, spacing: 1) {
                         HStack(spacing: 4) {
-                            let slotText = isMVP ? "MVP" : (player?.position ?? "—")
+                            let slotText = isMVP ? "MVP" : (arranged.slot.isEmpty ? (player?.position ?? "—") : arranged.slot)
                             let isWideLiveSlot = isMVP || slotText.count > 2
                             Text(slotText)
                                 .font(.system(size: 8, weight: .bold))
@@ -1073,14 +1151,16 @@ struct DFSLiveContestView: View {
                                 .background(isMVP ? Color.yellow : brandPurple.opacity(0.7))
                                 .clipShape(isWideLiveSlot ? AnyShape(Capsule()) : AnyShape(Circle()))
 
-                            Text(lastName(resolvePlayerName(playerID)))
+                            Text(hideOpponentPick ? "Reserved" : lastName(resolvePlayerName(playerID)))
                                 .font(.caption.weight(.medium))
+                                .italic(hideOpponentPick)
+                                .foregroundStyle(hideOpponentPick ? Color.secondary : Color.primary)
                                 .lineLimit(1)
 
                             // Confirmed starting XI icon — only meaningful for
                             // soccer where `isConfirmedActive` is set from
                             // ESPN's published lineup ~1h before kickoff.
-                            if isSoccer, let p = player, p.isConfirmedActive {
+                            if !hideOpponentPick, isSoccer, let p = player, p.isConfirmedActive {
                                 Image(systemName: "checkmark.circle.fill")
                                     .font(.system(size: 10))
                                     .foregroundStyle(.green)
@@ -1096,14 +1176,18 @@ struct DFSLiveContestView: View {
                                     .clipShape(Capsule())
                             }
 
-                            if let sal = player?.salary, sal > 0 {
+                            if !hideOpponentPick, let sal = player?.salary, sal > 0 {
                                 let displaySal = isMVP ? Int(Double(sal) * 1.5) : sal
                                 Text("$\(viewModel.formatSalary(displaySal))")
                                     .font(.system(size: 8, weight: .medium))
                                     .foregroundStyle(.secondary)
                             }
 
-                            if let own = ownershipPct[playerID] {
+                            // Ownership % is hidden until the player's game starts
+                            // (for every entry, including your own) — pre-game
+                            // ownership would leak how the field is built on
+                            // not-yet-locked games.
+                            if playerGameLocked, let own = ownershipPct[playerID] {
                                 Text("\(Int(own.rounded()))%")
                                     .font(.system(size: 7, weight: .medium))
                                     .foregroundStyle(.white)
@@ -1115,7 +1199,15 @@ struct DFSLiveContestView: View {
                         }
 
                         // Game status line
-                        if isPGA, let stats = liveStats {
+                        if hideOpponentPick {
+                            HStack(spacing: 2) {
+                                Image(systemName: "lock.fill")
+                                    .font(.system(size: 7))
+                                Text("hidden until game starts")
+                                    .font(.system(size: 8))
+                            }
+                            .foregroundStyle(.tertiary)
+                        } else if isPGA, let stats = liveStats {
                             // Golf: show MC/WD status or round status
                             if stats.gameStatus == "MC" || stats.gameStatus == "WD" || stats.gameStatus == "CUT" {
                                 Text(stats.gameStatus)
@@ -1270,9 +1362,9 @@ struct DFSLiveContestView: View {
                         Text("-").frame(width: 24, alignment: .trailing)
                     }
 
-                    Text(String(format: "%.1f", displayFPTS))
+                    Text(hideOpponentPick ? "—" : String(format: "%.1f", displayFPTS))
                         .font(.caption.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(gameStartedOrDone ? brandPurple : .secondary)
+                        .foregroundStyle(hideOpponentPick ? Color.secondary : (gameStartedOrDone ? brandPurple : Color.secondary))
                         .frame(width: 36, alignment: .trailing)
                 }
                 .font(.caption.monospacedDigit())

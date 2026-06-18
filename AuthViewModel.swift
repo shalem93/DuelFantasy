@@ -68,20 +68,23 @@ final class AuthViewModel: ObservableObject {
                 persistSession(refreshed)
                 return refreshed.accessToken
             } catch {
-                // Only sign out on definitive auth rejections, not transient
-                // errors. "Already used" responses are a race-condition
-                // artifact (another concurrent refresh already rotated the
-                // token) — keep the session so the next API call can retry
-                // with whatever access token the winning refresh produced.
                 let message = error.localizedDescription.lowercased()
-                let isRaceArtifact = message.contains("already used")
+                // `already_used` historically signalled a race between two
+                // concurrent refreshes, but `activeRefreshTask` serialises
+                // refreshes so a genuine race can't happen anymore. Hitting
+                // this branch means the persisted refresh token is dead —
+                // typically because a prior `persistSession` write was
+                // silently dropped (e.g., CFPreferences in direct mode from
+                // a 4 MB+ blob overflow). Sign the user out so they can
+                // re-auth and get a fresh refresh token, instead of looping
+                // forever on the dead one.
+                let isAlreadyUsed = message.contains("already used")
                     || message.contains("already_used")
-                let isAuthRejection = !isRaceArtifact && (
-                    message.contains("not found") || message.contains("not_found")
+                let isAuthRejection = isAlreadyUsed
+                    || message.contains("not found") || message.contains("not_found")
                     || message.contains("revoked")
                     || message.contains("token expired") || message.contains("token_expired")
                     || message.contains("unauthorized")
-                )
                 if isAuthRejection {
                     print("[Auth] Token refresh rejected — signing out: \(error.localizedDescription)")
                     session = nil
@@ -267,8 +270,19 @@ final class AuthViewModel: ObservableObject {
     }
 
     private func persistSession(_ session: SupabaseAuthSession) {
-        if let encoded = try? JSONEncoder().encode(session) {
-            UserDefaults.standard.set(encoded, forKey: sessionKey)
+        guard let encoded = try? JSONEncoder().encode(session) else {
+            print("[Auth] persistSession: encoding failed")
+            return
+        }
+        let defaults = UserDefaults.standard
+        defaults.set(encoded, forKey: sessionKey)
+        // CFPreferences can silently drop writes when the defaults domain
+        // is over its size budget (the 4 MB blob overflow that originally
+        // caused this whole class of bug). Verify the round-trip so the
+        // failure surfaces immediately instead of stranding the user on a
+        // dead refresh token after the next launch.
+        if defaults.data(forKey: sessionKey) != encoded {
+            print("[Auth] persistSession: UserDefaults write was dropped — session NOT persisted")
         }
     }
 

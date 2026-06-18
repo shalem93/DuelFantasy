@@ -771,6 +771,7 @@ private struct ESPSportDefinition {
         ESPSportDefinition(sportPath: "football", leaguePath: "nfl", displayName: "NFL", oddsSportKey: "americanfootball_nfl"),
         ESPSportDefinition(sportPath: "football", leaguePath: "college-football", displayName: "NCAAF", oddsSportKey: "americanfootball_ncaaf"),
         ESPSportDefinition(sportPath: "basketball", leaguePath: "mens-college-basketball", displayName: "NCAAB", oddsSportKey: "basketball_ncaab"),
+        ESPSportDefinition(sportPath: "basketball", leaguePath: "wnba", displayName: "WNBA", oddsSportKey: "basketball_wnba"),
         ESPSportDefinition(sportPath: "soccer", leaguePath: "eng.1", displayName: "EPL", oddsSportKey: "soccer_epl"),
         ESPSportDefinition(sportPath: "soccer", leaguePath: "uefa.champions", displayName: "UCL", oddsSportKey: "soccer_uefa_champs_league"),
         ESPSportDefinition(sportPath: "soccer", leaguePath: "fifa.world", displayName: "World Cup", oddsSportKey: "soccer_fifa_world_cup"),

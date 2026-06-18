@@ -112,6 +112,7 @@ struct AnalyticsView: View {
     private func dfsResultSport(_ tournamentID: String) -> String {
         if tournamentID.hasPrefix("nba-") { return "NBA" }
         if tournamentID.hasPrefix("ncaam-") { return "NCAAM" }
+        if tournamentID.hasPrefix("wnba-") { return "WNBA" }
         if tournamentID.hasPrefix("mlb-") { return "MLB" }
         if tournamentID.hasPrefix("pga-") { return "PGA" }
         return "Other"
@@ -447,6 +448,7 @@ struct AnalyticsView: View {
         switch sport {
         case "NBA": return .orange
         case "NCAAB", "NCAAM": return .blue
+        case "WNBA": return .orange
         case "MLB": return .red
         case "NHL": return .cyan
         case "NFL": return .brown
@@ -460,7 +462,7 @@ struct AnalyticsView: View {
 
     private func dfsResultIcon(_ sport: String) -> String {
         switch sport {
-        case "NBA", "NCAAM": return "basketball.fill"
+        case "NBA", "NCAAM", "WNBA": return "basketball.fill"
         case "MLB": return "baseball.fill"
         case "PGA": return "figure.golf"
         default: return "trophy.fill"
@@ -506,7 +508,13 @@ struct AnalyticsView: View {
 
         let (picks, dfs, tournaments) = await (picksTask, dfsTask, tournamentsTask)
         settledPicks = picks
-        dfsResults = dfs
+        // Drop admin-deleted contests. The delete action adds the tid to
+        // `DFSViewModel.excludedTournamentIDs` (which My Contests / dfsHistory
+        // already honor at read time). Analytics fetches results straight from
+        // the server, so without this filter the deleted contests — and their
+        // unwanted RR — kept showing here.
+        let excluded = DFSViewModel.excludedTournamentIDs
+        dfsResults = excluded.isEmpty ? dfs : dfs.filter { !excluded.contains($0.tournamentID) }
         if let tournaments {
             dfsTournaments = Dictionary(uniqueKeysWithValues: tournaments.map { ($0.id, $0) })
         }

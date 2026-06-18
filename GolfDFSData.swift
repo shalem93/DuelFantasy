@@ -164,6 +164,40 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
         self.session = session
     }
 
+    /// Collapse duplicate golfers by name. ESPN's competitor list (and major-week
+    /// overlaps) can return the same player under two athlete IDs, producing
+    /// duplicate rows. When a duplicate is found, keep the record that has a
+    /// COUNTRY associated (the real ESPN competitor — the stray duplicate has a
+    /// blank country); break further ties by the higher projection. Static +
+    /// order-preserving so callers (provider + ViewModel) share one rule.
+    static func dedupeGolfers(_ players: [DFSPlayer]) -> [DFSPlayer] {
+        guard !players.isEmpty else { return players }
+        var indexByName: [String: Int] = [:]
+        var deduped: [DFSPlayer] = []
+        for p in players {
+            let key = RotoGrindersSalaryProvider.normalizeName(p.name)
+            guard let idx = indexByName[key] else {
+                indexByName[key] = deduped.count
+                deduped.append(p)
+                continue
+            }
+            let existing = deduped[idx]
+            let pHasCountry = !p.team.trimmingCharacters(in: .whitespaces).isEmpty
+            let existingHasCountry = !existing.team.trimmingCharacters(in: .whitespaces).isEmpty
+            let replace: Bool
+            if pHasCountry != existingHasCountry {
+                replace = pHasCountry                              // prefer the one WITH a country
+            } else {
+                replace = p.projectedPoints > existing.projectedPoints
+            }
+            if replace { deduped[idx] = p }
+        }
+        if deduped.count != players.count {
+            print("[GolfDFS] Deduped \(players.count - deduped.count) duplicate golfer(s) by name (\(players.count)→\(deduped.count))")
+        }
+        return deduped
+    }
+
     func fetchSlate() async throws -> DFSSlate {
         // Fetch PGA Tour scoreboard (current week)
         guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard") else {
@@ -283,14 +317,22 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
         // false-positive-ing every PGA fetch. Pass nil to skip that gate.
         async let dkSalariesTask = RotoGrindersSalaryProvider.shared.fetchSalaries(sport: "golf", maxClassicSalary: nil)
         async let worldRankTask = fetchOWGRRankings()
+        // ESPN athlete index (normalized name → ESPN athlete ID). Lets the
+        // DK-only fallback assign REAL ESPN IDs so the slate, bots, and the
+        // scoring snapshot all share `pga-{espnID}` — no name-matching at
+        // grade time. Best-effort; falls back to a name-slug ID when missing.
+        async let espnIndexTask = fetchPGAAthleteIndex()
         let dkSalaries = await dkSalariesTask
         let worldRankByName = await worldRankTask
+        let espnAthleteIndex = await espnIndexTask
 
-        if dkSalaries.isEmpty {
-            print("[GolfDFS] No DK salaries found — using OWGR-based pricing")
-        } else {
-            print("[GolfDFS] Fetched \(dkSalaries.count) DraftKings golf salaries")
+        // Require real DraftKings prices for the field — don't offer a slate
+        // priced entirely off OWGR estimates. (Individual golfers DK omits still
+        // fall back to OWGR below; this only blocks a fully-estimated slate.)
+        guard !dkSalaries.isEmpty else {
+            throw NSError(domain: "GolfDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post this PGA slate"])
         }
+        print("[GolfDFS] Fetched \(dkSalaries.count) DraftKings golf salaries")
 
         // Map competitors to DFSPlayer using DK salary (primary) or world ranking (fallback)
         var dkMatched = 0
@@ -353,10 +395,19 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
                     }
                     .joined(separator: " ")
                 let worldRank = matchWorldRanking(name: displayName, rankings: worldRankByName)
-                let stableID = "dk-\(lowercaseName.replacingOccurrences(of: " ", with: "-"))"
-                let projection = projectedGolfPoints(salary: salary, worldRank: worldRank, athleteID: stableID)
+                // Prefer the REAL ESPN athlete ID so this matches the scoring
+                // snapshot exactly; fall back to a name-slug only if unresolved.
+                let resolvedID: String
+                if let espnID = espnAthleteIndex[RotoGrindersSalaryProvider.normalizeName(displayName)] {
+                    resolvedID = espnID
+                } else if let espnID = espnAthleteIndex[RotoGrindersSalaryProvider.normalizeName(lowercaseName)] {
+                    resolvedID = espnID
+                } else {
+                    resolvedID = "dk-\(lowercaseName.replacingOccurrences(of: " ", with: "-"))"
+                }
+                let projection = projectedGolfPoints(salary: salary, worldRank: worldRank, athleteID: resolvedID)
                 return DFSPlayer(
-                    id: "pga-\(stableID)",
+                    id: "pga-\(resolvedID)",
                     name: displayName,
                     team: "",          // country unknown from DK alone
                     position: "G",
@@ -370,6 +421,15 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
             players.sort { $0.salary > $1.salary }
             print("[GolfDFS] DK-only fallback: built \(players.count) players, salary range $\(players.last?.salary ?? 0)-$\(players.first?.salary ?? 0)")
         }
+
+        // Deduplicate golfers by name. ESPN's competitor list (especially during
+        // a major week with overlapping events) can return the same player under
+        // two athlete IDs, producing duplicate rows with divergent projections
+        // (e.g. Fleetwood at 63.1 AND 9.7). Collapse by normalized name, keeping
+        // the entry with the HIGHER projection — that's the one that matched a
+        // world ranking / real record; the stray duplicate projects near-zero.
+        // Order-preserving so the lobby's existing sort is unchanged.
+        players = Self.dedupeGolfers(players)
 
         guard !players.isEmpty else {
             throw NSError(domain: "GolfDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "No golfers found in event"])
@@ -499,6 +559,35 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
     /// Used when the event was sourced from the core `/events/<id>`
     /// endpoint — that endpoint returns competitors as a `$ref` URL,
     /// so the inline competitors array on the decoded event is empty.
+    /// Builds a normalized-name → ESPN-athlete-ID index for PGA golfers from
+    /// ESPN's common v3 athletes endpoint (returns id + displayName inline, so
+    /// no per-athlete dereferencing). Used to give DK-fallback golfers their
+    /// real ESPN IDs so the slate matches the scoring snapshot. Best-effort:
+    /// returns whatever it can fetch; an empty result just means we keep slug IDs.
+    private func fetchPGAAthleteIndex() async -> [String: String] {
+        var index: [String: String] = [:]
+        // Paginate a few pages (active tour is a few hundred golfers).
+        for page in 1...4 {
+            guard let url = URL(string: "https://site.web.api.espn.com/apis/common/v3/sports/golf/pga/athletes?limit=250&page=\(page)&active=true") else { break }
+            guard let (data, resp) = try? await session.data(from: url),
+                  let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { break }
+            let athletes = (json["athletes"] as? [[String: Any]]) ?? (json["items"] as? [[String: Any]]) ?? []
+            guard !athletes.isEmpty else { break }
+            for a in athletes {
+                let idVal: String? = (a["id"] as? String) ?? (a["id"] as? Int).map(String.init)
+                let name = (a["displayName"] as? String) ?? (a["fullName"] as? String)
+                if let idVal, let name {
+                    index[RotoGrindersSalaryProvider.normalizeName(name)] = idVal
+                }
+            }
+            // Stop early if this page wasn't full (last page).
+            if athletes.count < 250 { break }
+        }
+        print("[GolfDFS] ESPN athlete index: \(index.count) golfers resolved")
+        return index
+    }
+
     private func hydrateCompetitors(eventID: String, competitionID: String) async -> [ESPNPGACompetitor] {
         guard let listURL = URL(string: "https://sports.core.api.espn.com/v2/sports/golf/leagues/pga/events/\(eventID)/competitions/\(competitionID)/competitors?limit=200") else {
             return []

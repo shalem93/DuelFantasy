@@ -888,7 +888,7 @@ struct DFSPrivateContestDetailView: View {
                     VStack(alignment: .leading, spacing: 1) {
                         let resolvedName: String = {
                             if let p = player, !p.name.isEmpty,
-                               !["nba-", "pga-", "ncaam-", "mlb-", "nhl-", "epl-", "ucl-", "wc-", "ufc-", "cfb-", "nfl-"]
+                               !["nba-", "pga-", "ncaam-", "wnba-", "mlb-", "nhl-", "epl-", "ucl-", "wc-", "ufc-", "cfb-", "nfl-"]
                                 .contains(where: { p.name.hasPrefix($0) }) {
                                 return p.name
                             }

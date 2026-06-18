@@ -179,13 +179,10 @@ struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
                 }
                 print("[NFL-DFS] sameSlate=true (\(matchCount)/\(allPlayers.count)), applied=\(applied), calibrated=\(calibrated), range=$\(rgMin)-$\(rgMax)")
             } else {
-                // Slates don't match -- keep estimated salaries
-                print("[NFL-DFS] sameSlate=false (\(matchCount)/\(allPlayers.count)), keeping estimated salaries")
-                finalPlayers = allPlayers
+                throw NSError(domain: "NFLDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's NFL slate"])
             }
         } else {
-            print("[NFL-DFS] No real salary data available -- using estimated salaries")
-            finalPlayers = allPlayers
+            throw NSError(domain: "NFLDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's NFL slate"])
         }
 
         let sortedPlayers = finalPlayers.sorted(by: { $0.salary > $1.salary })

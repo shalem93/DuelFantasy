@@ -589,6 +589,11 @@ struct DFSTournamentRecord: Codable {
     let totalEntries: Int?
     let playerSalaries: [String: Int]?
     let botField: [BotFieldEntry]?
+    /// Whether this slate was drafted as captain/showdown (MVP + FLEX, 1.5x MVP
+    /// scoring). Persisted at draft time so settlement grades with the SAME
+    /// format it was played as, instead of re-deriving it (and getting it wrong)
+    /// for a finished slate that's no longer fetchable.
+    let isSingleGame: Bool?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -599,9 +604,10 @@ struct DFSTournamentRecord: Codable {
         case totalEntries = "total_entries"
         case playerSalaries = "player_salaries"
         case botField = "bot_field"
+        case isSingleGame = "is_single_game"
     }
 
-    init(id: String, title: String, league: String, lockTime: Date, isSettled: Bool? = nil, totalEntries: Int? = nil, playerSalaries: [String: Int]? = nil, botField: [BotFieldEntry]? = nil) {
+    init(id: String, title: String, league: String, lockTime: Date, isSettled: Bool? = nil, totalEntries: Int? = nil, playerSalaries: [String: Int]? = nil, botField: [BotFieldEntry]? = nil, isSingleGame: Bool? = nil) {
         self.id = id
         self.title = title
         self.league = league
@@ -610,6 +616,7 @@ struct DFSTournamentRecord: Codable {
         self.totalEntries = totalEntries
         self.playerSalaries = playerSalaries
         self.botField = botField
+        self.isSingleGame = isSingleGame
     }
 
     // Custom encode to skip nil fields — prevents upsert from overwriting existing values with null
@@ -623,6 +630,7 @@ struct DFSTournamentRecord: Codable {
         try container.encodeIfPresent(totalEntries, forKey: .totalEntries)
         try container.encodeIfPresent(playerSalaries, forKey: .playerSalaries)
         try container.encodeIfPresent(botField, forKey: .botField)
+        try container.encodeIfPresent(isSingleGame, forKey: .isSingleGame)
     }
 }
 
@@ -2843,7 +2851,10 @@ final class SupabaseService {
         var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/pickem_picks"), resolvingAgainstBaseURL: false)
         components?.queryItems = [
             URLQueryItem(name: "user_id", value: "eq.\(userID)"),
-            URLQueryItem(name: "result", value: "neq.null"),
+            // PostgREST: `neq.null` compares against the literal string "null"
+            // and excludes real NULLs as a side-effect of NULL-vs-NULL = NULL.
+            // Use `not.is.null` for an actual IS NOT NULL filter.
+            URLQueryItem(name: "result", value: "not.is.null"),
             URLQueryItem(name: "select", value: "match_id,picked_team,match_name,gain_rr,loss_rr,result,rr_delta,settled_at,created_at"),
             URLQueryItem(name: "order", value: "settled_at.desc"),
             URLQueryItem(name: "limit", value: "\(limit)"),

@@ -267,6 +267,18 @@ struct DFSLobbyView: View {
 
     // MARK: - Evening Slate Section
 
+    /// Sport-appropriate word for a game starting (the evening-slate subtitle
+    /// previously hard-coded baseball's "First pitch" for every sport).
+    private var startVerb: String {
+        switch viewModel.sport {
+        case "WC", "EPL", "UCL", "NFL", "CFB": return "Kickoff"
+        case "MLB": return "First pitch"
+        case "NHL": return "Puck drop"
+        case "NBA", "NCAAM", "WNBA": return "Tip-off"
+        default: return "Starts"
+        }
+    }
+
     private var eveningSlateSection: some View {
         let eveningTournaments = viewModel.availableTournaments.filter { $0.tournamentType == .evening }
         // First evening game's start time (6pm ET+ cutoff) for a more useful
@@ -283,7 +295,7 @@ struct DFSLobbyView: View {
                 .filter { $0.startTime >= cutoff }
                 .min(by: { $0.startTime < $1.startTime })
             if let game = firstEvening {
-                return "First pitch \(game.startTime.formatted(date: .omitted, time: .shortened))"
+                return "\(startVerb) \(game.startTime.formatted(date: .omitted, time: .shortened))"
             }
             return "6pm ET+"
         }()

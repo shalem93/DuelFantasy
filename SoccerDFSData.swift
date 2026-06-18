@@ -243,26 +243,23 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
         )
 
         // Confirmed = official XI (ESPN near kickoff, or RG's announced flag).
-        // Projected (`playedRecently`) prefers ESPN's PREDICTED XI when one
-        // exists for the player's match — that's an 11-man list per team —
-        // and falls back to recent-match starters otherwise.
-        let predictedAvailableGames: Set<String> = {
-            var gids = Set<String>()
-            for p in allPlayers where espnPredictedIDs.contains(p.id) {
-                if let gid = p.gameID { gids.insert(gid) }
-            }
-            return gids
-        }()
+        // Projected (`playedRecently`) = "likely starter" for a game whose XI
+        // isn't out yet (the late games on a main slate). A player counts if
+        // they're in ESPN's PREDICTED XI for their match OR they started a
+        // recent match. These are COMBINED, not exclusive: a partial/missing
+        // ESPN predicted XI used to suppress the recency signal entirely
+        // (`else if`), dropping obvious starters like Pulisic/McKennie to 0%
+        // bot ownership. ORing the two keeps real starters in the pool while
+        // still excluding squad players who are neither projected nor recently
+        // starting — i.e. the DNP risk we don't want in bot lineups.
         let markedPlayers: [DFSPlayer] = allPlayers.map { p in
             var player = p
             let espnSays = espnConfirmedIDs.contains(p.id)
             let rgSays = rgStarterNames.contains(RotoGrindersSalaryProvider.normalizeName(p.name))
             player.isConfirmedActive = espnSays || rgSays
-            if let gid = p.gameID, predictedAvailableGames.contains(gid) {
-                player.playedRecently = espnPredictedIDs.contains(p.id)
-            } else if !recentlyActiveIDs.isEmpty {
-                player.playedRecently = recentlyActiveIDs.contains(p.id)
-            }
+            let inPredictedXI = espnPredictedIDs.contains(p.id)
+            let recentStarter = recentlyActiveIDs.contains(p.id)
+            player.playedRecently = inPredictedXI || recentStarter
             return player
         }
         let starterCount = markedPlayers.filter { $0.isConfirmedActive }.count
@@ -286,7 +283,9 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
 
         // 5. Build tournaments using shared builder
         let slateDate = parseESPNDate(events.first?.date ?? "") ?? Date()
-        let tournamentID = "\(league.tournamentIDPrefix)\(dateKey(for: slateDate))"
+        // Slate-day key (4am ET cutoff) so a night game (e.g. a 12am kickoff)
+        // files under the previous day's slate instead of spinning up a new one.
+        let tournamentID = "\(league.tournamentIDPrefix)\(slateDateKey(for: slateDate))"
         let isSingleGame = includedGames.count == 1
 
         // Phase 1: pull RG LineupHQ main-slate DK salaries for THIS league
@@ -306,10 +305,23 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
                     return player
                 }
                 applied += 1
+                // Recompute the projection from the REAL DK salary. The
+                // creation-time projection is derived from a *synthetic*
+                // salary built off ESPN season stats, which are sparse for
+                // national-team players — leaving stars like Pulisic
+                // ($9.8K DK) with a stale low projection that doesn't match
+                // their price. DK pricing is the better expected-output
+                // signal, so re-derive from it once we have it.
+                let athleteID = String(player.id.dropFirst(league.playerIDPrefix.count))
+                let realProjection = projectedSoccerPoints(
+                    position: player.position,
+                    salary: realSalary,
+                    athleteID: athleteID
+                )
                 var updated = DFSPlayer(
                     id: player.id, name: player.name, team: player.team,
                     position: player.position, salary: realSalary,
-                    projectedPoints: player.projectedPoints,
+                    projectedPoints: realProjection,
                     gameID: player.gameID, injuryStatus: player.injuryStatus
                 )
                 updated.isConfirmedActive = player.isConfirmedActive
@@ -318,8 +330,9 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
             }
             print("[Soccer-DFS] LineupHQ applied: \(applied)/\(markedPlayers.count) players matched DK prices")
         } else {
-            playersWithRealSalaries = markedPlayers
-            print("[Soccer-DFS] No LineupHQ soccer data — keeping synthetic salaries")
+            // No LineupHQ/DraftKings prices for this soccer slate yet — don't
+            // offer a slate built on synthetic salaries. Wait until DK posts it.
+            throw NSError(domain: "SoccerDFS", code: 4, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post the \(league.displayName) slate"])
         }
         let sortedPlayers = playersWithRealSalaries.sorted(by: { $0.salary > $1.salary })
 
@@ -451,8 +464,9 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
             return results
         }
 
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
+        // Bucket events by SLATE day (4am ET cutoff) rather than literal
+        // midnight, so a 12am kickoff stays with the previous day's slate.
+        let todaySlateKey = slateDateKey(for: Date())
 
         var preEvents: [SoccerScoreboardEvent] = []
         var liveEvents: [SoccerScoreboardEvent] = []
@@ -462,7 +476,7 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
             for event in scoreboard.events {
                 let state = event.status.type.state
                 let eventDate = parseESPNDate(event.date) ?? Date()
-                if state == "pre" && calendar.startOfDay(for: eventDate) >= today {
+                if state == "pre" && slateDateKey(for: eventDate) >= todaySlateKey {
                     preEvents.append(event)
                 } else if state == "in" {
                     liveEvents.append(event)
@@ -472,19 +486,19 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
             }
         }
 
-        // If there are live games, include them + same-day post/pre
+        // If there are live games, include them + same-slate post/pre
         if !liveEvents.isEmpty {
-            let liveDay = calendar.startOfDay(for: parseESPNDate(liveEvents.first!.date) ?? Date())
-            let sameDayPost = postEvents.filter { calendar.startOfDay(for: parseESPNDate($0.date) ?? Date()) == liveDay }
-            let sameDayPre = preEvents.filter { calendar.startOfDay(for: parseESPNDate($0.date) ?? Date()) == liveDay }
+            let liveKey = slateDateKey(for: parseESPNDate(liveEvents.first!.date) ?? Date())
+            let sameDayPost = postEvents.filter { slateDateKey(for: parseESPNDate($0.date) ?? Date()) == liveKey }
+            let sameDayPre = preEvents.filter { slateDateKey(for: parseESPNDate($0.date) ?? Date()) == liveKey }
             return (liveEvents + sameDayPost + sameDayPre).sorted { (parseESPNDate($0.date) ?? Date()) < (parseESPNDate($1.date) ?? Date()) }
         }
 
-        // Upcoming games: include all same-day pre + any same-day post (finished earlier)
+        // Upcoming games: include all same-slate pre + any same-slate post (finished earlier)
         if !preEvents.isEmpty {
-            let earliestPreDay = preEvents.compactMap { parseESPNDate($0.date) }.map { calendar.startOfDay(for: $0) }.min()!
-            let sameDayPost = postEvents.filter { calendar.startOfDay(for: parseESPNDate($0.date) ?? Date()) == earliestPreDay }
-            let sameDayPre = preEvents.filter { calendar.startOfDay(for: parseESPNDate($0.date) ?? Date()) == earliestPreDay }
+            let earliestPreKey = preEvents.compactMap { parseESPNDate($0.date) }.map { slateDateKey(for: $0) }.min()!
+            let sameDayPost = postEvents.filter { slateDateKey(for: parseESPNDate($0.date) ?? Date()) == earliestPreKey }
+            let sameDayPre = preEvents.filter { slateDateKey(for: parseESPNDate($0.date) ?? Date()) == earliestPreKey }
             if !sameDayPost.isEmpty {
                 return (sameDayPre + sameDayPost).sorted { (parseESPNDate($0.date) ?? Date()) < (parseESPNDate($1.date) ?? Date()) }
             }
@@ -492,7 +506,7 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
         }
 
         // Today's post events (all games finished)
-        let todayPost = postEvents.filter { calendar.startOfDay(for: parseESPNDate($0.date) ?? Date()) == today }
+        let todayPost = postEvents.filter { slateDateKey(for: parseESPNDate($0.date) ?? Date()) == todaySlateKey }
         if !todayPost.isEmpty { return todayPost }
 
         return []
@@ -660,14 +674,18 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
         let effectiveApps = max(1, appearances)
         let rawFPPG = (Double(goals) * 10.0 + Double(assists) * 6.0) / Double(effectiveApps)
 
-        // Position-tiered salary ranges
+        // Position-tiered salary ranges. Mins lowered to DraftKings' real WC
+        // floor (~$2,500 for GK/DEF/MID, ~$3,000 FWD) so UNMATCHED players (whose
+        // names didn't resolve to a DK price) estimate into the same range DK
+        // actually uses — they were previously floored at $3,500, showing e.g.
+        // Chergui at $3,500 when DK has him at $2,500.
         let (minSal, maxSal): (Int, Int)
         switch position {
-        case "GK":  (minSal, maxSal) = (3500, 6000)
-        case "DEF": (minSal, maxSal) = (3500, 7500)
-        case "MID": (minSal, maxSal) = (3500, 9500)
-        case "FWD": (minSal, maxSal) = (4000, 10500)
-        default:    (minSal, maxSal) = (3500, 9500)
+        case "GK":  (minSal, maxSal) = (2500, 6000)
+        case "DEF": (minSal, maxSal) = (2500, 7500)
+        case "MID": (minSal, maxSal) = (2500, 9500)
+        case "FWD": (minSal, maxSal) = (3000, 10500)
+        default:    (minSal, maxSal) = (2500, 9500)
         }
 
         // Map FPPG to salary range. Top FPPG ~15 (elite FWD: 25 goals + 10 assists in 35 apps)
@@ -695,9 +713,9 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
     // MARK: - Projected Points
 
     private func projectedSoccerPoints(position: String, salary: Int, athleteID: String) -> Double {
-        // Map salary to projected FPTS: $3,500 ~ 5 FPTS, $10,500 ~ 25 FPTS
-        let salaryFraction = Double(salary - 3500) / Double(10500 - 3500)
-        let base = 5.0 + pow(max(0, salaryFraction), 0.85) * 20.0
+        // Map salary to projected FPTS: $2,500 ~ 4 FPTS, $10,500 ~ 25 FPTS
+        let salaryFraction = Double(salary - 2500) / Double(10500 - 2500)
+        let base = 4.0 + pow(max(0, salaryFraction), 0.85) * 21.0
 
         // Stable per-player jitter (±8%)
         let stableHash = athleteID.utf8.reduce(0) { ($0 &* 31) &+ Int($1) }
@@ -745,12 +763,15 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
             return results
         }
 
-        // Find each tonight-team's MOST RECENT completed match. Scanning every
-        // match in the window and counting subs marked virtually a whole
-        // national-team squad as "recently active" (coaches rotate across two
-        // friendlies), which made the projected-starter badge meaningless.
+        // Find each tonight-team's last few completed matches. We take the N
+        // most recent (not just the single latest) and union their STARTERS:
+        // a star rested in one match still counts if they started another, so
+        // rotation doesn't drop obvious starters from the likely-starter pool.
+        // Starters-only (no subs) keeps this from ballooning to the whole 26-
+        // man squad — the union across N matches lands around a 13-16 man core.
+        let recentMatchesPerTeam = league == .worldCup ? 3 : 2
         let teamIDSet = Set(teamIDs)
-        var latestEventByTeam: [String: (slug: String, eventID: String, date: Date)] = [:]
+        var eventsByTeam: [String: [(slug: String, eventID: String, date: Date)]] = [:]
         for (slug, sb) in recentScoreboards {
             for event in sb.events {
                 let state = event.status.type.state
@@ -758,15 +779,17 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
                 guard let comp = event.competitions.first else { continue }
                 guard let eventDate = parseESPNDate(event.date) else { continue }
                 for competitor in comp.competitors where teamIDSet.contains(competitor.id) {
-                    if let existing = latestEventByTeam[competitor.id], existing.date >= eventDate { continue }
-                    latestEventByTeam[competitor.id] = (slug, event.id, eventDate)
+                    eventsByTeam[competitor.id, default: []].append((slug, event.id, eventDate))
                 }
             }
         }
         var recentEvents: [(slug: String, eventID: String)] = []
         var seenEventIDs = Set<String>()
-        for (_, entry) in latestEventByTeam where seenEventIDs.insert(entry.eventID).inserted {
-            recentEvents.append((entry.slug, entry.eventID))
+        for (_, events) in eventsByTeam {
+            let mostRecent = events.sorted { $0.date > $1.date }.prefix(recentMatchesPerTeam)
+            for entry in mostRecent where seenEventIDs.insert(entry.eventID).inserted {
+                recentEvents.append((entry.slug, entry.eventID))
+            }
         }
 
         guard !recentEvents.isEmpty else { return [] }
@@ -822,6 +845,20 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
         formatter.dateFormat = "yyyyMMdd"
         formatter.timeZone = TimeZone(identifier: "America/New_York")
         return formatter.string(from: date)
+    }
+
+    /// Hours past midnight ET before which a kickoff still counts as the PRIOR
+    /// day's slate. A 12am ET kickoff is "last night's late game", not the
+    /// start of a new slate. The World Cup has no real games between ~1am and
+    /// noon ET, so a 4am boundary cleanly rolls every post-midnight game back
+    /// onto the previous day without ever misbucketing a real daytime game.
+    private static let slateDayCutoffSeconds: TimeInterval = 4 * 3600
+
+    /// yyyyMMdd (ET) of the SLATE a kickoff belongs to, applying the night-game
+    /// cutoff above. Use this (not `dateKey`) wherever a game is assigned to a
+    /// slate day — fixture bucketing and the tournament ID.
+    private func slateDateKey(for date: Date) -> String {
+        dateKey(for: date.addingTimeInterval(-Self.slateDayCutoffSeconds))
     }
 
     private func parseESPNDate(_ dateString: String) -> Date? {
@@ -939,9 +976,19 @@ struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
             }
         }
 
-        let allGamesFinal = allFetchedAreFinal && !results.isEmpty && failedGames.count <= results.count
+        // A game counts as "done" only if we fetched it AND it's final. A game
+        // we couldn't fetch is NOT assumed done unless its kickoff is long past
+        // (a broken/stale event that will never resolve). ESPN's summary
+        // endpoint routinely 404s for games that haven't started, so a staggered
+        // slate's late game (e.g. a midnight kickoff) lands in `failedGames` —
+        // it must keep the slate LIVE until it actually finishes instead of
+        // being tolerated as a failed fetch and triggering premature settlement.
+        let now = Date()
+        let staleFetchCutoff: TimeInterval = 6 * 3600   // soccer finishes in ~3h; 6h = safely stale
+        let unfetchedStillPending = failedGames.contains { now.timeIntervalSince($0.startTime) < staleFetchCutoff }
+        let allGamesFinal = allFetchedAreFinal && !results.isEmpty && !unfetchedStillPending
 
-        print("[Soccer-Score] Total: \(results.count)/\(games.count) games fetched, \(pointsByPlayerID.count) player scores, failed=\(failedGames.count)")
+        print("[Soccer-Score] Total: \(results.count)/\(games.count) games fetched, \(pointsByPlayerID.count) player scores, failed=\(failedGames.count), pendingLate=\(unfetchedStillPending)")
 
         let snapshot = DFSScoreSnapshot(
             playerFantasyPoints: pointsByPlayerID,

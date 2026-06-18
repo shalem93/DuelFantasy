@@ -336,6 +336,7 @@ struct FullHistoryView: View {
     private func dfsResultSport(_ tournamentID: String) -> String {
         if tournamentID.hasPrefix("nba-") { return "NBA" }
         if tournamentID.hasPrefix("ncaam-") { return "NCAAM" }
+        if tournamentID.hasPrefix("wnba-") { return "WNBA" }
         if tournamentID.hasPrefix("mlb-") { return "MLB" }
         if tournamentID.hasPrefix("pga-") { return "PGA" }
         return "DFS"
@@ -343,7 +344,7 @@ struct FullHistoryView: View {
 
     private func dfsResultIcon(_ sport: String) -> String {
         switch sport {
-        case "NBA", "NCAAM": return "basketball.fill"
+        case "NBA", "NCAAM", "WNBA": return "basketball.fill"
         case "MLB": return "baseball.fill"
         case "PGA": return "figure.golf"
         default: return "trophy.fill"
@@ -354,6 +355,7 @@ struct FullHistoryView: View {
         switch sport {
         case "NBA": return .orange
         case "NCAAM": return .blue
+        case "WNBA": return .orange
         case "MLB": return .red
         case "PGA": return .green
         default: return brandPurple

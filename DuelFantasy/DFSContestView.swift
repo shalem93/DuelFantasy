@@ -11,6 +11,8 @@ import SwiftUI
         case ucl = "UCL"
         case nfl = "NFL"
         case cfb = "CFB"
+        case wnba = "WNBA"
+        case ncaam = "NCAAM"
 
         /// In-season check by today's date. Sports out-of-season are pushed
         /// to the end of the pill row so the user always sees active leagues
@@ -26,9 +28,9 @@ import SwiftUI
             case .pga, .ufc:
                 return true                              // year-round
             case .nba:
-                return mmdd >= 1021 || mmdd <= 622       // preseason → Finals
+                return mmdd >= 1021 || mmdd <= 613       // preseason → Finals (2026 title decided Jun 13)
             case .nhl:
-                return mmdd >= 1007 || mmdd <= 622       // preseason → Cup
+                return mmdd >= 1007 || mmdd <= 613       // preseason → Cup (2026 Cup decided Jun 13)
             case .mlb:
                 return mmdd >= 327 && mmdd <= 1101       // regular + postseason
             case .nfl:
@@ -41,6 +43,10 @@ import SwiftUI
                 return mmdd >= 815 || mmdd <= 525
             case .ucl:
                 return mmdd >= 915 || mmdd <= 607
+            case .wnba:
+                return mmdd >= 515 && mmdd <= 1020       // regular season → Finals
+            case .ncaam:
+                return mmdd >= 1103 || mmdd <= 408       // Nov tip-off → April championship
             }
         }
 
@@ -61,6 +67,8 @@ import SwiftUI
             case .ufc: return 7
             case .epl: return 8
             case .ucl: return 9
+            case .wnba: return 10
+            case .ncaam: return 11
             }
         }
 
@@ -85,10 +93,21 @@ struct DFSContestView: View {
     @Bindable var ufcViewModel: DFSViewModel
     @Bindable var nflViewModel: DFSViewModel
     @Bindable var cfbViewModel: DFSViewModel
+    @Bindable var ncaamViewModel: DFSViewModel
+    @Bindable var wnbaViewModel: DFSViewModel
+    /// ADMIN ONLY. Permanently delete a past contest and claw back its RR.
+    var onDeletePastContest: (String) -> Void
+    /// ADMIN ONLY. Re-grade a past contest (regen bots + re-score) instead of deleting.
+    var onRegradePastContest: (String) -> Void
     @EnvironmentObject private var auth: AuthViewModel
     @Environment(\.scenePhase) private var scenePhase
+    /// A past result the admin is confirming deletion of.
+    @State private var pendingDeletion: DFSResult?
     @State private var selectedTab: DFSTab = .today
-    @State private var selectedSport: DFSSport = .nba
+    // Open on the highest-priority IN-SEASON sport (the off-season ones sort to
+    // the back), so the tab never lands on a dead pill like NBA in June showing
+    // "No DFS Slate Available". Falls back to MLB if nothing reads as in-season.
+    @State private var selectedSport: DFSSport = DFSSport.orderedForToday().first ?? .mlb
     /// Entries from previous tournaments that are still in progress (not yet settled)
     @State private var previousInProgressEntries: [DFSEntryRecord] = []
     @State private var statsSportFilter: String = "All"
@@ -119,6 +138,8 @@ struct DFSContestView: View {
         case .ufc: return ufcViewModel
         case .nfl: return nflViewModel
         case .cfb: return cfbViewModel
+        case .ncaam: return ncaamViewModel
+        case .wnba: return wnbaViewModel
         }
     }
 
@@ -199,8 +220,12 @@ struct DFSContestView: View {
                         nflTodayContent
                     } else if selectedSport == .cfb {
                         cfbTodayContent
+                    } else if selectedSport == .ncaam {
+                        basketballTodayContent(viewModel: ncaamViewModel)
+                    } else if selectedSport == .wnba {
+                        basketballTodayContent(viewModel: wnbaViewModel)
                     } else {
-                        todayContent
+                        basketballTodayContent(viewModel: viewModel)
                     }
                 }
             }
@@ -246,6 +271,12 @@ struct DFSContestView: View {
                             case .nba:
                                 await viewModel.loadSlate(force: true)
                                 await viewModel.refreshLive()
+                            case .ncaam:
+                                await ncaamViewModel.loadSlate(force: true)
+                                await ncaamViewModel.refreshLive()
+                            case .wnba:
+                                await wnbaViewModel.loadSlate(force: true)
+                                await wnbaViewModel.refreshLive()
                             }
                         }
                     } label: {
@@ -270,7 +301,8 @@ struct DFSContestView: View {
             // when the network fetch eventually returns the private contest.
             for vm in [viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
                        eplViewModel, uclViewModel, wcViewModel,
-                       ufcViewModel, nflViewModel, cfbViewModel] {
+                       ufcViewModel, nflViewModel, cfbViewModel,
+                       ncaamViewModel, wnbaViewModel] {
                 vm.loadCachedPrivateContests()
             }
 
@@ -402,6 +434,22 @@ struct DFSContestView: View {
                 await cfbViewModel.refreshLive()
             }
         }
+        .task(id: "ncaam-polling") {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 35_000_000_000)
+                guard scenePhase == .active, selectedSport == .ncaam else { continue }
+                await refreshAuthAndSync()
+                await ncaamViewModel.refreshLive()
+            }
+        }
+        .task(id: "wnba-polling") {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 35_000_000_000)
+                guard scenePhase == .active, selectedSport == .wnba else { continue }
+                await refreshAuthAndSync()
+                await wnbaViewModel.refreshLive()
+            }
+        }
         // Immediate refresh on sport switch — the active polling loop
         // won't fire for up to 35s after the switch, so kick off a one-shot
         // refresh right away so the new tab's data feels fresh.
@@ -419,6 +467,8 @@ struct DFSContestView: View {
                 case .ufc: await ufcViewModel.refreshLive()
                 case .nfl: await nflViewModel.refreshLive()
                 case .cfb: await cfbViewModel.refreshLive()
+                case .ncaam: await ncaamViewModel.refreshLive()
+                case .wnba: await wnbaViewModel.refreshLive()
                 }
             }
         }
@@ -437,7 +487,13 @@ struct DFSContestView: View {
             // no-op once the slate is loaded.
             for _ in 0..<60 {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
-                if Task.isCancelled || vm.tournament != nil { return }
+                if Task.isCancelled { return }
+                // Stop only once the slate is truly loaded — a non-nil
+                // tournament with an empty player pool (synthetic/instance
+                // stub from a saved entry) still needs the real fetch, else
+                // contest details shimmer forever.
+                let poolLoaded = vm.tournament != nil && !(vm.players.isEmpty && vm.singleGamePlayers.isEmpty)
+                if poolLoaded { return }
                 if !vm.isLoading {
                     await vm.loadSlateIfNeeded()
                 }
@@ -1399,18 +1455,21 @@ struct DFSContestView: View {
 
     // MARK: - Today Content
 
-    private var todayContent: some View {
+    /// Generic basketball-style Today content (lobby / locked / empty). Shared
+    /// by NBA, NCAAM and WNBA — they have the same classic + showdown structure,
+    /// so the only difference is which view model drives it.
+    private func basketballTodayContent(viewModel vm: DFSViewModel) -> some View {
         Group {
-            if viewModel.tournament == nil && (viewModel.isLoading || !viewModel.hasAttemptedLoad) {
+            if vm.tournament == nil && (vm.isLoading || !vm.hasAttemptedLoad) {
                 loadingView
-            } else if viewModel.tournament == nil {
+            } else if vm.tournament == nil {
                 emptyStateView
-            } else if viewModel.isFullyLocked {
-                lockedContestList(viewModel: viewModel)
-            } else if viewModel.isPartiallyLocked {
-                partiallyLockedView(viewModel: viewModel)
+            } else if vm.isFullyLocked {
+                lockedContestList(viewModel: vm)
+            } else if vm.isPartiallyLocked {
+                partiallyLockedView(viewModel: vm)
             } else {
-                DFSLobbyView(viewModel: viewModel)
+                DFSLobbyView(viewModel: vm)
             }
         }
     }
@@ -1425,7 +1484,7 @@ struct DFSContestView: View {
         // If a tournament isn't in the slate anymore, synthesize a stub from
         // the entry's metadata so the card still appears.
         let settledIDs = vm.settledTournaments
-        let tournamentByID = Dictionary(uniqueKeysWithValues: vm.tournaments.map { ($0.id, $0) })
+        let tournamentByID = Dictionary(vm.tournaments.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         // Any tournament IDs the user references as the parent of a private
         // contest are NOT public contests they joined — they're slates used
         // as the basis for a private contest's player pool. Hide those from
@@ -1446,7 +1505,7 @@ struct DFSContestView: View {
             return set
         }()
         let enteredTournaments: [DFSTournament] = vm.enteredTournamentIDs
-            .filter { !vm.isTournamentSettledOrSibling($0) && !unenteredPrivateParents.contains($0) }
+            .filter { !vm.isTournamentFinished($0) && !unenteredPrivateParents.contains($0) }
             .compactMap { tid -> DFSTournament? in
                 if let existing = tournamentByID[tid] { return existing }
                 // Synthesize from entry data (best-effort — preserves the card
@@ -1466,6 +1525,7 @@ struct DFSContestView: View {
                     tournamentType: DFSTournamentType.from(tournamentID: tid)
                 )
             }
+        let _ = print("[DFS-\(vm.sport)] lockedContestList: enteredIDs=\(vm.enteredTournamentIDs.count) \(Array(vm.enteredTournamentIDs.prefix(6))), passedFilter=\(enteredTournaments.count), tournaments=\(vm.tournaments.count), available=\(vm.availableTournaments.count), settled=\(vm.settledTournaments.count)")
         struct EntryItem: Identifiable {
             let id: String  // unique key for ForEach
             let tournament: DFSTournament
@@ -1708,7 +1768,7 @@ struct DFSContestView: View {
     /// and the lobby (filtered to available tournaments) below.
     private func partiallyLockedView(viewModel vm: DFSViewModel) -> some View {
         let settledIDs = vm.settledTournaments
-        let enteredLocked = vm.lockedTournaments.filter { vm.enteredTournamentIDs.contains($0.id) && !vm.isTournamentSettledOrSibling($0.id) }
+        let enteredLocked = vm.lockedTournaments.filter { vm.enteredTournamentIDs.contains($0.id) && !vm.isTournamentFinished($0.id) }
         // Build per-entry items for locked tournaments
         struct LockedEntryItem: Identifiable {
             let id: String
@@ -2095,10 +2155,17 @@ struct DFSContestView: View {
     /// per LINEUP — taking only `.first` hid every multi-entry lineup beyond
     /// the user's first in My Contests.
     private func activeEntries(for vm: DFSViewModel) -> [DFSEntryRecord] {
-        let settled = vm.settledTournaments
+        // Ghosted contests (past + provably ungradeable, e.g. an event ESPN has
+        // no scores for) are excluded permanently so they can't reappear as a
+        // perpetual LIVE 0.0 card after a server re-fetch re-adds the entry.
+        let excluded = DFSViewModel.excludedTournamentIDs
         var entries: [DFSEntryRecord] = []
         for tid in vm.enteredTournamentIDs {
-            guard !settled.contains(tid) else { continue }
+            // `isTournamentFinished` covers settled + history (by slate identity,
+            // so a midnight game graded under one date excludes its twin under
+            // the adjacent date). That's why settled WC/WNBA SG contests stopped
+            // reappearing as LIVE 0.0 cards.
+            guard !vm.isTournamentFinished(tid), !excluded.contains(tid) else { continue }
             let records = (vm.userEntryRecords[tid] ?? []).sorted {
                 ($0.lineupNumber ?? 1) < ($1.lineupNumber ?? 1)
             }
@@ -2114,10 +2181,18 @@ struct DFSContestView: View {
     private var eplActiveEntries: [DFSEntryRecord] { activeEntries(for: eplViewModel) }
     private var uclActiveEntries: [DFSEntryRecord] { activeEntries(for: uclViewModel) }
     private var wcActiveEntries: [DFSEntryRecord] { activeEntries(for: wcViewModel) }
+    private var ufcActiveEntries: [DFSEntryRecord] { activeEntries(for: ufcViewModel) }
+    private var nflActiveEntries: [DFSEntryRecord] { activeEntries(for: nflViewModel) }
+    private var cfbActiveEntries: [DFSEntryRecord] { activeEntries(for: cfbViewModel) }
+    private var ncaamActiveEntries: [DFSEntryRecord] { activeEntries(for: ncaamViewModel) }
+    private var wnbaActiveEntries: [DFSEntryRecord] { activeEntries(for: wnbaViewModel) }
 
     /// All active DFS entries across all sports (one per entered tournament, excluding settled).
     private var allActiveEntries: [DFSEntryRecord] {
-        nbaActiveEntries + nhlActiveEntries + mlbActiveEntries + pgaActiveEntries + eplActiveEntries + uclActiveEntries + wcActiveEntries
+        nbaActiveEntries + nhlActiveEntries + mlbActiveEntries + pgaActiveEntries
+        + eplActiveEntries + uclActiveEntries + wcActiveEntries
+        + ufcActiveEntries + nflActiveEntries + cfbActiveEntries
+        + ncaamActiveEntries + wnbaActiveEntries
     }
 
     private var hasAnyActiveEntry: Bool {
@@ -2259,7 +2334,8 @@ struct DFSContestView: View {
             let sources: [DFSViewModel] = [
                 viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
                 eplViewModel, uclViewModel, wcViewModel,
-                ufcViewModel, nflViewModel, cfbViewModel
+                ufcViewModel, nflViewModel, cfbViewModel,
+                ncaamViewModel, wnbaViewModel
             ]
             // Each tournament has a canonical owner — the sport VM whose
             // prefix matches the tournament ID (e.g. PGA tournaments belong
@@ -2272,7 +2348,8 @@ struct DFSContestView: View {
             func canonicalVM(for tid: String) -> DFSViewModel? {
                 if tid.hasPrefix("pga-") { return pgaViewModel }
                 if tid.hasPrefix("nhl-") { return nhlViewModel }
-                if tid.hasPrefix("ncaam-") { return nhlViewModel }
+                if tid.hasPrefix("ncaam-") { return ncaamViewModel }
+                if tid.hasPrefix("wnba-") { return wnbaViewModel }
                 if tid.hasPrefix("mlb-") { return mlbViewModel }
                 if tid.hasPrefix("epl-") { return eplViewModel }
                 if tid.hasPrefix("ucl-") { return uclViewModel }
@@ -2453,6 +2530,20 @@ struct DFSContestView: View {
                                             resultRowWithSport(result)
                                         }
                                         .buttonStyle(.plain)
+                                        .contextMenu {
+                                            if isAdmin, let tid = result.tournamentId {
+                                                Button {
+                                                    onRegradePastContest(tid)
+                                                } label: {
+                                                    Label("Re-grade Contest (admin)", systemImage: "arrow.clockwise")
+                                                }
+                                                Button(role: .destructive) {
+                                                    pendingDeletion = result
+                                                } label: {
+                                                    Label("Delete Contest (admin)", systemImage: "trash")
+                                                }
+                                            }
+                                        }
                                     case .privateContest(let entry):
                                         NavigationLink {
                                             DFSPrivateContestDetailView(viewModel: entry.viewModel, contest: entry.contest)
@@ -2482,17 +2573,69 @@ struct DFSContestView: View {
             await withTaskGroup(of: Void.self) { group in
                 for vm in [viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
                            eplViewModel, uclViewModel, wcViewModel,
-                           ufcViewModel, nflViewModel, cfbViewModel] {
+                           ufcViewModel, nflViewModel, cfbViewModel,
+                           ncaamViewModel, wnbaViewModel] {
                     group.addTask { await vm.loadAllPrivateContestFinalScores() }
                 }
             }
         }
+        .confirmationDialog(
+            "Delete this contest? (admin)",
+            isPresented: Binding(get: { pendingDeletion != nil }, set: { if !$0 { pendingDeletion = nil } }),
+            titleVisibility: .visible,
+            presenting: pendingDeletion
+        ) { result in
+            Button("Delete & Reverse RR", role: .destructive) {
+                if let tid = result.tournamentId {
+                    onDeletePastContest(tid)
+                }
+                pendingDeletion = nil
+            }
+            Button("Cancel", role: .cancel) { pendingDeletion = nil }
+        } message: { result in
+            let total = result.tournamentId.map { totalRRForContest($0) } ?? result.rrDelta
+            Text("Permanently removes all your lineups in this contest and reverses the \(total >= 0 ? "+" : "")\(total) RR it gave you. It won't come back.")
+        }
+    }
+
+    /// Admin accounts that can see the destructive delete affordance — it
+    /// never reaches regular users.
+    private static let adminEmails: Set<String> = [
+        "shalem93@gmail.com",
+        "sam@builderlabs.co"
+    ]
+    private var isAdmin: Bool {
+        Self.adminEmails.contains(auth.userEmail.lowercased())
+    }
+
+    /// Sum of the RR delta across every one of the user's lineups in a contest,
+    /// so the confirmation reflects the full amount being clawed back (e.g. a
+    /// contest with two lineups at +1000 and +700 reverses +1700).
+    private func totalRRForContest(_ tournamentID: String) -> Int {
+        let owner: DFSViewModel = {
+            if tournamentID.hasPrefix("nhl-") { return nhlViewModel }
+            if tournamentID.hasPrefix("ncaam-") { return ncaamViewModel }
+            if tournamentID.hasPrefix("wnba-") { return wnbaViewModel }
+            if tournamentID.hasPrefix("mlb-") { return mlbViewModel }
+            if tournamentID.hasPrefix("pga-") { return pgaViewModel }
+            if tournamentID.hasPrefix("epl-") { return eplViewModel }
+            if tournamentID.hasPrefix("ucl-") { return uclViewModel }
+            if tournamentID.hasPrefix("wc-")  { return wcViewModel }
+            if tournamentID.hasPrefix("ufc-") { return ufcViewModel }
+            if tournamentID.hasPrefix("nfl-") { return nflViewModel }
+            if tournamentID.hasPrefix("cfb-") { return cfbViewModel }
+            return viewModel
+        }()
+        return owner.dfsHistory
+            .filter { $0.tournamentId == tournamentID }
+            .reduce(0) { $0 + $1.rrDelta }
     }
 
     private func sportLabel(for result: DFSResult) -> String {
         guard let tid = result.tournamentId else { return "DFS" }
         if tid.hasPrefix("nhl-") { return "NHL" }
         if tid.hasPrefix("ncaam-") { return "NCAAM" }
+        if tid.hasPrefix("wnba-") { return "WNBA" }
         if tid.hasPrefix("mlb-") { return "MLB" }
         if tid.hasPrefix("pga-") { return "PGA" }
         if tid.hasPrefix("epl-") { return "EPL" }
@@ -2508,6 +2651,7 @@ struct DFSContestView: View {
         guard let tid = result.tournamentId else { return brandPurple }
         if tid.hasPrefix("nhl-") { return Color(red: 0.1, green: 0.3, blue: 0.6) }
         if tid.hasPrefix("ncaam-") { return Color(red: 0.1, green: 0.3, blue: 0.6) }
+        if tid.hasPrefix("wnba-") { return Color(red: 0.90, green: 0.35, blue: 0.10) }
         if tid.hasPrefix("mlb-") { return Color(red: 0.0, green: 0.2, blue: 0.5) }
         if tid.hasPrefix("pga-") { return Color(red: 0.0, green: 0.5, blue: 0.2) }
         if tid.hasPrefix("epl-") { return Color(red: 0.3, green: 0.0, blue: 0.5) }
@@ -3009,7 +3153,8 @@ struct DFSContestView: View {
     private func viewModelForResult(_ result: DFSResult) -> DFSViewModel {
         if let tid = result.tournamentId {
             if tid.hasPrefix("nhl-") { return nhlViewModel }
-            if tid.hasPrefix("ncaam-") { return nhlViewModel }
+            if tid.hasPrefix("ncaam-") { return ncaamViewModel }
+            if tid.hasPrefix("wnba-") { return wnbaViewModel }
             if tid.hasPrefix("mlb-") { return mlbViewModel }
             if tid.hasPrefix("pga-") { return pgaViewModel }
             if tid.hasPrefix("epl-") { return eplViewModel }
@@ -3054,6 +3199,12 @@ struct DFSContestView: View {
         cfbViewModel.accessToken = auth.accessToken
         cfbViewModel.userID = auth.userID
         cfbViewModel.userEmail = auth.userEmail
+        ncaamViewModel.accessToken = auth.accessToken
+        ncaamViewModel.userID = auth.userID
+        ncaamViewModel.userEmail = auth.userEmail
+        wnbaViewModel.accessToken = auth.accessToken
+        wnbaViewModel.userID = auth.userID
+        wnbaViewModel.userEmail = auth.userEmail
     }
 
     /// Fetch the user's recent entries and keep only those for tournaments not currently
@@ -3075,21 +3226,25 @@ struct DFSContestView: View {
                 .union(ufcViewModel.enteredTournamentIDs)
                 .union(nflViewModel.enteredTournamentIDs)
                 .union(cfbViewModel.enteredTournamentIDs)
-
-            // IDs of tournaments that are already settled (appear in history)
-            let settledIDs = Set(viewModel.dfsHistory.compactMap { $0.tournamentId })
-
-            // Also include locally-settled tournament IDs (may not yet appear in history)
-            let locallySettledIDs = viewModel.settledTournaments
+                .union(ncaamViewModel.enteredTournamentIDs)
+                .union(wnbaViewModel.enteredTournamentIDs)
 
             // Only show entries from the last 3 days to avoid stale cards
             let staleThreshold = Date().addingTimeInterval(-3 * 24 * 3600)
 
+            let excludedIDs = DFSViewModel.excludedTournamentIDs
             previousInProgressEntries = allEntries.filter { entry in
-                !currentTournamentIDs.contains(entry.tournamentID)
-                && !settledIDs.contains(entry.tournamentID)
-                && !locallySettledIDs.contains(entry.tournamentID)
-                && (entry.submittedAt ?? .distantPast) > staleThreshold
+                let tid = entry.tournamentID
+                // Use the OWNING sport's VM for the finished check — the previous
+                // code only consulted the NBA VM's history/settled set, so a
+                // graded WC/WNBA/etc. contest wasn't recognized as finished and
+                // lingered as an in-progress card. isTournamentFinished matches
+                // by slate identity (handles midnight date-bucket twins).
+                let ownerVM = viewModelForTournament(tid) ?? viewModel
+                return !currentTournamentIDs.contains(tid)
+                    && !ownerVM.isTournamentFinished(tid)
+                    && !excludedIDs.contains(tid)
+                    && (entry.submittedAt ?? .distantPast) > staleThreshold
             }
         } catch {
             print("[DFS] Failed to load previous in-progress entries: \(error.localizedDescription)")
@@ -3099,6 +3254,7 @@ struct DFSContestView: View {
     private func sportLabelForTournament(_ tournamentID: String) -> String {
         if tournamentID.hasPrefix("nhl-") { return "NHL" }
         if tournamentID.hasPrefix("ncaam-") { return "NCAAM" }
+        if tournamentID.hasPrefix("wnba-") { return "WNBA" }
         if tournamentID.hasPrefix("mlb-") { return "MLB" }
         if tournamentID.hasPrefix("pga-") { return "PGA" }
         if tournamentID.hasPrefix("epl-") { return "EPL" }
@@ -3113,6 +3269,7 @@ struct DFSContestView: View {
     private func sportColorForTournament(_ tournamentID: String) -> Color {
         if tournamentID.hasPrefix("nhl-") { return Color(red: 0.1, green: 0.3, blue: 0.6) }
         if tournamentID.hasPrefix("ncaam-") { return Color(red: 0.1, green: 0.3, blue: 0.6) }
+        if tournamentID.hasPrefix("wnba-") { return Color(red: 0.90, green: 0.35, blue: 0.10) }
         if tournamentID.hasPrefix("mlb-") { return Color(red: 0.0, green: 0.2, blue: 0.5) }
         if tournamentID.hasPrefix("pga-") { return Color(red: 0.0, green: 0.5, blue: 0.2) }
         if tournamentID.hasPrefix("epl-") { return Color(red: 0.3, green: 0.0, blue: 0.5) }
@@ -3134,6 +3291,12 @@ struct DFSContestView: View {
         if tournamentID.hasPrefix("ncaam-") {
             return LinearGradient(
                 colors: [Color(red: 0.08, green: 0.15, blue: 0.35), Color(red: 0.12, green: 0.25, blue: 0.50)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            )
+        }
+        if tournamentID.hasPrefix("wnba-") {
+            return LinearGradient(
+                colors: [Color(red: 0.70, green: 0.28, blue: 0.06), Color(red: 0.90, green: 0.40, blue: 0.12)],
                 startPoint: .topLeading, endPoint: .bottomTrailing
             )
         }
@@ -3214,8 +3377,13 @@ struct DFSContestView: View {
     /// Determine whether a previous-entry tournament is still upcoming (today's date, games not started)
     private func isEntryUpcoming(_ entry: DFSEntryRecord) -> Bool {
         let tid = entry.tournamentID
-        // Check if any view model knows the lock time for this tournament
-        let lockTime: Date? = [viewModel, nhlViewModel, mlbViewModel, pgaViewModel, eplViewModel, uclViewModel, ufcViewModel, nflViewModel, cfbViewModel].lazy.compactMap { vm in
+        // Check if any view model knows the lock time for this tournament.
+        // MUST include every sport's VM — WC/WNBA/NCAAM were omitted, so their
+        // contests fell through to the crude date fallback below and showed as
+        // LIVE 0.0 hours before the games actually started.
+        let lockTime: Date? = [viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
+                               eplViewModel, uclViewModel, wcViewModel, ufcViewModel,
+                               nflViewModel, cfbViewModel, ncaamViewModel, wnbaViewModel].lazy.compactMap { vm in
             vm.tournaments.first(where: { $0.id == tid }).map { vm.lockTimeForTournament($0) }
         }.first
         if let lt = lockTime {
@@ -3230,20 +3398,23 @@ struct DFSContestView: View {
         guard let tournamentDate = fmt.date(from: dateStr) else { return false }
         let todayStr = fmt.string(from: Date())
         guard let today = fmt.date(from: todayStr) else { return false }
-        // For today's tournaments, they're "upcoming" only if submitted recently
-        // (within last 5 minutes — likely just submitted and game hasn't started)
+        // Today-dated contest with no loaded lock time: we can't prove its games
+        // have started, and DFS slates lock in the afternoon/evening ET — so a
+        // morning app-open was wrongly flagging not-yet-started WC/WNBA contests
+        // as LIVE. Default such contests to UPCOMING; once the owning sport's VM
+        // loads the real lock time (the branch above), it flips to LIVE exactly
+        // at lock. A just-submitted contest is also clearly upcoming.
         if tournamentDate == today {
-            if let submitted = entry.submittedAt {
-                return Date().timeIntervalSince(submitted) < 300
-            }
-            return false  // Today's tournament with no recent submit = already started
+            return true
         }
         return tournamentDate > today
     }
 
     /// Returns the appropriate view model for a tournament ID based on sport prefix.
     private func viewModelForTournament(_ tournamentID: String) -> DFSViewModel? {
-        if tournamentID.hasPrefix("nba-") || tournamentID.hasPrefix("ncaam-") { return viewModel }
+        if tournamentID.hasPrefix("nba-") { return viewModel }
+        if tournamentID.hasPrefix("ncaam-") { return ncaamViewModel }
+        if tournamentID.hasPrefix("wnba-") { return wnbaViewModel }
         if tournamentID.hasPrefix("nhl-") { return nhlViewModel }
         if tournamentID.hasPrefix("mlb-") { return mlbViewModel }
         if tournamentID.hasPrefix("pga-") { return pgaViewModel }
@@ -3471,6 +3642,16 @@ struct DFSContestView: View {
         .background(gradientForTournament(entry.tournamentID))
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .shadow(color: .black.opacity(0.15), radius: 12, y: 6)
+        .contextMenu {
+            if isAdmin {
+                Button(role: .destructive) {
+                    vm.adminRemoveStuckContest(tournamentID: entry.tournamentID)
+                    Haptics.light()
+                } label: {
+                    Label("Remove Stuck Contest (admin)", systemImage: "trash")
+                }
+            }
+        }
         }
     }
 

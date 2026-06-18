@@ -170,7 +170,10 @@ struct DFSLineupBuilderView: View {
                     }
                     return deduped
                 }()
-                if !allSlateEntries.isEmpty {
+                // Hide Import during the late-swap window (slate locked): loading
+                // a different saved lineup would overwrite the already-locked,
+                // in-progress players and break the lineup the user is swapping.
+                if !allSlateEntries.isEmpty && !viewModel.isTournamentLocked {
                     Menu {
                         ForEach(Array(allSlateEntries.enumerated()), id: \.offset) { idx, entry in
                             Button {
@@ -341,17 +344,29 @@ struct DFSLineupBuilderView: View {
                     slotBadgeContent(label: badgeLabel, name: player.name, isMVP: isMVP)
                 }
 
-                Button {
-                    Haptics.light()
-                    viewModel.removePlayer(player)
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 16))
-                        .foregroundStyle(.red)
-                        .background(.white)
+                // Late swap: once a player's game has started, the spot is
+                // frozen — show a lock instead of a removable ✕.
+                if viewModel.isPlayerLocked(player) {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.white)
+                        .padding(3)
+                        .background(Color.gray)
                         .clipShape(Circle())
+                        .offset(x: 8, y: -6)
+                } else {
+                    Button {
+                        Haptics.light()
+                        viewModel.removePlayer(player)
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 16))
+                            .foregroundStyle(.red)
+                            .background(.white)
+                            .clipShape(Circle())
+                    }
+                    .offset(x: 8, y: -6)
                 }
-                .offset(x: 8, y: -6)
             }
 
             Text("$\(viewModel.formatSalary(displaySalary))")
@@ -522,6 +537,18 @@ struct DFSLineupBuilderView: View {
                                             .background(Color.green)
                                             .clipShape(RoundedRectangle(cornerRadius: 3))
                                     }
+                                    // Single-game MLB: flag the starting pitchers —
+                                    // the most important picks on a showdown slate.
+                                    if isSingleGame && viewModel.sport == "MLB" && player.position == "SP" {
+                                        Label("SP", systemImage: "baseball.fill")
+                                            .labelStyle(.titleAndIcon)
+                                            .font(.system(size: 9, weight: .bold))
+                                            .foregroundStyle(.white)
+                                            .padding(.horizontal, 5)
+                                            .padding(.vertical, 1)
+                                            .background(Color.green)
+                                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                                    }
                                     if viewModel.sport == "EPL" || viewModel.sport == "UCL" || viewModel.sport == "WC" {
                                         if player.isConfirmedActive {
                                             // Confirmed starter — XI announced
@@ -617,7 +644,10 @@ struct DFSLineupBuilderView: View {
                             .foregroundStyle(isSelected ? brandPurple : canAdd ? Color.secondary : Color.gray.opacity(0.3))
                     }
                     .buttonStyle(.plain)
-                    .disabled(viewModel.isTournamentLocked || (!isSelected && !canAdd))
+                    // Late swap: lock per-player by his game's start, not the
+                    // whole slate. Non-late-swap slates fall back to the
+                    // whole-slate lock inside isPlayerLocked().
+                    .disabled(viewModel.isPlayerLocked(player) || (!isSelected && !canAdd))
                 }
                 .padding(.vertical, 4)
                 .listRowBackground(playerIsMVP ? Color.yellow.opacity(0.08) : isSelected ? brandPurple.opacity(0.06) : Color.clear)

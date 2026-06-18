@@ -496,6 +496,7 @@ struct UserProfileView: View {
         if tournamentID.hasPrefix("nba-playoffs") { return "NBA Tiers" }
         if tournamentID.hasPrefix("nba-") { return "NBA" }
         if tournamentID.hasPrefix("ncaam-") { return "NCAAM" }
+        if tournamentID.hasPrefix("wnba-") { return "WNBA" }
         if tournamentID.hasPrefix("mlb-") { return "MLB" }
         if tournamentID.contains("masters") || tournamentID.contains("pga-championship")
             || tournamentID.contains("us-open") || tournamentID.contains("the-open") { return "Golf Tiers" }
@@ -510,7 +511,7 @@ struct UserProfileView: View {
 
     private func dfsResultIcon(_ sport: String) -> String {
         switch sport {
-        case "NBA", "NCAAM", "NBA Tiers": return "basketball.fill"
+        case "NBA", "NCAAM", "WNBA", "NBA Tiers": return "basketball.fill"
         case "MLB": return "baseball.fill"
         case "PGA", "Golf Tiers": return "figure.golf"
         case "Tennis": return "tennisball.fill"
@@ -524,6 +525,7 @@ struct UserProfileView: View {
         case "NBA": return .orange
         case "NBA Tiers": return .orange
         case "NCAAM": return .blue
+        case "WNBA": return .orange
         case "MLB": return .red
         case "PGA", "Golf Tiers": return .green
         case "Tennis": return .yellow
@@ -569,7 +571,7 @@ struct UserProfileView: View {
                 return now.timeIntervalSince(createdAt) < staleThreshold
             }
             dfsResults = dfs
-            dfsTournaments = Dictionary(uniqueKeysWithValues: tournaments.map { ($0.id, $0) })
+            dfsTournaments = Dictionary(tournaments.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
 
             // Best Ball placements: take every league the user is a member of,
             // batch-fetch league metadata + standings, build profile rows.

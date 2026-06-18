@@ -11,6 +11,133 @@ enum Haptics {
     static func medium() { medium_gen.impactOccurred() }
 }
 
+/// File-backed `Data` storage with the same surface as `@AppStorage`.
+///
+/// Why: CFPreferences rejects writes >= 4 MB and silently degrades the whole
+/// defaults domain into "direct mode" — at which point unrelated writes
+/// (like the rotated Supabase refresh token in `persistSession`) also fail,
+/// leaving the user stuck in an "Invalid Refresh Token: Already Used" loop
+/// forever. Large blobs (`dfs_history_data`, `history_data`) belong on disk,
+/// not in NSUserDefaults.
+///
+/// On first read, transparently migrates any legacy UserDefaults value for
+/// the same key into the file store and removes the defaults entry.
+@propertyWrapper
+struct FileBlob: DynamicProperty {
+    @State private var storage: Data
+    private let key: String
+
+    init(_ key: String) {
+        self.key = key
+        self._storage = State(initialValue: FileBlobStore.shared.load(key: key))
+    }
+
+    var wrappedValue: Data {
+        get { storage }
+        nonmutating set {
+            storage = newValue
+            FileBlobStore.shared.save(key: key, data: newValue)
+        }
+    }
+
+    var projectedValue: Binding<Data> {
+        Binding(get: { storage }, set: { wrappedValue = $0 })
+    }
+}
+
+final class FileBlobStore: @unchecked Sendable {
+    static let shared = FileBlobStore()
+
+    private let queue = DispatchQueue(label: "FileBlobStore", attributes: .concurrent)
+    private var cache: [String: Data] = [:]
+
+    /// One-time-per-launch sweep. UserDefaults has a hard 4MB CFPreferences
+    /// ceiling; past it, ALL writes fail silently AND reads return corrupt data
+    /// (`decode: bad range`), which scrambled the live RR aggregation. Legacy
+    /// cache blobs (Tiers bot fields, etc.) that were never migrated to disk —
+    /// because their owning tournament was never re-opened this session — keep
+    /// the domain bloated. Delete any oversized value outright: caches
+    /// regenerate, and every real setting (session, rr_score, profile) is tiny.
+    static func sweepOversizedDefaults(thresholdBytes: Int = 262_144) {
+        let defaults = UserDefaults.standard
+        var removed = 0
+        var freed = 0
+        for (key, value) in defaults.dictionaryRepresentation() {
+            guard let data = value as? Data, data.count > thresholdBytes else { continue }
+            defaults.removeObject(forKey: key)
+            removed += 1
+            freed += data.count
+            print("[FileBlobStore] swept oversized UserDefaults key '\(key)' (\(data.count) bytes)")
+        }
+        if removed > 0 {
+            print("[FileBlobStore] sweep removed \(removed) oversized key(s), freed ~\(freed / 1024)KB — UserDefaults back under the 4MB ceiling")
+        }
+    }
+
+    func load(key: String) -> Data {
+        queue.sync {
+            if let cached = cache[key] { return cached }
+            let url = Self.url(for: key)
+            if let onDisk = try? Data(contentsOf: url) {
+                cache[key] = onDisk
+                return onDisk
+            }
+            // One-time migration from UserDefaults — the legacy storage
+            // that overflowed CFPreferences. Move it to disk and scrub
+            // the defaults entry so subsequent writes don't try to push
+            // the same bloated blob through CFPreferences again.
+            let defaults = UserDefaults.standard
+            if let legacy = defaults.data(forKey: key), !legacy.isEmpty {
+                cache[key] = legacy
+                do {
+                    try legacy.write(to: url, options: .atomic)
+                    defaults.removeObject(forKey: key)
+                    print("[FileBlobStore] migrated \(key) (\(legacy.count) bytes) from UserDefaults → \(url.lastPathComponent)")
+                } catch {
+                    print("[FileBlobStore] migration write failed for \(key): \(error.localizedDescription)")
+                }
+                return legacy
+            }
+            cache[key] = Data()
+            return Data()
+        }
+    }
+
+    func save(key: String, data: Data) {
+        queue.async(flags: .barrier) {
+            self.cache[key] = data
+            let url = Self.url(for: key)
+            do {
+                try data.write(to: url, options: .atomic)
+            } catch {
+                print("[FileBlobStore] write failed for \(key) (\(data.count) bytes): \(error.localizedDescription)")
+            }
+            // Defensive: if a legacy defaults entry was re-shadowed by some
+            // call site we missed, clear it so the next process launch
+            // doesn't reload the wrong source of truth.
+            if UserDefaults.standard.data(forKey: key) != nil {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+        }
+    }
+
+    private static func url(for key: String) -> URL {
+        let manager = FileManager.default
+        let base: URL
+        do {
+            base = try manager.url(
+                for: .applicationSupportDirectory, in: .userDomainMask,
+                appropriateFor: nil, create: true
+            )
+        } catch {
+            base = manager.temporaryDirectory
+        }
+        let dir = base.appendingPathComponent("DuelFantasy", isDirectory: true)
+        try? manager.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("\(key).bin")
+    }
+}
+
 /// ViewModifier that observes per-sport DFS rrScore, historyData, and settledTournamentData
 /// and fans changes out to all sibling view models. Extracted to reduce body type-check complexity.
 private struct DFSSyncModifiers: ViewModifier {
@@ -116,19 +243,47 @@ struct ContentView: View {
     @State private var avatarBlockedAlert: String?
     @AppStorage("odds_api_key") private var oddsAPIKey: String = AppSecrets.defaultOddsAPIKey
     @AppStorage("rr_score") private var rrScore: Int = 1000
+    // Last fully-synced total RR, shown instantly on launch so the number is
+    // stable from the first frame instead of climbing as async sources load.
+    @AppStorage("last_stable_rr") private var lastStableRR: Int = 1000
+    @State private var rrSyncReady = false
+    // Last DFS-RR delta from AFTER the launch settle completed (the correct,
+    // fully-loaded value — e.g. with both WC lineups). Shown on the DFS pill
+    // instantly so the home screen reads the right number from the first frame
+    // instead of the under-counted live value that takes ~15s to re-derive on a
+    // flaky connection. Int.min = no snapshot yet (fall back to live).
+    @AppStorage("last_stable_dfs_rr") private var lastStableDfsRR: Int = Int.min
+    @State private var dfsSettleReady = false
+    // Fire the token-change fallback history sync at most once. The token
+    // thrashes (refreshes repeatedly), and re-spawning the cross-sport sync on
+    // every change flooded the network and starved the real sync.
+    @State private var didFireTokenHistorySync = false
     @AppStorage("wins") private var wins: Int = 0
     @AppStorage("losses") private var losses: Int = 0
-    @AppStorage("history_data") private var historyData: Data = Data()
-    @AppStorage("dfs_history_data") private var dfsHistoryData: Data = Data()
-    @AppStorage("dfs_settled_tournaments") private var settledTournamentData: Data = Data()
+    // File-backed so the encoded history blob can grow past the 4 MB
+    // CFPreferences limit without poisoning the rest of the defaults
+    // domain (which would silently break `persistSession` writes).
+    @FileBlob("history_data") private var historyData: Data
+    @FileBlob("dfs_history_data") private var dfsHistoryData: Data
+    // Settled-set must live on disk too: when the UserDefaults domain crosses
+    // the 4MB CFPreferences ceiling, AppStorage writes fail SILENTLY, so the
+    // settled flags never persisted and finished contests (e.g. the RBC PGA
+    // ones) reappeared as LIVE 0.0 cards every launch until the self-heal
+    // re-settled them. FileBlob auto-migrates the existing UserDefaults value.
+    @FileBlob("dfs_settled_tournaments") private var settledTournamentData: Data
     @AppStorage("dfs_settlement_version") private var dfsSettlementVersion: Int = 0
     @AppStorage("last_user_id") private var lastUserID: String = ""
 
     @State private var draftName: String = ""
 
-    @AppStorage("picks_by_match") private var picksByMatchData: Data = Data()
-    @AppStorage("resolved_matches") private var resolvedMatchesData: Data = Data()
-    @AppStorage("pick_details") private var pickDetailsData: Data = Data()
+    // On disk, not UserDefaults: these pick blobs grow with every pick the user
+    // makes and were helping push the CFPreferences domain past its 4MB ceiling,
+    // which silently dropped EVERY UserDefaults write — including tiny keys like
+    // `rr_score`. That's why the RR counter loaded stale and visibly climbed to
+    // the real value on each launch. FileBlob auto-migrates the existing keys.
+    @FileBlob("picks_by_match") private var picksByMatchData: Data
+    @FileBlob("resolved_matches") private var resolvedMatchesData: Data
+    @FileBlob("pick_details") private var pickDetailsData: Data
     @State private var picksByMatch: [String: String] = [:]
     @State private var resolvedMatches: Set<String> = []
     @State private var pickDetails: [String: PickDetail] = [:]
@@ -184,6 +339,16 @@ struct ContentView: View {
         sport: "CFB",
         slateProvider: ESPNNCAAFBDFSSlateProvider(),
         scoringProvider: ESPNNCAAFBDFSLiveScoringProvider()
+    )
+    @State private var ncaamDFSViewModel = DFSViewModel(
+        sport: "NCAAM",
+        slateProvider: ESPNNCAAMDFSSlateProvider(),
+        scoringProvider: ESPNNCAAMDFSLiveScoringProvider()
+    )
+    @State private var wnbaDFSViewModel = DFSViewModel(
+        sport: "WNBA",
+        slateProvider: ESPNWNBADFSSlateProvider(),
+        scoringProvider: ESPNWNBADFSLiveScoringProvider()
     )
     @State private var bestBallViewModel = BestBallViewModel()
     @State private var playoffTiersViewModel = PlayoffTiersViewModel()
@@ -260,12 +425,14 @@ struct ContentView: View {
         let sources: [DFSViewModel] = [
             dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
             eplDFSViewModel, uclDFSViewModel, wcDFSViewModel,
-            ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel
+            ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel,
+            ncaamDFSViewModel, wnbaDFSViewModel
         ]
         func canonicalVM(for tid: String) -> DFSViewModel? {
             if tid.hasPrefix("pga-") { return pgaDFSViewModel }
             if tid.hasPrefix("nhl-") { return nhlDFSViewModel }
-            if tid.hasPrefix("ncaam-") { return nhlDFSViewModel }
+            if tid.hasPrefix("ncaam-") { return ncaamDFSViewModel }
+            if tid.hasPrefix("wnba-") { return wnbaDFSViewModel }
             if tid.hasPrefix("mlb-") { return mlbDFSViewModel }
             if tid.hasPrefix("epl-") { return eplDFSViewModel }
             if tid.hasPrefix("ucl-") { return uclDFSViewModel }
@@ -316,6 +483,55 @@ struct ContentView: View {
     /// This avoids drift from incremental rrScore += delta between syncs.
     private var displayedRR: Int {
         1000 + pickemRRDelta + dfsRRDelta
+    }
+
+    /// DFS-RR delta shown on the home pill. Before the launch settle finishes
+    /// (which re-derives slow-to-load rows like a 2nd WC lineup over a flaky
+    /// connection), show the post-settle snapshot from last session so the
+    /// number is correct from the first frame; switch to live once settled.
+    private var shownDfsRR: Int {
+        if dfsSettleReady || lastStableDfsRR == Int.min { return dfsRRDelta }
+        return lastStableDfsRR
+    }
+
+    /// Diagnostic: dump the per-sport row breakdown + the WC/PGA rows in detail
+    /// so we can DIFF the home vs My Contests state and see exactly which rows
+    /// only appear on one screen.
+    func logRRBreakdown(_ context: String) {
+        let vms: [(String, DFSViewModel)] = [
+            ("nba", dfsViewModel), ("nhl", nhlDFSViewModel), ("mlb", mlbDFSViewModel),
+            ("pga", pgaDFSViewModel), ("epl", eplDFSViewModel), ("ucl", uclDFSViewModel),
+            ("wc", wcDFSViewModel), ("ufc", ufcDFSViewModel), ("nfl", nflDFSViewModel),
+            ("cfb", cfbDFSViewModel), ("ncaam", ncaamDFSViewModel), ("wnba", wnbaDFSViewModel)
+        ]
+        print("=== [RR-DEBUG \(context)] dfsRRDelta=\(dfsRRDelta) pickem=\(pickemRRDelta) displayed=\(displayedRR) ===")
+        for (name, vm) in vms {
+            let rows = vm.dfsHistory.filter { ($0.tournamentId ?? "").hasPrefix(name + "-") }
+            guard !rows.isEmpty else { continue }
+            let sum = rows.reduce(0) { $0 + $1.rrDelta }
+            print("  [\(name)] \(rows.count) rows, rrSum=\(sum)")
+            if name == "wc" || name == "pga" {
+                for r in rows {
+                    print("    tid=\(r.tournamentId ?? "?") ln=\(r.lineupNumber.map(String.init) ?? "nil") rr=\(r.rrDelta) pts=\(r.lineupPoints)")
+                }
+            }
+        }
+    }
+
+    /// The RR actually shown in the UI. `displayedRR` is recomputed live from
+    /// history that loads ASYNCHRONOUSLY on launch (pickem picks + 12 DFS VMs),
+    /// so before the first full sync completes it reads LOW (a sport's rows
+    /// aren't loaded yet) and visibly climbs as each source lands — the
+    /// "374 → 399 on entering My Contests" the user kept seeing. To present a
+    /// stable number from the first frame, we show the persisted last-stable RR
+    /// until `rrSyncReady`, then switch to the live value (and keep persisting
+    /// it). The persisted value is last session's fully-synced total, so the
+    /// home screen and My Contests agree immediately.
+    private var shownRR: Int {
+        // Total pill, consistent with the DFS pill: uses the post-settle DFS-RR
+        // snapshot until the live settle catches up. Server pushes still use the
+        // live `displayedRR`, so persistence stays accurate.
+        1000 + pickemRRDelta + shownDfsRR
     }
 
     private var brandPurple: Color {
@@ -385,7 +601,7 @@ struct ContentView: View {
                 }
                 .tag(0)
 
-            DFSContestView(viewModel: dfsViewModel, nhlViewModel: nhlDFSViewModel, mlbViewModel: mlbDFSViewModel, pgaViewModel: pgaDFSViewModel, eplViewModel: eplDFSViewModel, uclViewModel: uclDFSViewModel, wcViewModel: wcDFSViewModel, ufcViewModel: ufcDFSViewModel, nflViewModel: nflDFSViewModel, cfbViewModel: cfbDFSViewModel)
+            DFSContestView(viewModel: dfsViewModel, nhlViewModel: nhlDFSViewModel, mlbViewModel: mlbDFSViewModel, pgaViewModel: pgaDFSViewModel, eplViewModel: eplDFSViewModel, uclViewModel: uclDFSViewModel, wcViewModel: wcDFSViewModel, ufcViewModel: ufcDFSViewModel, nflViewModel: nflDFSViewModel, cfbViewModel: cfbDFSViewModel, ncaamViewModel: ncaamDFSViewModel, wnbaViewModel: wnbaDFSViewModel, onDeletePastContest: { tid in deletePastDFSContest(tournamentID: tid) }, onRegradePastContest: { tid in regradePastDFSContest(tournamentID: tid) })
                 .tabItem {
                     Label("DFS", systemImage: "person.3")
                 }
@@ -417,13 +633,21 @@ struct ContentView: View {
         // if the token was already set at first render — so without this,
         // UCL/UFC/etc. only loaded when the user navigated to DFS, which is
         // exactly the symptom the user kept hitting.
-        .task(id: auth.accessToken) {
+        // Keyed on the STABLE userID, NOT accessToken. The token thrashes
+        // (refreshes repeatedly), and keying on it cancelled the in-flight
+        // history sync before it could finish — so on the home screen the
+        // golf/past rows never loaded and the DFS RR read low until the DFS tab
+        // ran its own sync. userID is stable per session, so this fires once and
+        // runs to completion; the token is read at call time and 401s retry
+        // inside SupabaseService.
+        .task(id: auth.userID) {
             guard let userID = auth.userID, let token = auth.accessToken else { return }
-            print("[DFS-SharedSync] task(id: accessToken) fired — userID=\(userID.prefix(8))…")
+            print("[DFS-SharedSync] task(id: userID) fired — userID=\(userID.prefix(8))…")
             let allVMs: [DFSViewModel] = [
                 dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
                 eplDFSViewModel, uclDFSViewModel, wcDFSViewModel,
-                ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel
+                ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel,
+                ncaamDFSViewModel, wnbaDFSViewModel
             ]
             await DFSViewModel.syncAllSportsHistoryFromServer(
                 vms: allVMs, userID: userID, accessToken: token,
@@ -431,6 +655,13 @@ struct ContentView: View {
                     syncHistoryData(blob)
                 }
             )
+            // Full history is now loaded — switch the pill to the live value and
+            // snapshot it so the next launch shows the correct total immediately.
+            await MainActor.run {
+                rrSyncReady = true
+                lastStableRR = displayedRR
+                logRRBreakdown("HOME/shared-sync-done")
+            }
         }
         .task {
             syncAuthToViewModel()
@@ -569,6 +800,36 @@ struct ContentView: View {
         .task(id: "dfs-settlement-timer") {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             while !Task.isCancelled {
+                // Settle past contests FIRST, before the slow/serial slate loads
+                // below. Those 9 loadSlateIfNeeded calls hit flaky external APIs
+                // and can take 10s+ (or get cancelled), which used to delay the
+                // PGA settle so long that the home-screen RR never picked up
+                // finished golf contests — it only updated once the DFS tab ran
+                // its own settle pass. checkAndSettle needs no slate, so run it
+                // up front and include EVERY sport (wc/wnba/ncaam were missing).
+                // Run all sports' settlement CONCURRENTLY (My Contests already
+                // does this via parallel initSportPipeline, which is why its RR
+                // is right). Serial here meant the multi-lineup fix for a
+                // mid-list sport like WC rarely finished before the user looked,
+                // so the home DFS-RR pill under-counted (e.g. a 2nd WC lineup
+                // missing → 374 vs the correct 399). Each VM settles only its
+                // own sport's rows; dfsRRDelta reads each sport from its owner
+                // VM, so concurrency is safe for the total.
+                await withTaskGroup(of: Void.self) { group in
+                    for vm in [dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
+                               eplDFSViewModel, uclDFSViewModel, wcDFSViewModel, ufcDFSViewModel,
+                               nflDFSViewModel, cfbDFSViewModel, ncaamDFSViewModel, wnbaDFSViewModel] {
+                        group.addTask { await vm.checkAndSettleUnsettledTournaments() }
+                    }
+                }
+                await dfsViewModel.syncHistoryFromServer()
+                logRRBreakdown("HOME/launch-settle-done")
+                // Settle finished — this dfsRRDelta is the fully-loaded value.
+                // Snapshot it and switch the pill to live; next launch shows it
+                // instantly instead of the slow re-derive.
+                dfsSettleReady = true
+                lastStableDfsRR = dfsRRDelta
+
                 await dfsViewModel.loadSlateIfNeeded()
                 await nhlDFSViewModel.loadSlateIfNeeded()
                 await mlbDFSViewModel.loadSlateIfNeeded()
@@ -578,16 +839,6 @@ struct ContentView: View {
                 await ufcDFSViewModel.loadSlateIfNeeded()
                 await nflDFSViewModel.loadSlateIfNeeded()
                 await cfbDFSViewModel.loadSlateIfNeeded()
-                await dfsViewModel.checkAndSettleUnsettledTournaments()
-                await nhlDFSViewModel.checkAndSettleUnsettledTournaments()
-                await mlbDFSViewModel.checkAndSettleUnsettledTournaments()
-                await pgaDFSViewModel.checkAndSettleUnsettledTournaments()
-                await eplDFSViewModel.checkAndSettleUnsettledTournaments()
-                await uclDFSViewModel.checkAndSettleUnsettledTournaments()
-                await ufcDFSViewModel.checkAndSettleUnsettledTournaments()
-                await nflDFSViewModel.checkAndSettleUnsettledTournaments()
-                await cfbDFSViewModel.checkAndSettleUnsettledTournaments()
-                await dfsViewModel.syncHistoryFromServer()
                 if dfsViewModel.tournament != nil && !dfsViewModel.fieldEntries.isEmpty {
                     await dfsViewModel.refreshLive()
                 }
@@ -632,13 +883,17 @@ struct ContentView: View {
                 // its own per-VM sync). The shared fetch hits Postgres
                 // exactly twice across all 10 sports, so re-firing is cheap.
                 Task { @MainActor in
+                    // Only ONCE — token churn must not re-spawn this (the
+                    // primary sync is the .task(id: userID) above).
+                    guard !didFireTokenHistorySync else { return }
                     let allVMs: [DFSViewModel] = [
                         dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
                         eplDFSViewModel, uclDFSViewModel, wcDFSViewModel,
                         ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel
                     ]
                     if let userID = auth.userID, let token = auth.accessToken {
-                        print("[DFS-SharedSync] auth.accessToken changed — firing shared sync")
+                        didFireTokenHistorySync = true
+                        print("[DFS-SharedSync] auth.accessToken changed — firing shared sync (once)")
                         await DFSViewModel.syncAllSportsHistoryFromServer(
                             vms: allVMs, userID: userID, accessToken: token,
                             onMergedHistory: { blob in
@@ -659,6 +914,8 @@ struct ContentView: View {
             ufcDFSViewModel.profileName = newValue
             nflDFSViewModel.profileName = newValue
             cfbDFSViewModel.profileName = newValue
+            ncaamDFSViewModel.profileName = newValue
+            wnbaDFSViewModel.profileName = newValue
             bestBallViewModel.profileName = newValue
             playoffTiersViewModel.profileName = newValue
             tennisBracketViewModel.profileName = newValue
@@ -695,6 +952,12 @@ struct ContentView: View {
         cfbDFSViewModel.accessToken = auth.accessToken
         cfbDFSViewModel.userID = auth.userID
         cfbDFSViewModel.userEmail = auth.userEmail
+        ncaamDFSViewModel.accessToken = auth.accessToken
+        ncaamDFSViewModel.userID = auth.userID
+        ncaamDFSViewModel.userEmail = auth.userEmail
+        wnbaDFSViewModel.accessToken = auth.accessToken
+        wnbaDFSViewModel.userID = auth.userID
+        wnbaDFSViewModel.userEmail = auth.userEmail
         bestBallViewModel.accessToken = auth.accessToken
         bestBallViewModel.userID = auth.userID
         bestBallViewModel.profileName = profileName
@@ -755,6 +1018,14 @@ struct ContentView: View {
         cfbDFSViewModel.settledTournamentData = settledTournamentData
         cfbDFSViewModel.rrScore = rrScore
         cfbDFSViewModel.profileName = profileName
+        ncaamDFSViewModel.dfsHistoryData = dfsHistoryData
+        ncaamDFSViewModel.settledTournamentData = settledTournamentData
+        ncaamDFSViewModel.rrScore = rrScore
+        ncaamDFSViewModel.profileName = profileName
+        wnbaDFSViewModel.dfsHistoryData = dfsHistoryData
+        wnbaDFSViewModel.settledTournamentData = settledTournamentData
+        wnbaDFSViewModel.rrScore = rrScore
+        wnbaDFSViewModel.profileName = profileName
         playoffTiersViewModel.dfsHistoryData = dfsHistoryData
         playoffTiersViewModel.settledTournamentData = settledTournamentData
         playoffTiersViewModel.rrScore = rrScore
@@ -796,6 +1067,8 @@ struct ContentView: View {
         ufcDFSViewModel.rrScore = value
         nflDFSViewModel.rrScore = value
         cfbDFSViewModel.rrScore = value
+        ncaamDFSViewModel.rrScore = value
+        wnbaDFSViewModel.rrScore = value
         playoffTiersViewModel.rrScore = value
         tennisBracketViewModel.rrScore = value
         golfTiersViewModel.rrScore = value
@@ -803,6 +1076,10 @@ struct ContentView: View {
     }
 
     private func syncHistoryData(_ value: Data) {
+        // Plain distribution. (An earlier "union" version recomputed a new blob
+        // and re-set every VM, which retriggered onChange(of: vm.dfsHistoryData)
+        // → syncHistory → syncHistoryData in a feedback loop that could spin
+        // forever and crash the app. Keep this a simple idempotent fan-out.)
         dfsHistoryData = value
         dfsViewModel.dfsHistoryData = value
         nhlDFSViewModel.dfsHistoryData = value
@@ -813,6 +1090,8 @@ struct ContentView: View {
         ufcDFSViewModel.dfsHistoryData = value
         nflDFSViewModel.dfsHistoryData = value
         cfbDFSViewModel.dfsHistoryData = value
+        ncaamDFSViewModel.dfsHistoryData = value
+        wnbaDFSViewModel.dfsHistoryData = value
         playoffTiersViewModel.dfsHistoryData = value
         tennisBracketViewModel.dfsHistoryData = value
         golfTiersViewModel.dfsHistoryData = value
@@ -830,6 +1109,8 @@ struct ContentView: View {
         ufcDFSViewModel.settledTournamentData = value
         nflDFSViewModel.settledTournamentData = value
         cfbDFSViewModel.settledTournamentData = value
+        ncaamDFSViewModel.settledTournamentData = value
+        wnbaDFSViewModel.settledTournamentData = value
         playoffTiersViewModel.settledTournamentData = value
         tennisBracketViewModel.settledTournamentData = value
         golfTiersViewModel.settledTournamentData = value
@@ -1002,7 +1283,7 @@ struct ContentView: View {
                         HStack(spacing: 6) {
                             Image(systemName: "trophy.fill")
                                 .foregroundStyle(.yellow)
-                            Text("\(displayedRR) RR")
+                            Text("\(shownRR) RR")
                                 .font(.headline.monospacedDigit())
                         }
                         .padding(.horizontal, 20)
@@ -2106,7 +2387,7 @@ struct ContentView: View {
                 }
                 Spacer()
                 VStack(spacing: 2) {
-                    Text("\(displayedRR)")
+                    Text("\(shownRR)")
                         .font(.system(size: 32, weight: .bold, design: .rounded).monospacedDigit())
                         .foregroundStyle(.white)
                     Text("Total RR")
@@ -2143,7 +2424,7 @@ struct ContentView: View {
             // Pick'em vs DFS RR breakdown
             HStack(spacing: 16) {
                 rrBreakdownPill(label: "Pick'em", delta: pickemRRDelta)
-                rrBreakdownPill(label: "DFS", delta: dfsRRDelta)
+                rrBreakdownPill(label: "DFS", delta: shownDfsRR)
             }
             .padding(.vertical, 10)
             .padding(.horizontal, 16)
@@ -2193,10 +2474,14 @@ struct ContentView: View {
 
     private var availableLeagues: [String] {
         let leagues = Set(matches.map { $0.league })
+        // WNBA is lowest priority — it goes dead last, after every other league
+        // including World Cup (which lands in `rest`). So it's intentionally NOT
+        // in the priority `order` list and is appended at the very end.
         let order = ["NBA", "MLB", "NHL", "NFL", "NCAAF", "NCAAB", "EPL", "UCL", "ATP", "WTA"]
         let sorted = order.filter { leagues.contains($0) }
-        let rest = leagues.subtracting(Set(order)).sorted()
-        return sorted + rest
+        let rest = leagues.subtracting(Set(order)).subtracting(["WNBA"]).sorted()
+        let wnba = leagues.contains("WNBA") ? ["WNBA"] : []
+        return sorted + rest + wnba
     }
 
     private var filteredMatches: [Match] {
@@ -3214,6 +3499,60 @@ struct ContentView: View {
 
     private func encodedDFSHistory(_ value: [DFSResult]) -> Data {
         (try? JSONEncoder().encode(value)) ?? Data()
+    }
+
+    /// ADMIN ONLY. Permanently remove a past DFS contest (all the user's
+    /// lineups in it) and claw back the RR it contributed. Used to scrub
+    /// contests whose bot field was broken and handed out undeserved RR.
+    func deletePastDFSContest(tournamentID: String) {
+        // 1. Exclude it permanently. The read-time filter in `dfsHistory`
+        //    keeps it gone even if the server re-imports or re-settles it —
+        //    the root cause of "deleted results keep coming back".
+        DFSViewModel.excludeTournament(tournamentID)
+
+        // 2. Drop the rows from the persisted blob now so the UI updates
+        //    immediately (changing the blob also triggers the observers).
+        let remaining = dfsViewModel.dfsHistory.filter { $0.tournamentId != tournamentID }
+        syncHistoryData(encodedDFSHistory(remaining))
+
+        // 3. Keep it settled so a later slate load can't re-settle it.
+        var settled = (try? JSONDecoder().decode(Set<String>.self, from: settledTournamentData)) ?? []
+        settled.insert(tournamentID)
+        syncSettledData((try? JSONEncoder().encode(settled)) ?? settledTournamentData)
+
+        // 4. Reconcile the incremental RR mirror to the corrected derived total.
+        syncRRScore(displayedRR)
+
+        // 5. Server: delete the result rows and push corrected profile stats.
+        if let token = auth.accessToken, let userID = auth.userID {
+            let correctedRR = displayedRR
+            let w = wins, l = losses
+            Task {
+                try? await SupabaseService.shared.deleteTournamentResults(tournamentID: tournamentID, accessToken: token)
+                try? await SupabaseService.shared.syncProfileStats(userID: userID, rrScore: correctedRR, wins: w, losses: l, accessToken: token)
+            }
+        }
+    }
+
+    /// ADMIN: re-grade a settled contest (regenerate bots + re-score with the
+    /// current fixed logic) instead of deleting it. Routes to the owning sport
+    /// view model.
+    func regradePastDFSContest(tournamentID tid: String) {
+        let owner: DFSViewModel = {
+            if tid.hasPrefix("nhl-") { return nhlDFSViewModel }
+            if tid.hasPrefix("ncaam-") { return ncaamDFSViewModel }
+            if tid.hasPrefix("wnba-") { return wnbaDFSViewModel }
+            if tid.hasPrefix("mlb-") { return mlbDFSViewModel }
+            if tid.hasPrefix("pga-") { return pgaDFSViewModel }
+            if tid.hasPrefix("epl-") { return eplDFSViewModel }
+            if tid.hasPrefix("ucl-") { return uclDFSViewModel }
+            if tid.hasPrefix("wc-")  { return wcDFSViewModel }
+            if tid.hasPrefix("ufc-") { return ufcDFSViewModel }
+            if tid.hasPrefix("nfl-") { return nflDFSViewModel }
+            if tid.hasPrefix("cfb-") { return cfbDFSViewModel }
+            return dfsViewModel
+        }()
+        Task { await owner.adminRegradeContest(tournamentID: tid) }
     }
 
     private func loadMatchesIfNeeded() async {
