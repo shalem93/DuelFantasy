@@ -632,7 +632,16 @@ struct DFSLobbyView: View {
                             viewModel.selectTournament(tournament.id)
                         }
                         viewModel.loadLineupFromEntry(entry)
-                        viewModel.editingLineupNumber = lineupNumber
+                        // Edit/upsert by the entry's REAL stored lineup_number,
+                        // NOT the `lineupNumber` shown on the card. That display
+                        // number is re-derived each render by sorting entries on
+                        // submittedAt (see globalLineupNumbers), and editing bumps
+                        // submittedAt — so the display order drifts away from the
+                        // stored number. Submitting against a drifted number makes
+                        // the (tournament_id, user_id, lineup_number) upsert write a
+                        // NEW row in that instance instead of replacing this one,
+                        // leaving an orphaned duplicate (3 lineups → 6 cards).
+                        viewModel.editingLineupNumber = entry.lineupNumber ?? lineupNumber
                         viewModel.showLineupBuilder = true
                     }
                     .font(.caption.weight(.medium))

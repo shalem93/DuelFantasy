@@ -144,6 +144,12 @@ final class DFSViewModel {
     func clearLineupForNewEntry() {
         selectedPlayerIDs = []
         mvpPlayerID = nil
+        // Reset the player-list filters too. Starting a new lineup in the SAME
+        // tournament skips selectTournament's reset (it early-returns on an
+        // unchanged ID), so a position/game pill left selected from the last
+        // lineup (e.g. MID) would carry over and hide the rest of the pool.
+        selectedPositionFilter = nil
+        selectedGameFilter = nil
     }
 
     /// Strip instance suffix (e.g. "mlb-xxx-h2h-i3" → "mlb-xxx-h2h")
@@ -926,7 +932,30 @@ final class DFSViewModel {
             if id.hasSuffix("-sp") { return savedIDs.contains(String(id.dropLast(3))) }
             return savedIDs.contains(id + "-sp")
         }
-        let importable = savedIDs.filter { poolIDs.contains($0) || hasTwoWaySibling($0) }
+        // GENERAL keep-path (covers soccer/WC and every other sport). When the
+        // live pool is still loading or was partially rebuilt, a player the user
+        // drafted (e.g. Mbappé) may be momentarily absent from `activePlayers`.
+        // Pruning him here permanently deletes him from the selection — and the
+        // `selectedPlayers` stub fallback never gets the chance to re-materialize
+        // him because his ID never enters `selectedPlayerIDs`. Keep any saved ID
+        // we can still render PROPERLY — i.e. we have both its name (from the
+        // entry or preloaded info) AND its draft salary — so it shows as a named,
+        // priced, removable player rather than a "$0 pga-5467"-style dead stub.
+        // Genuinely stale raw IDs with no metadata are still pruned.
+        let savedNamesByID: [String: String] = {
+            guard let names = entry.lineupPlayerNames, !names.isEmpty else { return [:] }
+            var map: [String: String] = [:]
+            for (i, pid) in savedIDs.enumerated() where i < names.count && !names[i].isEmpty {
+                map[pid] = names[i]
+            }
+            return map
+        }()
+        let savedSalaries = entry.lineupPlayerSalaries ?? [:]
+        func isResolvable(_ id: String) -> Bool {
+            let hasName = savedNamesByID[id] != nil || (preloadedPlayerInfo[id]?.name.isEmpty == false)
+            return hasName && savedSalaries[id] != nil
+        }
+        let importable = savedIDs.filter { poolIDs.contains($0) || hasTwoWaySibling($0) || isResolvable($0) }
         if importable.count < savedIDs.count {
             print("[DFS-\(sport)] Import: dropped \(savedIDs.count - importable.count) players no longer in the slate")
         }
@@ -950,6 +979,15 @@ final class DFSViewModel {
         if let tid = activeTournamentID,
            let entry = entryRecord(for: tid, lineupNumber: lineupNumber) {
             loadLineupFromEntry(entry)
+        }
+        // Make the late-swap pool show the same confirmed (CS) starters the
+        // single-game pools already have, then pull the freshest XIs from ESPN.
+        // Without this, a game whose XI dropped after the main slate loaded
+        // shows stale "predicted" badges in the swap builder.
+        reconcileConfirmedFromSingleGamePools()
+        Task {
+            await reprobeSoccerConfirmedXIIfNeeded()
+            reconcileConfirmedFromSingleGamePools()
         }
     }
 
@@ -2576,6 +2614,14 @@ final class DFSViewModel {
         let (newPlayers, mainMarked) = mark(players)
         players = newPlayers
         var totalMarked = mainMarked
+        // Evening pool is a separate array (built off `players` at load time) —
+        // mark it too, otherwise an evening-slate builder shows stale PS badges
+        // for an XI that the main/single-game pools already confirmed.
+        if !eveningPlayers.isEmpty {
+            let (newEvening, eveMarked) = mark(eveningPlayers)
+            eveningPlayers = newEvening
+            totalMarked += eveMarked
+        }
         for (gid, pool) in singleGamePlayers {
             let (newPool, m) = mark(pool)
             singleGamePlayers[gid] = newPool
@@ -2583,6 +2629,53 @@ final class DFSViewModel {
         }
         if totalMarked > 0 {
             print("[DFS-\(sport)] XI re-probe confirmed \(totalMarked) starter entries from ESPN lineups")
+        }
+        // Catch any starter a single-game pool already had confirmed (e.g. from
+        // RotoGrinders' XI at build time) that this ESPN pass didn't surface.
+        reconcileConfirmedFromSingleGamePools()
+    }
+
+    /// Make the main (and evening) player pools at least as up-to-date on
+    /// confirmed starters as the single-game pools. The same player exists in
+    /// both `players` and `singleGamePlayers[gameID]` (same id), built from one
+    /// marked pool — but the two can drift apart: a re-probe, a slate rebuild,
+    /// or a per-game lineup fetch may confirm a starter in one pool while the
+    /// other still shows the pre-XI "predicted" badge. Symptom the user hit:
+    /// the Belgium single-game contest shows CS badges, but late-swapping the
+    /// same game on the main slate still shows PS. Confirmation is monotonic
+    /// within a slate (an announced starter stays announced), so ORing the flag
+    /// from the SG pools into `players`/`eveningPlayers` only ever upgrades —
+    /// it never wrongly un-confirms anyone.
+    func reconcileConfirmedFromSingleGamePools() {
+        guard sport == "EPL" || sport == "UCL" || sport == "WC" else { return }
+        guard !singleGamePlayers.isEmpty else { return }
+        // Union of every player the single-game pools consider a confirmed XI starter.
+        var confirmedIDs = Set<String>()
+        for (_, pool) in singleGamePlayers {
+            for p in pool where p.isConfirmedActive { confirmedIDs.insert(p.id) }
+        }
+        guard !confirmedIDs.isEmpty else { return }
+        func upgrade(_ list: [DFSPlayer]) -> ([DFSPlayer], Int) {
+            var marked = 0
+            let out = list.map { p -> DFSPlayer in
+                guard !p.isConfirmedActive, confirmedIDs.contains(p.id) else { return p }
+                var c = p
+                c.isConfirmedActive = true
+                marked += 1
+                return c
+            }
+            return (out, marked)
+        }
+        let (newPlayers, mainMarked) = upgrade(players)
+        players = newPlayers
+        var total = mainMarked
+        if !eveningPlayers.isEmpty {
+            let (newEvening, eveMarked) = upgrade(eveningPlayers)
+            eveningPlayers = newEvening
+            total += eveMarked
+        }
+        if total > 0 {
+            print("[DFS-\(sport)] Reconciled \(total) confirmed starters from single-game pools into main/evening pools")
         }
     }
 
