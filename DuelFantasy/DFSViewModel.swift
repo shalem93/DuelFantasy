@@ -1603,6 +1603,19 @@ final class DFSViewModel {
             let computed = lockTime
             return computed == .distantFuture ? serverLock : min(computed, serverLock)
         }
+        // PGA rotates weekly. After last week's event finishes (and its Monday
+        // playoff completes), the slate moves to the upcoming tournament — but
+        // the user's entries for the FINISHED event linger in `tournaments`.
+        // The global `lockTime` is the ACTIVE slate's lock (a FUTURE time, e.g.
+        // the upcoming event 3 days out), so falling through to it marks the
+        // finished event "Upcoming" and makes its stale lineup look editable.
+        // A PGA tournament whose event ID isn't the loaded slate's has already
+        // passed (you can't have entered a slate that isn't posted yet) — treat
+        // it as locked so it drops out of "Upcoming Lineups" and into results.
+        if sport == "PGA", let activeEvent = slateGames.first?.id,
+           pgaBaseEventID(from: t.id) != activeEvent {
+            return .distantPast
+        }
         return lockTime
     }
 

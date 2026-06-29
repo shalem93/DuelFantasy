@@ -559,7 +559,12 @@ struct DFSLobbyView: View {
     private var enteredLineupsSection: some View {
         // Only show unlocked (upcoming) entries — locked ones already appear in Active Contests
         let upcomingTournaments = viewModel.tournaments.filter {
-            viewModel.enteredTournamentIDs.contains($0.id) && !viewModel.isTournamentLocked($0)
+            viewModel.enteredTournamentIDs.contains($0.id)
+                && !viewModel.isTournamentLocked($0)
+                // A settled/graded contest (or one already in history) belongs in
+                // results, never in "Upcoming Lineups" — defends against a stale
+                // lock time leaving a finished event editable here.
+                && !viewModel.isTournamentFinished($0.id)
         }
         // Build a global lineup number for each entry across all instances of the same base type.
         // Group entries by base tournament ID, sort by submission time, assign sequential numbers.
