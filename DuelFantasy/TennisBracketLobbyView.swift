@@ -16,6 +16,16 @@ struct TennisBracketLobbyView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // Persistent slam/draw selector header. Kept ABOVE the state
+            // branch so it's reachable even when the selected slam is locked
+            // or settled — otherwise picking a finished slam (e.g. French
+            // Open) drops into TennisBracketLiveView with no way back to the
+            // upcoming slam (e.g. Wimbledon).
+            grandSlamSelector
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, 4)
+
             if viewModel.isLoading {
                 loadingView
             } else if viewModel.isLocked {
@@ -27,7 +37,6 @@ struct TennisBracketLobbyView: View {
             } else {
                 ScrollView {
                     VStack(spacing: 16) {
-                        grandSlamSelector
                         heroCard
                         picksProgress
                         roundSelector
@@ -842,9 +851,6 @@ struct TennisBracketLobbyView: View {
                 .padding(.vertical, 6)
                 .background(Color.blue.opacity(0.7))
                 .clipShape(Capsule())
-
-            grandSlamSelector
-                .padding(.top, 8)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
