@@ -3063,18 +3063,6 @@ final class DFSViewModel {
         // is tiny (~22 players for 8 slots) and projections cluster tightly.
         let avgProj = botPool.reduce(0.0) { $0 + $1.projectedPoints } / Double(botPool.count)
         let isSoccer = effectiveSport == "EPL" || effectiveSport == "UCL" || effectiveSport == "WC"
-        // Soccer teams that actually have a starter signal (confirmed XI or a
-        // recent-match appearance). The `!playedRecently` reserve penalty below
-        // is only meaningful for these — for a side with NO signal at all (a
-        // World Cup team with no recent match in the lookback and no XI yet),
-        // every player has `playedRecently == false`, so the penalty would nuke
-        // the entire game to ~0% ownership. That's exactly how studs like
-        // Modric / Ronaldo / Mahrez landed at 0% while their (signal-having)
-        // opponents got normal exposure. For signal-less teams we trust the
-        // salary-proxy inclusion (top-11 by price ≈ the XI) and skip the penalty.
-        let soccerSignalTeams: Set<String> = isSoccer
-            ? Set(eligible.filter { ($0.playedRecently || $0.isConfirmedActive) && !$0.team.isEmpty }.map(\.team))
-            : []
         let noiseMagnitude: Double
         if isSingleGame {
             // 35% noise (was 70%). The old setting made every bot's
@@ -3491,10 +3479,7 @@ final class DFSViewModel {
                     // Soccer squads are large (~25-30 per team) but only ~18 dress
                     // per match. Players who haven't featured in recent weeks are
                     // likely reserves, injured, or out of favor.
-                    // Only penalize a missing recency flag when the player's TEAM
-                    // has a signal — otherwise this is just absent data, not a
-                    // reserve marker, and penalizing it zeroes out whole games.
-                    if isSoccer && !p.playedRecently && soccerSignalTeams.contains(p.team) {
+                    if isSoccer && !p.playedRecently {
                         w *= 0.08  // Didn't appear in any recent match — likely reserve/unavailable
                     }
                     // Captain (MVP) diversity for single-game: mild flatten

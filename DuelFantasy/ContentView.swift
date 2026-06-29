@@ -886,6 +886,15 @@ struct ContentView: View {
                 await ufcDFSViewModel.loadSlateIfNeeded()
                 await nflDFSViewModel.loadSlateIfNeeded()
                 await cfbDFSViewModel.loadSlateIfNeeded()
+                // wc/ncaam/wnba were missing here — without their periodic
+                // refreshLive, World Cup never re-probed confirmed XIs or re-ran
+                // bot late-swap while the app was open, so confirmed starters and
+                // bot lineups only updated on a cold launch (force-quit). That's
+                // what left staggered-slate bots stuck on the first game and
+                // stale single-game lineups holding non-starters.
+                await wcDFSViewModel.loadSlateIfNeeded()
+                await ncaamDFSViewModel.loadSlateIfNeeded()
+                await wnbaDFSViewModel.loadSlateIfNeeded()
                 if dfsViewModel.tournament != nil && !dfsViewModel.fieldEntries.isEmpty {
                     await dfsViewModel.refreshLive()
                 }
@@ -912,6 +921,15 @@ struct ContentView: View {
                 }
                 if cfbDFSViewModel.tournament != nil && !cfbDFSViewModel.fieldEntries.isEmpty {
                     await cfbDFSViewModel.refreshLive()
+                }
+                if wcDFSViewModel.tournament != nil && !wcDFSViewModel.fieldEntries.isEmpty {
+                    await wcDFSViewModel.refreshLive()
+                }
+                if ncaamDFSViewModel.tournament != nil && !ncaamDFSViewModel.fieldEntries.isEmpty {
+                    await ncaamDFSViewModel.refreshLive()
+                }
+                if wnbaDFSViewModel.tournament != nil && !wnbaDFSViewModel.fieldEntries.isEmpty {
+                    await wnbaDFSViewModel.refreshLive()
                 }
                 try? await Task.sleep(nanoseconds: 60_000_000_000)
             }
@@ -972,6 +990,23 @@ struct ContentView: View {
             tennisBracketViewModel.profileName = newValue
             golfTiersViewModel.profileName = newValue
             soccerTiersViewModel.profileName = newValue
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            guard newPhase == .active else { return }
+            // Returning to the foreground: immediately re-probe confirmed XIs
+            // and re-run bot late-swap for any live contest. Confirmed lineups
+            // drop while the app is backgrounded; without this the user had to
+            // force-quit to see them update (the 60s poll loop also covers it,
+            // but only after up to a minute, and only once it resumes).
+            Task {
+                for vm in [dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
+                           eplDFSViewModel, uclDFSViewModel, wcDFSViewModel, ufcDFSViewModel,
+                           nflDFSViewModel, cfbDFSViewModel, ncaamDFSViewModel, wnbaDFSViewModel] {
+                    if vm.tournament != nil && !vm.fieldEntries.isEmpty {
+                        await vm.refreshLive()
+                    }
+                }
+            }
         }
     }
 
