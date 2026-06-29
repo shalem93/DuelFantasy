@@ -460,6 +460,18 @@ struct TennisBracketLobbyView: View {
         .shadow(color: .black.opacity(0.04), radius: 3, y: 1)
     }
 
+    /// Secondary line under a player's name. Draws with real ATP/WTA data
+    /// (e.g. French Open) carry a country + ranking ("ESP · #5"). Draws sourced
+    /// without those fields (e.g. Wimbledon) have an empty country and only an
+    /// approximated rank, so show the accurate seed instead of a misleading "#".
+    static func playerSubtitle(_ p: TennisBracketPlayer) -> String {
+        if p.country.isEmpty {
+            if let s = p.seed { return "Seed \(s)" }
+            return "Unseeded"
+        }
+        return "\(p.country) · #\(p.rank)"
+    }
+
     private func playerRow(player: TennisBracketPlayer, slot: String, isSelected: Bool) -> some View {
         Button {
             viewModel.pickWinner(slot: slot, playerName: player.name)
@@ -486,7 +498,7 @@ struct TennisBracketLobbyView: View {
                     Text(player.name)
                         .font(.subheadline.weight(isSelected ? .bold : .regular))
                         .foregroundStyle(isSelected ? brandPurple : .primary)
-                    Text("\(player.country) · #\(player.rank)")
+                    Text(Self.playerSubtitle(player))
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
@@ -577,7 +589,7 @@ struct TennisBracketLobbyView: View {
                         .font(.subheadline.weight(isSelected ? .bold : .regular))
                         .foregroundStyle(isSelected ? brandPurple : .primary)
                     if let p = player {
-                        Text("\(p.country) · #\(p.rank)")
+                        Text(Self.playerSubtitle(p))
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                     }

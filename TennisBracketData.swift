@@ -1321,6 +1321,8 @@ struct TennisBracketDrawData {
         switch (grandSlam, drawType, year) {
         case (.frenchOpen, .atp, 2026): return frenchOpen2026ATP()
         case (.frenchOpen, .wta, 2026): return frenchOpen2026WTA()
+        case (.wimbledon, .atp, 2026): return wimbledon2026ATP()
+        case (.wimbledon, .wta, 2026): return wimbledon2026WTA()
         default: return nil
         }
     }
@@ -1742,6 +1744,418 @@ struct TennisBracketDrawData {
                 country: entry.country,
                 rank: entry.rank
             )
+        }
+    }
+
+    // MARK: - 2026 Wimbledon ATP Men's Singles
+
+    private static func wimbledon2026ATP() -> [TennisBracketPlayer] {
+        // 2026 Wimbledon ATP Men's Singles — draw order (positions 1-128), paired 1v2, 3v4, ...
+        // Source: Nothing Major bracket pool (official draw). Names are
+        // first-initial + surname; country unknown (not in source); rank
+        // derived from seed (Q=150, WC=120, unseeded=50) for the bot model.
+        let drawEntries: [(name: String, seed: Int?, country: String, rank: Int)] = [
+            // Match 1
+            ("J. Sinner", 1, "", 1),
+            ("M. Kecmanovic", nil, "", 50),
+            // Match 2
+            ("N. Borges", nil, "", 50),
+            ("T. Boyer", nil, "", 150),
+            // Match 3
+            ("A. Vukic", nil, "", 50),
+            ("J. Brooksby", nil, "", 150),
+            // Match 4
+            ("E. Nava", nil, "", 50),
+            ("I. Buse", 31, "", 31),
+            // Match 5
+            ("R. Jodar", 23, "", 23),
+            ("F. Gill", nil, "", 120),
+            // Match 6
+            ("D. Shapovalov", nil, "", 50),
+            ("P. Carreno Busta", nil, "", 50),
+            // Match 7
+            ("S. Mochizuki", nil, "", 150),
+            ("M. Basing", nil, "", 150),
+            // Match 8
+            ("E. Quinn", nil, "", 50),
+            ("L. Darderi", 14, "", 14),
+            // Match 9
+            ("C. Ruud", 11, "", 11),
+            ("H. Hurkacz", nil, "", 50),
+            // Match 10
+            ("H. Medjedovic", nil, "", 50),
+            ("S. Ofner", nil, "", 50),
+            // Match 11
+            ("S. Kwon", nil, "", 150),
+            ("M. Landaluce", nil, "", 50),
+            // Match 12
+            ("A. Muller", nil, "", 50),
+            ("T. Paul", 21, "", 21),
+            // Match 13
+            ("B. Nakashima", 28, "", 28),
+            ("J. Pinnington Jones", nil, "", 50),
+            // Match 14
+            ("J. Struff", nil, "", 50),
+            ("S. Baez", nil, "", 50),
+            // Match 15
+            ("C. Ugo Carabelli", nil, "", 50),
+            ("D. Merida", nil, "", 50),
+            // Match 16
+            ("M. Cilic", nil, "", 50),
+            ("D. Medvedev", 8, "", 8),
+            // Match 17
+            ("F. Auger-Aliassime", 3, "", 3),
+            ("A. Shevchenko", nil, "", 50),
+            // Match 18
+            ("A. Walton", nil, "", 50),
+            ("D. Prizmic", nil, "", 50),
+            // Match 19
+            ("A. Vallejo", nil, "", 50),
+            ("N. Mejia", nil, "", 150),
+            // Match 20
+            ("M. Zheng", nil, "", 150),
+            ("C. Norrie", 26, "", 26),
+            // Match 21
+            ("A. Davidovich Fokina", 22, "", 22),
+            ("J. Cerundolo", nil, "", 50),
+            // Match 22
+            ("T. Tirante", nil, "", 50),
+            ("F. Marozsan", nil, "", 50),
+            // Match 23
+            ("L. Van Assche", nil, "", 50),
+            ("M. Fucsovics", nil, "", 50),
+            // Match 24
+            ("D. Svrcina", nil, "", 50),
+            ("L. Tien", 16, "", 16),
+            // Match 25
+            ("A. Rublev", 12, "", 12),
+            ("R. Safiullin", nil, "", 150),
+            // Match 26
+            ("A. Kovacevic", nil, "", 50),
+            ("B. Van de Zanschulp", nil, "", 50),
+            // Match 27
+            ("J. De Jong", nil, "", 50),
+            ("R. Hijikata", nil, "", 50),
+            // Match 28
+            ("R. Bautista Agut", nil, "", 50),
+            ("J. Fonseca", 24, "", 24),
+            // Match 29
+            ("A. Rinderknech", 25, "", 25),
+            ("O. Tarvet", nil, "", 150),
+            // Match 30
+            ("M. Trungelliti", nil, "", 50),
+            ("M. Damm Jr.", nil, "", 50),
+            // Match 31
+            ("H. Gaston", nil, "", 150),
+            ("S. Tsitsipas", nil, "", 50),
+            // Match 32
+            ("Y. Wu", nil, "", 50),
+            ("N. Djokovic", 7, "", 7),
+            // Match 33
+            ("A. de Minaur", 5, "", 5),
+            ("R. Burruchuga", nil, "", 50),
+            // Match 34
+            ("A. Mannarino", nil, "", 50),
+            ("T. Droguet", nil, "", 50),
+            // Match 35
+            ("M. Belluci", nil, "", 50),
+            ("Z. Svajda", nil, "", 50),
+            // Match 36
+            ("K. Majchrzak", nil, "", 50),
+            ("A. Tabilo", 30, "", 30),
+            // Match 37
+            ("K. Khachanov", 19, "", 19),
+            ("B. Harris", nil, "", 150),
+            // Match 38
+            ("Y. Hanfmann", nil, "", 50),
+            ("G. Mpetshi Perricard", nil, "", 50),
+            // Match 39
+            ("T. Griekspoor", nil, "", 50),
+            ("J. Duckworth", nil, "", 50),
+            // Match 40
+            ("M. Navone", nil, "", 50),
+            ("F. Cobolli", 9, "", 9),
+            // Match 41
+            ("J. Mensik", 15, "", 15),
+            ("T. Samuel", nil, "", 120),
+            // Match 42
+            ("D. Sweeny", nil, "", 150),
+            ("G. Dimitrov", nil, "", 120),
+            // Match 43
+            ("S. Wawrinka", nil, "", 120),
+            ("M. Berrettini", nil, "", 50),
+            // Match 44
+            ("R. Collignon", nil, "", 50),
+            ("A. Fils", 20, "", 20),
+            // Match 45
+            ("U. Humbert", 27, "", 27),
+            ("Z. Bergs", nil, "", 50),
+            // Match 46
+            ("S. Shimabukuro", nil, "", 50),
+            ("J. Faria", nil, "", 150),
+            // Match 47
+            ("D. Dzumhur", nil, "", 50),
+            ("A. Fery", nil, "", 120),
+            // Match 48
+            ("O. Virtanen", nil, "", 150),
+            ("B. Shelton", 4, "", 4),
+            // Match 49
+            ("T. Fritz", 6, "", 6),
+            ("J. Draper", nil, "", 50),
+            // Match 50
+            ("P. Kypson", nil, "", 50),
+            ("M. McDonald", nil, "", 150),
+            // Match 51
+            ("B. Bonzi", nil, "", 50),
+            ("G. Diallo", nil, "", 50),
+            // Match 52
+            ("L. Sonego", nil, "", 50),
+            ("T. Etcheverry", 29, "", 29),
+            // Match 53
+            ("F. Tiafoe", 17, "", 17),
+            ("T. Atmane", nil, "", 50),
+            // Match 54
+            ("V. Kopriva", nil, "", 50),
+            ("J. Choinski", nil, "", 50),
+            // Match 55
+            ("K. Jacquet", nil, "", 150),
+            ("V. Gaubas", nil, "", 150),
+            // Match 56
+            ("T. Kokkinakis", nil, "", 50),
+            ("A. Bublik", 10, "", 10),
+            // Match 57
+            ("J. Lehecka", 13, "", 13),
+            ("A. Popyrin", nil, "", 50),
+            // Match 58
+            ("A. Molcan", nil, "", 50),
+            ("D. Altmaier", nil, "", 50),
+            // Match 59
+            ("A. Michelsen", nil, "", 50),
+            ("J. Fearnley", nil, "", 120),
+            // Match 60
+            ("J. Munar", nil, "", 50),
+            ("F. Cerundolo", 18, "", 18),
+            // Match 61
+            ("M. Arnaldi", 32, "", 32),
+            ("Q. Halys", nil, "", 50),
+            // Match 62
+            ("C. Moutet", nil, "", 50),
+            ("M. Giron", nil, "", 50),
+            // Match 63
+            ("V. Royer", nil, "", 50),
+            ("H. Wendelken", nil, "", 120),
+            // Match 64
+            ("A. Blockx", nil, "", 50),
+            ("A. Zverev", 2, "", 2),
+        ]
+        return drawEntries.enumerated().map { index, entry in
+            TennisBracketPlayer(seed: entry.seed, drawPosition: index + 1, name: entry.name, country: entry.country, rank: entry.rank)
+        }
+    }
+
+    // MARK: - 2026 Wimbledon WTA Women's Singles
+
+    private static func wimbledon2026WTA() -> [TennisBracketPlayer] {
+        // 2026 Wimbledon WTA Women's Singles — draw order (positions 1-128), paired 1v2, 3v4, ...
+        // Source: Nothing Major bracket pool (official draw). Names are
+        // first-initial + surname; country unknown (not in source); rank
+        // derived from seed (Q=150, WC=120, unseeded=50) for the bot model.
+        let drawEntries: [(name: String, seed: Int?, country: String, rank: Int)] = [
+            // Match 1
+            ("A. Sabalenka", 1, "", 1),
+            ("T. Kostovic", nil, "", 150),
+            // Match 2
+            ("O. Oliynykova", nil, "", 50),
+            ("M. Kessler", nil, "", 50),
+            // Match 3
+            ("J. Ostapenko", nil, "", 50),
+            ("H. Dart", nil, "", 120),
+            // Match 4
+            ("A. Ruzic", nil, "", 50),
+            ("E. Radacanu", 30, "", 30),
+            // Match 5
+            ("L. Fernandez", 22, "", 22),
+            ("J. Tjen", nil, "", 50),
+            // Match 6
+            ("M. Xu", nil, "", 120),
+            ("D. Kasatkina", nil, "", 50),
+            // Match 7
+            ("A. Gasanova", nil, "", 150),
+            ("E. Arango", nil, "", 50),
+            // Match 8
+            ("E. Jacquemot", nil, "", 50),
+            ("N. Osaka", 14, "", 14),
+            // Match 9
+            ("K. Muchova", 10, "", 10),
+            ("A. Zakharova", nil, "", 50),
+            // Match 10
+            ("B. Andreescu", nil, "", 150),
+            ("S. Zhang", nil, "", 50),
+            // Match 11
+            ("A. Parks", nil, "", 50),
+            ("A. Dudeney", nil, "", 120),
+            // Match 12
+            ("M. Sawangkaew", nil, "", 150),
+            ("M. Chwalinska", 20, "", 20),
+            // Match 13
+            ("K. Siniakova", 32, "", 32),
+            ("Q. Zheng", nil, "", 50),
+            // Match 14
+            ("P. Stearns", nil, "", 50),
+            ("N. Bartunkova", nil, "", 50),
+            // Match 15
+            ("B. Krejcikova", nil, "", 50),
+            ("H. Klugman", nil, "", 120),
+            // Match 16
+            ("M. Linette", nil, "", 50),
+            ("M. Andreeva", 5, "", 5),
+            // Match 17
+            ("J. Pegula", 4, "", 4),
+            ("D. Vidmanova", nil, "", 50),
+            // Match 18
+            ("S. Sorribes Tormo", nil, "", 50),
+            ("V. Jimenez Kasintseva", nil, "", 50),
+            // Match 19
+            ("D. Yastremska", nil, "", 50),
+            ("A. Ito", nil, "", 50),
+            // Match 20
+            ("J. Bouzas Maneiro", nil, "", 50),
+            ("A. Potapova", 27, "", 27),
+            // Match 21
+            ("E. Alexandrova", 18, "", 18),
+            ("P. Udvardy", nil, "", 50),
+            // Match 22
+            ("L. Tararudee", nil, "", 50),
+            ("L. Tagger", nil, "", 50),
+            // Match 23
+            ("Y. Putintseva", nil, "", 50),
+            ("T. Maria", nil, "", 50),
+            // Match 24
+            ("J. Cristan", nil, "", 50),
+            ("I. Jovic", 16, "", 16),
+            // Match 25
+            ("B. Bencic", 11, "", 11),
+            ("M. Stojsavljevic", nil, "", 120),
+            // Match 26
+            ("X. Wang", nil, "", 50),
+            ("E. Cocciaretto", nil, "", 50),
+            // Match 27
+            ("F. Jones", nil, "", 50),
+            ("D. Parry", nil, "", 50),
+            // Match 28
+            ("M. Frech", nil, "", 50),
+            ("A. Kalinskaya", 19, "", 19),
+            // Match 29
+            ("A. Li", 28, "", 28),
+            ("Z. Sonmez", nil, "", 50),
+            // Match 30
+            ("C. Liu", nil, "", 150),
+            ("H. Vandewinkel", nil, "", 50),
+            // Match 31
+            ("S. Sierra", nil, "", 50),
+            ("A. Bondar", nil, "", 50),
+            // Match 32
+            ("T. Korpatsch", nil, "", 50),
+            ("C. Gauff", 7, "", 7),
+            // Match 33
+            ("E. Svitolina", 8, "", 8),
+            ("D. Snigur", nil, "", 50),
+            // Match 34
+            ("V. Erjavic", nil, "", 50),
+            ("L. Jeanjean", nil, "", 150),
+            // Match 35
+            ("A. Tomljanovic", nil, "", 50),
+            ("M. Bolkvadze", nil, "", 150),
+            // Match 36
+            ("A. Krueger", nil, "", 150),
+            ("D. Vekic", 31, "", 31),
+            // Match 37
+            ("E. Navarro", 23, "", 23),
+            ("P. Badosa", nil, "", 50),
+            // Match 38
+            ("O. Selekhmeteva", nil, "", 50),
+            ("S. Kraus", nil, "", 50),
+            // Match 39
+            ("Y. Starodubtseva", nil, "", 50),
+            ("A. Blinkova", nil, "", 50),
+            // Match 40
+            ("N. Podoroska", nil, "", 50),
+            ("M. Kostyuk", 12, "", 12),
+            // Match 41
+            ("J. Paolini", 13, "", 13),
+            ("R. Montgomery", nil, "", 150),
+            // Match 42
+            ("I. Shymanovich", nil, "", 150),
+            ("V. Golubic", nil, "", 50),
+            // Match 43
+            ("A. Kalinina", nil, "", 50),
+            ("K. Rakhimova", nil, "", 50),
+            // Match 44
+            ("M. Sakkari", nil, "", 50),
+            ("C. Tauson", 24, "", 24),
+            // Match 45
+            ("A. Eala", 29, "", 29),
+            ("R. Zarazua", nil, "", 50),
+            // Match 46
+            ("S. Williams", nil, "", 120),
+            ("M. Joint", nil, "", 50),
+            // Match 47
+            ("T. Valentova", nil, "", 50),
+            ("K. Pliskova", nil, "", 50),
+            // Match 48
+            ("T. Townsend", nil, "", 50),
+            ("I. Swiatek", 3, "", 3),
+            // Match 49
+            ("A. Anisimova", 6, "", 6),
+            ("L. Gjorcheska", nil, "", 150),
+            // Match 50
+            ("P. Marcinko", nil, "", 50),
+            ("S. Kenin", nil, "", 50),
+            // Match 51
+            ("I. Begu", nil, "", 50),
+            ("K. Swan", nil, "", 120),
+            // Match 52
+            ("K. Day", nil, "", 150),
+            ("M. Keys", 26, "", 26),
+            // Match 53
+            ("S. Cirstea", 17, "", 17),
+            ("S. Bejlek", nil, "", 50),
+            // Match 54
+            ("K. Birrell", nil, "", 50),
+            ("A. Korneeva", nil, "", 150),
+            // Match 55
+            ("C. Osorio", nil, "", 50),
+            ("S. Waltert", nil, "", 50),
+            // Match 56
+            ("E. Seidel", nil, "", 50),
+            ("L. Noskova", 9, "", 9),
+            // Match 57
+            ("D. Shnaider", 15, "", 15),
+            ("E. Lys", nil, "", 50),
+            // Match 58
+            ("P. Kudermetova", nil, "", 150),
+            ("L. Samsonova", nil, "", 50),
+            // Match 59
+            ("K. Boulter", nil, "", 50),
+            ("T. Grant", nil, "", 150),
+            // Match 60
+            ("T. Gibson", nil, "", 50),
+            ("M. Bouzkova", 21, "", 21),
+            // Match 61
+            ("E. Mertens", 25, "", 25),
+            ("L. Siegemund", nil, "", 50),
+            // Match 62
+            ("B. Haddad Maia", nil, "", 50),
+            ("M. Timofeeva", nil, "", 150),
+            // Match 63
+            ("E. Ruse", nil, "", 50),
+            ("C. McNally", nil, "", 50),
+            // Match 64
+            ("L. Boisson", nil, "", 50),
+            ("E. Rybakina", 2, "", 2),
+        ]
+        return drawEntries.enumerated().map { index, entry in
+            TennisBracketPlayer(seed: entry.seed, drawPosition: index + 1, name: entry.name, country: entry.country, rank: entry.rank)
         }
     }
 }
