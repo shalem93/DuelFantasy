@@ -117,6 +117,12 @@ struct FantasyHubView: View {
             // so it's the right primitive for "fetch when auth lands"
             // without juggling separate .task + .onChange paths.
             .task(id: tennisBracketViewModel.accessToken) {
+                // Import settled tennis brackets (e.g. a finished French Open)
+                // from the server into the shared local history blob. The DFS
+                // cross-VM history sync filters by sport prefix and drops tennis
+                // tids (`<slam>-(atp|wta)-YYYY`), so without this a completed
+                // bracket never reaches Profile → Past Results.
+                await tennisBracketViewModel.syncSettledTennisHistoryFromServer()
                 await loadServerFantasyResults()
             }
             .navigationDestination(for: PastResultDestination.self) { dest in
