@@ -1702,8 +1702,31 @@ final class DFSViewModel {
         // here means an excluded tournament stays gone no matter what comes
         // back, so its RR (which is history-derived) never reappears.
         let excluded = Self.excludedTournamentIDs
-        let visible = excluded.isEmpty ? decoded : decoded.filter { !excluded.contains($0.tournamentId ?? "") }
+        let visible = decoded.filter {
+            let tid = $0.tournamentId ?? ""
+            return !excluded.contains(tid) && !Self.isFantasyModeTid(tid)
+        }
         return deduplicatedHistory(visible)
+    }
+
+    /// True for a tournament id that belongs to a Fantasy game mode (Playoff
+    /// Tiers, Soccer Tiers, Tennis Bracket), not DFS. Those modes share the
+    /// `dfs_tournament_results` table, and Playoff Tiers' id (`nba-playoffs-YYYY`)
+    /// even shares the `nba-` prefix — so without this filter a Fantasy contest
+    /// (e.g. a "U.S. Open Tiers" Playoff-Tiers private group) leaks into DFS Past
+    /// Results, mis-badged as NBA, and skews DFS RR. Fantasy has its own results
+    /// surface (FantasyHub), so DFS excludes these everywhere.
+    static func isFantasyModeTid(_ tid: String) -> Bool {
+        if tid.hasPrefix("nba-playoffs-") { return true }   // Playoff Tiers
+        if tid.hasPrefix("world-cup-") { return true }      // Soccer Tiers
+        // Tennis Bracket: "<slam>-(atp|wta)-YYYY"
+        if tid.contains("-atp-") || tid.contains("-wta-") {
+            if tid.hasPrefix("us_open-") || tid.hasPrefix("wimbledon-")
+                || tid.hasPrefix("french_open-") || tid.hasPrefix("australian_open-") {
+                return true
+            }
+        }
+        return false
     }
 
     /// Tournament IDs the admin has permanently removed from history/RR.
@@ -9931,7 +9954,11 @@ final class DFSViewModel {
         // NCAAM and WNBA now have their own view models, so NBA no longer
         // also claims "ncaam-".
         let sportPrefixes: [String] = [sport.lowercased() + "-"]
-        let matchesSport: (String) -> Bool = { tid in sportPrefixes.contains(where: { tid.hasPrefix($0) }) }
+        // Exclude Fantasy-mode rows that share this table (and, for Playoff
+        // Tiers, the `nba-` prefix) so they never enter DFS history/RR.
+        let matchesSport: (String) -> Bool = { tid in
+            sportPrefixes.contains(where: { tid.hasPrefix($0) }) && !Self.isFantasyModeTid(tid)
+        }
 
         let tournamentMap = Dictionary(tournaments.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
 
