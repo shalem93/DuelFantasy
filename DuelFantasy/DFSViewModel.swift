@@ -3891,6 +3891,42 @@ final class DFSViewModel {
         return result
     }
 
+    /// ADMIN / TESTING: force a fresh regeneration of the ACTIVE contest's bot
+    /// field with the current bot logic. Clears the shared server `bot_field`
+    /// and local caches, regenerates via refreshLive, then re-persists so every
+    /// device picks up the new field. NOTE: the bot field is shared by every
+    /// entrant, so this reshuffles the live leaderboard for the whole contest —
+    /// gated to admin accounts in the UI. Returns the number of bots regenerated.
+    @discardableResult
+    func adminRegenerateBotField() async -> Int {
+        guard let tournament, let token = accessToken else { return 0 }
+        let tid = tournament.id
+        // 1. Clear the shared server field so other devices regenerate too.
+        try? await SupabaseService.shared.saveBotField(tournamentID: tid, botField: [], accessToken: token)
+        // 2. Drop local bots + the cached field so refreshLive can't restore the
+        //    old lineups (keep the real user/opponent rows).
+        fieldEntries = fieldEntries.filter { $0.isCurrentUser || $0.isRealUser }
+        fieldGenerated = false
+        liveContestCache.removeValue(forKey: tid)
+        // 3. Regenerate in memory against the current slate + bot logic.
+        await refreshLive()
+        // 4. Persist the freshly generated bots so the shared field updates
+        //    (refreshLive's own save gate won't fire for a locked contest).
+        let salaryLookup = Dictionary(activePlayers.map { ($0.id, $0.salary) }, uniquingKeysWith: { a, _ in a })
+        let botEntries = fieldEntries.filter { !$0.isCurrentUser && !$0.isRealUser }.map { entry -> BotFieldEntry in
+            let psals: [String: Int] = Dictionary(uniqueKeysWithValues: entry.playerIDs.compactMap { pid -> (String, Int)? in
+                guard let sal = salaryLookup[pid], sal > 0 else { return nil }
+                return (pid, sal)
+            })
+            return BotFieldEntry(name: entry.name, playerIDs: entry.playerIDs, playerSalaries: psals.isEmpty ? nil : psals)
+        }
+        if !botEntries.isEmpty {
+            try? await SupabaseService.shared.saveBotField(tournamentID: tid, botField: botEntries, accessToken: token)
+            print("[DFS-\(sport)] ADMIN regenerated + saved \(botEntries.count) bots for \(tid)")
+        }
+        return botEntries.count
+    }
+
     func refreshLive() async {
         // PGA self-heal for orphaned past tournaments runs BEFORE the
         // `guard let tournament` below, because the bug we're fixing is

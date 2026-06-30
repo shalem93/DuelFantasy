@@ -9,9 +9,17 @@ struct DFSLiveContestView: View {
     var expectedTournamentID: String? = nil
     var expectedLineupNumber: Int? = nil
     @State private var showLateSwap = false
+    @State private var isRegeneratingBots = false
+    @State private var showRegenConfirm = false
 
     private var brandPurple: Color {
         Color(red: 0.48, green: 0.23, blue: 0.93)
+    }
+
+    /// Admin accounts that may force-regenerate a live contest's bot field.
+    private static let adminEmails: Set<String> = ["shalem93@gmail.com", "sam@builderlabs.co"]
+    private var isAdmin: Bool {
+        Self.adminEmails.contains(viewModel.userEmail.lowercased())
     }
 
     private var isPGA: Bool {
@@ -78,6 +86,9 @@ struct DFSLiveContestView: View {
                     if !isPGA {
                         gamesStatusSection
                     }
+                    if isAdmin {
+                        adminRegenButton
+                    }
                 } else {
                     shimmerPlaceholder
                 }
@@ -123,6 +134,49 @@ struct DFSLiveContestView: View {
                     }
             }
         }
+        .confirmationDialog(
+            "Regenerate bot field? (admin)",
+            isPresented: $showRegenConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Regenerate Bots", role: .destructive) {
+                Task {
+                    isRegeneratingBots = true
+                    await viewModel.adminRegenerateBotField()
+                    isRegeneratingBots = false
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Re-rolls every bot in this contest with the current logic and reshuffles the live leaderboard for ALL entrants. Best run while some games are still pre-game.")
+        }
+    }
+
+    // MARK: - Admin: Regenerate Bots
+
+    private var adminRegenButton: some View {
+        Button {
+            showRegenConfirm = true
+        } label: {
+            HStack(spacing: 8) {
+                if isRegeneratingBots {
+                    ProgressView().tint(.orange)
+                } else {
+                    Image(systemName: "arrow.clockwise.circle")
+                }
+                Text(isRegeneratingBots ? "Regenerating bots…" : "Regenerate Bots (admin)")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .foregroundStyle(.orange)
+            .background(Color.orange.opacity(0.10))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12).stroke(Color.orange.opacity(0.4), lineWidth: 1)
+            )
+        }
+        .disabled(isRegeneratingBots)
     }
 
     // MARK: - Late Swap Banner
