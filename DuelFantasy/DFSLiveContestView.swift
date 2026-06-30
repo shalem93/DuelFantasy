@@ -1439,6 +1439,12 @@ struct DFSLiveContestView: View {
             let rawTotalSalary: Int = {
                 var total = 0
                 for (i, pid) in fieldEntry.playerIDs.enumerated() {
+                    // Skip hidden (not-yet-started) opponent picks — mirrors the
+                    // per-row `hideOpponentPick` — so the displayed TOTAL only
+                    // reflects the VISIBLE players and never reveals how much
+                    // budget a bot reserved/spent on its masked, later-game spots.
+                    let locked = playersByID[pid].map { viewModel.isPlayerLocked($0) } ?? false
+                    if !fieldEntry.isCurrentUser && !locked { continue }
                     let sal = playersByID[pid]?.salary ?? 0
                     total += (isSingleGame && i == 0) ? Int(Double(sal) * 1.5) : sal
                 }
