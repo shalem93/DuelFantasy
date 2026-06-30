@@ -193,6 +193,11 @@ struct UserProfileView: View {
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
                                             .lineLimit(1)
+                                        if let date = pick.settledAt ?? pick.createdAt {
+                                            Text(date.formatted(date: .abbreviated, time: .omitted))
+                                                .font(.system(size: 10))
+                                                .foregroundStyle(.tertiary)
+                                        }
                                     }
                                     Spacer()
                                     Text("\(pick.rrDelta >= 0 ? "+" : "")\(pick.rrDelta)")
