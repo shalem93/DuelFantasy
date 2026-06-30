@@ -1719,6 +1719,12 @@ final class DFSViewModel {
     static func isFantasyModeTid(_ tid: String) -> Bool {
         if tid.hasPrefix("nba-playoffs-") { return true }   // Playoff Tiers
         if tid.hasPrefix("world-cup-") { return true }      // Soccer Tiers
+        // Golf Tiers majors. Note `us-open-` is HYPHENated — distinct from the
+        // tennis `us_open-` (underscore) below. `pga-championship-` shares the
+        // `pga-` prefix but a real DFS PGA tid is `pga-<numericEventID>-<size>`,
+        // so "championship" never collides.
+        if tid.hasPrefix("masters-") || tid.hasPrefix("pga-championship-")
+            || tid.hasPrefix("us-open-") || tid.hasPrefix("the-open-") { return true }
         // Tennis Bracket: "<slam>-(atp|wta)-YYYY"
         if tid.contains("-atp-") || tid.contains("-wta-") {
             if tid.hasPrefix("us_open-") || tid.hasPrefix("wimbledon-")
