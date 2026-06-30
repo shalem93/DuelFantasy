@@ -2821,6 +2821,56 @@ final class DFSViewModel {
         return false
     }
 
+    /// Staggered soccer slate reservation. The field is generated when game 1
+    /// LOCKS, so every bot is 100% game-1 players — and all of those games have
+    /// STARTED, which means late-swap (it only edits not-started slots) can never
+    /// pull the bots into the later games. The whole field then stays clustered
+    /// on the first match (the "all bots took from the first game" complaint).
+    ///
+    /// This parks a few cheap, POSITION-CORRECT placeholders from games that
+    /// haven't started yet into each bot, so (a) the field spreads across the
+    /// slate and (b) late-swap can later upgrade those reserved slots to each
+    /// later game's confirmed starters as its XI drops. Placeholders are cheaper
+    /// than what they replace, so the lineup only frees budget (which late-swap
+    /// spends) — it never breaks the cap. Generation runs once and the field is
+    /// frozen, so the per-bot randomness here causes no leaderboard churn.
+    private func reserveNotStartedGameSlots(_ lineup: [DFSPlayer], slots: [String?], poolForReservation: [DFSPlayer]) -> [DFSPlayer] {
+        guard sport == "EPL" || sport == "UCL" || sport == "WC" else { return lineup }
+        guard lineup.count == slots.count, slots.count >= 6 else { return lineup }
+        let notStarted = slateGames.filter { !gameHasStarted($0.id) }.map(\.id)
+        let startedSet = Set(slateGames.filter { gameHasStarted($0.id) }.map(\.id))
+        guard !notStarted.isEmpty, !startedSet.isEmpty else { return lineup }
+
+        var result = lineup
+        var used = Set(result.map(\.id))
+        // Reserve ~1 slot per not-started game (+/- a little per-bot variance),
+        // but always keep a majority of real confirmed starters (>= slots-4).
+        let target = min(notStarted.count + Int.random(in: 0...1), max(1, slots.count - 4))
+        var rr = Int.random(in: 0..<notStarted.count)   // round-robin start for spread
+        func reservedCount() -> Int { result.filter { notStarted.contains($0.gameID ?? "") }.count }
+
+        for slotIdx in result.indices.shuffled() {
+            if reservedCount() >= target { break }
+            // Only convert a slot currently held by a STARTED-game player.
+            guard startedSet.contains(result[slotIdx].gameID ?? "") else { continue }
+            let pos = slots[slotIdx]
+            var placeholder: DFSPlayer? = nil
+            for offset in 0..<notStarted.count {
+                let gid = notStarted[(rr + offset) % notStarted.count]
+                placeholder = poolForReservation.filter {
+                    $0.gameID == gid && !used.contains($0.id)
+                        && (pos == nil || playerMatchesSlot($0, slot: pos!))
+                }.min(by: { $0.salary < $1.salary })
+                if placeholder != nil { rr = (rr + offset + 1) % notStarted.count; break }
+            }
+            guard let pick = placeholder else { continue }
+            used.remove(result[slotIdx].id)
+            used.insert(pick.id)
+            result[slotIdx] = pick
+        }
+        return result
+    }
+
     /// Build a competitive bot lineup with varied strategies, injury-adjusted projections,
     /// position diversity, salary cap enforcement, and budget optimization.
     private func generateBotLineup(from players: [DFSPlayer], salaryCap: Int, lineupSize: Int, rosterSlots: [String]? = nil, isSingleGame: Bool = false, sportOverride: String? = nil) -> [String] {
@@ -3649,7 +3699,7 @@ final class DFSViewModel {
 
             // Accept if within min spend (92-95% depending on sport) to 100% of cap
             if finalSpent >= minSpend && finalSpent <= salaryCap {
-                return selected.map(\.id)
+                return reserveNotStartedGameSlots(selected, slots: slots, poolForReservation: players).map(\.id)
             }
         }
 
@@ -3675,7 +3725,15 @@ final class DFSViewModel {
                 var relaxed = fb_pool.filter { Int(Double($0.salary) * mvpFactor) <= fb_budget }
                 if let requiredPos = slots[pickIndex] {
                     let positional = relaxed.filter { playerMatchesSlot($0, slot: requiredPos) }
-                    if !positional.isEmpty { relaxed = positional }
+                    if !positional.isEmpty {
+                        relaxed = positional
+                    } else if isSoccer || requiredPos == "GK" || requiredPos == "G" {
+                        // NEVER mis-slot a position-strict spot (a defender in the
+                        // GK slot, etc.). Leave it empty — the position-aware pad
+                        // below fills it from the full pool, pulling a cheap keeper
+                        // from another game if the early games' keepers are used up.
+                        relaxed = []
+                    }
                 }
                 affordable = relaxed
             }
@@ -3741,24 +3799,33 @@ final class DFSViewModel {
             }
         }
 
-        // Pad with the cheapest unused eligible players if we still came up short.
-        // A complete lineup that underspends is strictly better than the saved-bot
-        // validation rejecting this entry and looping on regeneration.
+        // Pad each still-empty slot with the cheapest unused player that ACTUALLY
+        // fits that slot's position — from `eligible`, then the full `players`
+        // pool. Slot-aware so a defender never lands in the GK slot (the bug the
+        // old position-blind pad caused), and so a scarce position (a 2nd/3rd
+        // keeper) gets pulled from another game when the early games' starters at
+        // that position are used up. A complete lineup that underspends beats the
+        // saved-bot validation rejecting the entry and looping on regeneration.
         if fallback.count < lineupSize {
-            let usedIDs = Set(fallback.map(\.id))
-            let pad = eligible
-                .filter { !usedIDs.contains($0.id) }
-                .sorted { $0.salary < $1.salary }
-            for player in pad {
-                if fallback.count >= lineupSize { break }
-                fallback.append(player)
+            var usedIDs = Set(fallback.map(\.id))
+            func cheapestFit(_ source: [DFSPlayer], pos: String?) -> DFSPlayer? {
+                source.filter {
+                    !usedIDs.contains($0.id) && (pos == nil || playerMatchesSlot($0, slot: pos!))
+                }.min(by: { $0.salary < $1.salary })
             }
-            if fallback.count < lineupSize {
-                let stillUsed = Set(fallback.map(\.id))
-                for player in players where !stillUsed.contains(player.id) {
-                    if fallback.count >= lineupSize { break }
-                    fallback.append(player)
+            while fallback.count < lineupSize {
+                let requiredPos = slots[fallback.count]
+                var pick = cheapestFit(eligible, pos: requiredPos) ?? cheapestFit(players, pos: requiredPos)
+                // Non-soccer last resort: any unused player (their slot rules are
+                // already permissive via playerMatchesSlot). Soccer keeps the
+                // position exact — if no keeper/etc. exists anywhere, the lineup
+                // stays short and is retried rather than mis-slotted.
+                if pick == nil && !isSoccer {
+                    pick = (eligible + players).first { !usedIDs.contains($0.id) }
                 }
+                guard let chosen = pick else { break }
+                fallback.append(chosen)
+                usedIDs.insert(chosen.id)
             }
         }
 
@@ -3815,7 +3882,9 @@ final class DFSViewModel {
             }
         }
 
-        let result = fallback.map(\.id)
+        let result = (fallback.count == lineupSize
+            ? reserveNotStartedGameSlots(fallback, slots: slots, poolForReservation: players)
+            : fallback).map(\.id)
         if result.isEmpty || result.count < lineupSize {
             print("[DFS-\(effectiveSport)] generateBotLineup returned \(result.count)/\(lineupSize) players. eligible=\(eligible.count), botPool=\(botPool.count), rosterSlots=\(rosterSlots?.description ?? "nil")")
         }
