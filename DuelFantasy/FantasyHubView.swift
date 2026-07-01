@@ -5,8 +5,40 @@ enum PastResultDestination: Hashable {
     case tennis(slamRaw: String, drawRaw: String)
     case playoffTiers
     case soccerTiers
-    case golfTiers
+    case golfTiers(tid: String)
     case bestBall(leagueID: String)
+}
+
+/// Loads a specific finished Golf Tiers major and shows its settled results.
+/// Without carrying the tid, tapping a past golf result opened the LIVE lobby,
+/// which shows the "no major this week" state instead of the completed event.
+struct GolfTiersPastResultDestination: View {
+    @Bindable var viewModel: GolfTiersViewModel
+    let tournamentID: String
+    @State private var record: GolfTiersTournamentRecord?
+    @State private var loading = true
+
+    var body: some View {
+        Group {
+            if let record {
+                GolfTiersSettledDetailView(viewModel: viewModel, tournamentRecord: record)
+            } else if loading {
+                ProgressView("Loading results…")
+                    .tint(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ContentUnavailableView("Results unavailable", systemImage: "figure.golf")
+            }
+        }
+        .task {
+            if let token = viewModel.accessToken {
+                record = try? await SupabaseService.shared.fetchGolfTiersTournament(
+                    tournamentID: tournamentID, accessToken: token
+                )
+            }
+            loading = false
+        }
+    }
 }
 
 /// Wraps `TennisBracketLobbyView` so we can switch the underlying VM to
@@ -144,8 +176,8 @@ struct FantasyHubView: View {
             PlayoffTiersLobbyView(viewModel: playoffTiersViewModel)
         case .soccerTiers:
             SoccerTiersLobbyView(viewModel: soccerTiersViewModel)
-        case .golfTiers:
-            GolfTiersLobbyView(viewModel: golfTiersViewModel)
+        case .golfTiers(let tid):
+            GolfTiersPastResultDestination(viewModel: golfTiersViewModel, tournamentID: tid)
         case .bestBall(let leagueID):
             BestBallLeagueDetailView(viewModel: bestBallViewModel, leagueID: leagueID)
         }
@@ -1251,7 +1283,7 @@ struct FantasyHubView: View {
         if lower.hasPrefix("world-cup-") { return .soccerTiers }
         let golfPrefixes = ["masters-", "the-masters-", "us-open-", "the-open-", "pga-championship-"]
         if golfPrefixes.contains(where: { lower.hasPrefix($0) }) {
-            return .golfTiers
+            return .golfTiers(tid: base)
         }
         if lower.hasPrefix("bestball-") {
             let leagueID = String(base.dropFirst("bestball-".count))

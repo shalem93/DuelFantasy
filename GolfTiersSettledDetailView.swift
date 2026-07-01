@@ -180,8 +180,15 @@ struct GolfTiersSettledDetailView: View {
             print("[GolfTiers Detail] Synthesized userResult from entry: rank=\(userEntryRec.rank), pts=\(userEntryRec.totalPoints)")
         }
 
-        // Phase 3: full leaderboard recompute when entries still look placeholder-y.
-        if !entries.isEmpty, zeroScoreFraction > 0.25,
+        // Phase 3: recompute the final leaderboard from ESPN. This detail view
+        // is only ever shown for a FINISHED major, so ESPN has the true final
+        // scores. Recompute whenever we actually have a scores snapshot — not
+        // only when >25% of entries are still 0 (placeholder-y). The old gate
+        // left a BAD partial settle (non-zero but WRONG totals — e.g. the winner
+        // shown at "+10") uncorrected; recompute + persist (below) fixes both
+        // this view and the past-results card.
+        let haveEspnScores = !(espnSnapshot?.golferScoresToPar.isEmpty ?? true)
+        if !entries.isEmpty, (zeroScoreFraction > 0.25 || haveEspnScores),
            let eventID = tournamentRecord.espnEventID {
             let center = tournamentRecord.lockTime ?? tournamentRecord.createdAt
             print("[GolfTiers Detail] Attempting recompute via ESPN event=\(eventID) center=\(center?.description ?? "nil")")
