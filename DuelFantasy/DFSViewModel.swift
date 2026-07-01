@@ -687,8 +687,20 @@ final class DFSViewModel {
         } else {
             return pool
         }
+        // DK's MLB batter ceiling — a real hitter never prices above this.
+        let mlbBatterSlots: Set<String> = ["C", "1B", "2B", "3B", "SS", "OF", "UTIL"]
         return pool.map { p in
             guard let drafted = canonical[p.id], drafted > 0, drafted != p.salary else { return p }
+            // Two-way stale-price guard: when a two-way starter's outing is
+            // scratched/moved (Ohtani's Wednesday start pushed to Friday), the
+            // slate re-types him SP → 1B and reprices him to his ~$6.5K hitter
+            // salary — but the contest's frozen snapshot still holds his ~$10.5K
+            // PITCHER price, and pinning it stamps a pitcher price on a 1B. A real
+            // batter never exceeds DK's ceiling, so treat a canonical price above
+            // it on a batter-slot MLB player as stale and keep the live price.
+            if sport == "MLB", mlbBatterSlots.contains(p.position), drafted > 8000 {
+                return p
+            }
             var fixed = DFSPlayer(
                 id: p.id, name: p.name, team: p.team, position: p.position,
                 salary: drafted, projectedPoints: p.projectedPoints,
