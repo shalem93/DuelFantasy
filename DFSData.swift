@@ -2999,17 +2999,18 @@ struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
             
             if player.position == "SP" {
                 // Case 2: ESPN lists them as SP but they're also a batter (two-way player).
-                // Detect via meaningful batting ratings alone (> 5 FPPG). `batterRatings`
-                // only holds players who have BOTH a batting AND a `-sp` pitching entry, so
-                // a pitcher who bats occasionally in interleague games (near-zero batting)
-                // never qualifies. We do NOT also require a posted `battingOrder`: on a day
-                // Ohtani is the probable pitcher, ESPN lists him as SP but his batting order
-                // isn't out until ~gametime — so requiring it left him PITCHER-ONLY (his
-                // batter half never got created, and the `mlb-X` id inconsistently meant
-                // "pitcher" that day, which is why a saved pitcher pick later rendered as a
-                // 1B batter). Detecting by FPPG makes both halves exist every start.
+                // The signal must separate a REAL two-way HITTER (Ohtani ~9-11 batting
+                // FPPG) from a pitcher who merely logged a few plate appearances
+                // (Colin Rea, ~5-7 — a false positive that put a phantom batter half
+                // in the pool). Two tiers:
+                //   • Elite batting FPPG (> 7.5): unmistakably a two-way hitter — accept
+                //     even before the batting order posts (Ohtani's order isn't out until
+                //     ~gametime on the days he starts; requiring it left him pitcher-only).
+                //   • Moderate (5–7.5): only a two-way if he's ALSO in today's batting
+                //     order — a pitcher-who-bats won't be (universal DH), so Rea is
+                //     excluded until proven otherwise.
                 let batterFPPG = batterRatings[espnID] ?? 0
-                let isTwoWay = batterFPPG > 5.0
+                let isTwoWay = batterFPPG > 7.5 || (batterFPPG > 5.0 && player.battingOrder != nil)
                 guard isTwoWay else { continue }
                 spToBatterIndices.append(index)
             } else {
