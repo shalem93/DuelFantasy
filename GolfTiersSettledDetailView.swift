@@ -19,6 +19,22 @@ struct GolfTiersSettledDetailView: View {
         Color(red: 0.05, green: 0.45, blue: 0.25)
     }
 
+    /// The real ESPN date for this major, derived from its calendar window (mid
+    /// point) — NOT the stored lockTime, which is wrong for a contest created
+    /// prematurely against another event. e.g. "us-open-2026" → ~Jun 19 2026.
+    private var canonicalMajorDate: Date? {
+        guard let window = GolfTiersTournament.windowBounds(for: tournamentRecord.id),
+              let yearStr = tournamentRecord.id.split(separator: "-").last.map(String.init),
+              let year = Int(yearStr) else { return nil }
+        let midMMDD = (window.opens + window.closes) / 2
+        var comps = DateComponents()
+        comps.year = year
+        comps.month = midMMDD / 100
+        comps.day = midMMDD % 100
+        comps.hour = 18
+        return Calendar(identifier: .gregorian).date(from: comps)
+    }
+
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
@@ -145,14 +161,35 @@ struct GolfTiersSettledDetailView: View {
         let zeroScoreFraction = entries.isEmpty ? 0.0 : Double(placeholderCount) / Double(entries.count)
         print("[GolfTiers Detail] placeholderCount=\(placeholderCount)/\(entries.count) (\(Int(zeroScoreFraction * 100))%), espnEventID=\(tournamentRecord.espnEventID ?? "nil"), lockTime=\(tournamentRecord.lockTime?.description ?? "nil")")
 
+        // Resolve which ESPN event + date to grade against. If the stored lock
+        // date falls OUTSIDE this major's real calendar window, the contest was
+        // created against the WRONG event (e.g. a "us-open-2026" that got settled
+        // back in May, hence a "May 27" date + scores that don't match the real
+        // U.S. Open). In that case ignore the corrupt stored event id/date and
+        // resolve the real major by its canonical mid-window date so the
+        // recompute grades against the ACTUAL tournament's scores.
+        let (gradeEventID, gradeCenter): (String, Date?) = {
+            let storedCenter = tournamentRecord.lockTime ?? tournamentRecord.createdAt
+            let storedID = tournamentRecord.espnEventID ?? ""
+            if let window = GolfTiersTournament.windowBounds(for: tournamentRecord.id),
+               let canonical = canonicalMajorDate, let stored = storedCenter {
+                let cal = Calendar(identifier: .gregorian)
+                let mmdd = cal.component(.month, from: stored) * 100 + cal.component(.day, from: stored)
+                if mmdd < window.opens || mmdd > window.closes {
+                    print("[GolfTiers Detail] stored lock mmdd=\(mmdd) outside \(tournamentRecord.id) window \(window) — corrupt event; resolving real major by canonical date \(canonical)")
+                    return ("", canonical)   // "" id forces date-based resolution
+                }
+            }
+            return (storedID, storedCenter)
+        }()
+
         // Phase 1: ALWAYS fetch ESPN snapshot so we have per-golfer scores for the YOUR
         // PICKS card and the bot-roster sheet, even when entries already have proper
         // totals stored in Supabase (no full recompute needed).
         var espnSnapshot: GolfTiersScoreSnapshot?
-        if !entries.isEmpty, let eventID = tournamentRecord.espnEventID {
-            let center = tournamentRecord.lockTime ?? tournamentRecord.createdAt
+        if !entries.isEmpty, (!gradeEventID.isEmpty || gradeCenter != nil) {
             espnSnapshot = try? await ESPNGolfTiersDataProvider().fetchLiveScores(
-                espnEventID: eventID, searchAroundDate: center
+                espnEventID: gradeEventID, searchAroundDate: gradeCenter
             )
             if let snap = espnSnapshot {
                 golferScores = snap.golferScoresToPar
@@ -189,8 +226,9 @@ struct GolfTiersSettledDetailView: View {
         // this view and the past-results card.
         let haveEspnScores = !(espnSnapshot?.golferScoresToPar.isEmpty ?? true)
         if !entries.isEmpty, (zeroScoreFraction > 0.25 || haveEspnScores),
-           let eventID = tournamentRecord.espnEventID {
-            let center = tournamentRecord.lockTime ?? tournamentRecord.createdAt
+           (!gradeEventID.isEmpty || gradeCenter != nil) {
+            let eventID = gradeEventID
+            let center = gradeCenter
             print("[GolfTiers Detail] Attempting recompute via ESPN event=\(eventID) center=\(center?.description ?? "nil")")
             let snapshot: GolfTiersScoreSnapshot?
             if let prefetched = espnSnapshot {
