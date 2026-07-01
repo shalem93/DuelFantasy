@@ -733,7 +733,11 @@ struct FantasyHubView: View {
                 }
             }
         }
-        for tid in candidates where collected[tid] == nil {
+        // Iterate ALL candidates (not `where collected[tid] == nil`): a settled
+        // bracket's public result is already in SOURCE 1, and the old guard then
+        // skipped the tid entirely, dropping its PRIVATE GROUPS. Only the public
+        // write is guarded below; the group loop (distinct `#group-` tids) runs.
+        for tid in candidates {
             let entryOpt: TennisBracketEntryRecord?
             do {
                 entryOpt = try await SupabaseService.shared.fetchUserTennisBracketEntry(
@@ -755,6 +759,14 @@ struct FantasyHubView: View {
             )) ?? [:]
             guard !matchResults.isEmpty else {
                 print("[FantasyHub] \(tid): no results yet on server — skipping")
+                continue
+            }
+            // Past Results = COMPLETED brackets only. A bracket is done once its
+            // final (slot "F-1") is decided; while a slam is still in progress
+            // (e.g. a live Wimbledon with only early-round results) it must NOT
+            // appear here — it's shown in Active Contests instead.
+            guard matchResults["F-1"] != nil else {
+                print("[FantasyHub] \(tid): final (F-1) not decided yet — in progress, not a past result")
                 continue
             }
             let allFieldRecords = (try? await SupabaseService.shared.fetchTennisBracketEntries(
@@ -790,18 +802,20 @@ struct FantasyHubView: View {
             )
             let title = (tRec?.title.isEmpty == false ? tRec!.title : derivedFantasyTitle(tid))
 
-            // Main public bracket result.
-            collected[tid] = DFSResult(
-                id: UUID(),
-                tournamentTitle: title,
-                rank: me.rank,
-                totalEntries: leaderboard.count,
-                lineupPoints: me.totalPoints,
-                rrDelta: 0,                                   // no RR for fantasy
-                loggedAt: entry.createdAt ?? Date(),
-                tournamentId: tid
-            )
-            print("[FantasyHub] \(tid): COMPUTED public rank=\(me.rank)/\(leaderboard.count) pts=\(me.totalPoints)")
+            // Main public bracket result — only if SOURCE 1 didn't already add it.
+            if collected[tid] == nil {
+                collected[tid] = DFSResult(
+                    id: UUID(),
+                    tournamentTitle: title,
+                    rank: me.rank,
+                    totalEntries: leaderboard.count,
+                    lineupPoints: me.totalPoints,
+                    rrDelta: 0,                                   // no RR for fantasy
+                    loggedAt: entry.createdAt ?? Date(),
+                    tournamentId: tid
+                )
+                print("[FantasyHub] \(tid): COMPUTED public rank=\(me.rank)/\(leaderboard.count) pts=\(me.totalPoints)")
+            }
 
             // Private group results for this tournament.
             let groups = (try? await SupabaseService.shared.fetchMyTennisBracketGroups(
@@ -841,7 +855,9 @@ struct FantasyHubView: View {
 
         // SOURCE 3: NBA Playoff Tiers
         let playoffTids = [(currentYear - 1), currentYear].map { "nba-playoffs-\($0)" }
-        for tid in playoffTids where collected[tid] == nil {
+        // Iterate all (not `where collected[tid] == nil`) so private groups load
+        // even when the public result is already in SOURCE 1.
+        for tid in playoffTids {
             guard let myEntry = try? await SupabaseService.shared.fetchUserPlayoffTiersEntry(
                 tournamentID: tid, userID: userID, accessToken: token
             ), myEntry.totalPoints > 0 else { continue }
@@ -849,15 +865,17 @@ struct FantasyHubView: View {
                 tournamentID: tid, accessToken: token
             )) ?? []
             let sorted = allEntries.sorted { $0.totalPoints > $1.totalPoints }
-            let rank = (sorted.firstIndex { $0.userID == userID }).map { $0 + 1 } ?? myEntry.rank
             let totalEntries = max(sorted.count, 1)
-            let title = derivedFantasyTitle(tid)
-            collected[tid] = DFSResult(
-                id: UUID(), tournamentTitle: title, rank: rank,
-                totalEntries: totalEntries, lineupPoints: myEntry.totalPoints,
-                rrDelta: 0, loggedAt: myEntry.createdAt ?? Date(), tournamentId: tid
-            )
-            print("[FantasyHub] \(tid): rank=\(rank)/\(totalEntries) pts=\(myEntry.totalPoints)")
+            if collected[tid] == nil {
+                let rank = (sorted.firstIndex { $0.userID == userID }).map { $0 + 1 } ?? myEntry.rank
+                let title = derivedFantasyTitle(tid)
+                collected[tid] = DFSResult(
+                    id: UUID(), tournamentTitle: title, rank: rank,
+                    totalEntries: totalEntries, lineupPoints: myEntry.totalPoints,
+                    rrDelta: 0, loggedAt: myEntry.createdAt ?? Date(), tournamentId: tid
+                )
+                print("[FantasyHub] \(tid): rank=\(rank)/\(totalEntries) pts=\(myEntry.totalPoints)")
+            }
 
             let groups = (try? await SupabaseService.shared.fetchMyPlayoffTiersGroups(
                 userID: userID, tournamentID: tid, accessToken: token
@@ -885,7 +903,9 @@ struct FantasyHubView: View {
 
         // SOURCE 4: World Cup Tiers (soccer_tiers_entries)
         let soccerTids = [(currentYear - 1), currentYear, currentYear + 1].map { "world-cup-\($0)" }
-        for tid in soccerTids where collected[tid] == nil {
+        // Iterate all (not `where collected[tid] == nil`) so private groups load
+        // even when the public result is already in SOURCE 1.
+        for tid in soccerTids {
             guard let myEntry = try? await SupabaseService.shared.fetchUserSoccerTiersEntry(
                 tournamentID: tid, userID: userID, accessToken: token
             ), myEntry.totalPoints > 0 else { continue }
@@ -893,15 +913,17 @@ struct FantasyHubView: View {
                 tournamentID: tid, accessToken: token
             )) ?? []
             let sorted = allEntries.sorted { $0.totalPoints > $1.totalPoints }
-            let rank = (sorted.firstIndex { $0.userID == userID }).map { $0 + 1 } ?? myEntry.rank
             let totalEntries = max(sorted.count, 1)
-            let title = derivedFantasyTitle(tid)
-            collected[tid] = DFSResult(
-                id: UUID(), tournamentTitle: title, rank: rank,
-                totalEntries: totalEntries, lineupPoints: myEntry.totalPoints,
-                rrDelta: 0, loggedAt: myEntry.createdAt ?? Date(), tournamentId: tid
-            )
-            print("[FantasyHub] \(tid): rank=\(rank)/\(totalEntries) pts=\(myEntry.totalPoints)")
+            if collected[tid] == nil {
+                let rank = (sorted.firstIndex { $0.userID == userID }).map { $0 + 1 } ?? myEntry.rank
+                let title = derivedFantasyTitle(tid)
+                collected[tid] = DFSResult(
+                    id: UUID(), tournamentTitle: title, rank: rank,
+                    totalEntries: totalEntries, lineupPoints: myEntry.totalPoints,
+                    rrDelta: 0, loggedAt: myEntry.createdAt ?? Date(), tournamentId: tid
+                )
+                print("[FantasyHub] \(tid): rank=\(rank)/\(totalEntries) pts=\(myEntry.totalPoints)")
+            }
 
             let groups = (try? await SupabaseService.shared.fetchMySoccerTiersGroups(
                 userID: userID, tournamentID: tid, accessToken: token
@@ -935,7 +957,13 @@ struct FantasyHubView: View {
         for y in [currentYear - 1, currentYear] {
             for major in golfMajors { golfTids.append("\(major)-\(y)") }
         }
-        for tid in golfTids where collected[tid] == nil {
+        // NOTE: iterate ALL golf tids (not `where collected[tid] == nil`). The
+        // public result is usually already collected by SOURCE 1 (Golf Tiers
+        // writes to dfs_tournament_results), and the old guard then skipped the
+        // whole tid — so the user's PRIVATE GROUPS for it (e.g. a U.S. Open golf
+        // group) never loaded. Only the public-result WRITE is guarded now; the
+        // private-group loop always runs (it uses distinct `#group-` tids).
+        for tid in golfTids {
             guard let myEntry = try? await SupabaseService.shared.fetchUserGolfTiersEntry(
                 tournamentID: tid, userID: userID, accessToken: token
             ), myEntry.totalPoints > 0 else { continue }
@@ -943,15 +971,17 @@ struct FantasyHubView: View {
                 tournamentID: tid, accessToken: token
             )) ?? []
             let sorted = allEntries.sorted { $0.totalPoints > $1.totalPoints }
-            let rank = (sorted.firstIndex { $0.userID == userID }).map { $0 + 1 } ?? myEntry.rank
             let totalEntries = max(sorted.count, 1)
-            let title = derivedFantasyTitle(tid)
-            collected[tid] = DFSResult(
-                id: UUID(), tournamentTitle: title, rank: rank,
-                totalEntries: totalEntries, lineupPoints: myEntry.totalPoints,
-                rrDelta: 0, loggedAt: myEntry.createdAt ?? Date(), tournamentId: tid
-            )
-            print("[FantasyHub] \(tid): rank=\(rank)/\(totalEntries) pts=\(myEntry.totalPoints)")
+            if collected[tid] == nil {
+                let rank = (sorted.firstIndex { $0.userID == userID }).map { $0 + 1 } ?? myEntry.rank
+                let title = derivedFantasyTitle(tid)
+                collected[tid] = DFSResult(
+                    id: UUID(), tournamentTitle: title, rank: rank,
+                    totalEntries: totalEntries, lineupPoints: myEntry.totalPoints,
+                    rrDelta: 0, loggedAt: myEntry.createdAt ?? Date(), tournamentId: tid
+                )
+                print("[FantasyHub] \(tid): rank=\(rank)/\(totalEntries) pts=\(myEntry.totalPoints)")
+            }
 
             let groups = (try? await SupabaseService.shared.fetchMyGolfTiersGroups(
                 userID: userID, tournamentID: tid, accessToken: token

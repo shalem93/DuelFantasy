@@ -1489,6 +1489,17 @@ final class TennisBracketViewModel {
             rank > 0, points > 0 else {
                 continue
             }
+            // Only import COMPLETED brackets — the final (slot "F-1") must be
+            // decided. A live slam (e.g. an in-progress Wimbledon) has a partial
+            // rank/points, which would otherwise be written to history as a
+            // finished "past result".
+            let matchResults = (try? await SupabaseService.shared.fetchTennisBracketResults(
+                tournamentID: tid, accessToken: token
+            )) ?? [:]
+            guard matchResults["F-1"] != nil else {
+                print("[TennisBracket] syncSettledHistory: \(tid) final (F-1) not decided — in progress, skipping")
+                continue
+            }
             // Pull tournament metadata for the human-readable title; if
             // it's missing or untitled, fall back to the tid derivation.
             let tRec = try? await SupabaseService.shared.fetchTennisBracketTournament(
