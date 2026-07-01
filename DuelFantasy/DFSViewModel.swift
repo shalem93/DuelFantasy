@@ -101,6 +101,18 @@ final class DFSViewModel {
         let parts = afterPrefix.split(separator: "-")
         return parts.first.map(String.init) ?? String(afterPrefix)
     }
+    /// True for a PGA entry that belongs to a PAST/other event — not the one on
+    /// the active slate. PGA ids are event-based with no date, so past events
+    /// (US Open, Travelers, a Monday-playoff week, …) linger in
+    /// `userEntryRecords`/`enteredTournamentIDs` while their results cycle through
+    /// settlement. That inflated "Lineups Today" (2/20 → 8/20) and kept old
+    /// contests showing as Active for a fresh week the user never entered. The
+    /// lobby counter + active list treat these as not-current. Non-PGA sports
+    /// (date-based ids, scoped on load) and an unloaded slate return false.
+    func isStalePGAEntryEvent(_ tid: String) -> Bool {
+        guard sport == "PGA", let activeEvent = slateGames.first?.id else { return false }
+        return pgaBaseEventID(from: tid) != activeEvent
+    }
     /// Per-game single-game player pools with adjusted salaries, keyed by ESPN event ID
     var singleGamePlayers: [String: [DFSPlayer]] = [:]
     /// Tracks which tournament IDs the user has entered today (for entry limit enforcement)
@@ -122,7 +134,11 @@ final class DFSViewModel {
     /// entries the morning after the tournament finished.
     var totalLineupsToday: Int {
         userEntryRecords.reduce(0) { running, kv in
-            guard !isTournamentSettledOrSibling(kv.key) else { return running }
+            let tid = kv.key
+            guard !isTournamentSettledOrSibling(tid) else { return running }
+            // Skip past-event PGA lineups (see isStalePGAEntryEvent) so the count
+            // sits at 0 for a fresh week and doesn't jump as old events cycle.
+            guard !isStalePGAEntryEvent(tid) else { return running }
             return running + kv.value.count
         }
     }

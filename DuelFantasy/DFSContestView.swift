@@ -2180,6 +2180,10 @@ struct DFSContestView: View {
             // the adjacent date). That's why settled WC/WNBA SG contests stopped
             // reappearing as LIVE 0.0 cards.
             guard !vm.isTournamentFinished(tid), !excluded.contains(tid) else { continue }
+            // Past-event PGA lineups (finished weeks whose results are still
+            // cycling through settlement) aren't active — keep them out of the
+            // Active Contests list so a Monday-playoff week doesn't linger there.
+            guard !vm.isStalePGAEntryEvent(tid) else { continue }
             let records = (vm.userEntryRecords[tid] ?? []).sorted {
                 ($0.lineupNumber ?? 1) < ($1.lineupNumber ?? 1)
             }
