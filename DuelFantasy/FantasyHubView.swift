@@ -1100,6 +1100,42 @@ struct FantasyHubView: View {
             }
         }
 
+        // Durable-persist backstop. Ensure every FINISHED public fantasy result
+        // is written to dfs_tournament_results — the canonical Past Results source
+        // — so a contest that finished while nobody had the Fantasy tab open (its
+        // settle() never ran) is still stored and shows up + survives across
+        // devices. Writes the user's row exactly like each mode's settle() does.
+        // Skips: private-group / best-ball synthetic tids (not this table), rows
+        // already persisted, contests still in progress, and admin-excluded ones.
+        // rrDelta is 0 — fantasy RR is credited separately per VM and isn't shown
+        // on these rows — and isFantasyModeTid keeps these tids out of DFS.
+        let alreadyPersisted = Set((dfsRowsResult ?? []).map { $0.tournamentID })
+        let activeFantasyTids: Set<String> = {
+            var s = Set<String>()
+            func addActive(_ id: String?, _ settled: Bool) { if let id, !settled { s.insert(id) } }
+            addActive(playoffTiersViewModel.tournament?.id, playoffTiersViewModel.isSettled)
+            addActive(soccerTiersViewModel.tournament?.id, soccerTiersViewModel.isSettled)
+            addActive(golfTiersViewModel.tournament?.id, golfTiersViewModel.isSettled)
+            addActive(tennisBracketViewModel.tournament?.id, tennisBracketViewModel.isSettled)
+            return s
+        }()
+        let entryName = tennisBracketViewModel.profileName.isEmpty ? "Player" : tennisBracketViewModel.profileName
+        for (tid, result) in collected {
+            guard !tid.contains("#group-"), !tid.hasPrefix("bestball-") else { continue }
+            guard !alreadyPersisted.contains(tid), !activeFantasyTids.contains(tid) else { continue }
+            guard !isExcludedFantasy(tid) else { continue }
+            let record = DFSTournamentResultRecord(
+                id: UUID().uuidString, tournamentID: tid, userID: userID, entryName: entryName,
+                lineupPlayerIDs: [], lineupPlayerNames: [],
+                totalPoints: result.lineupPoints, playerPoints: nil, playerSalaries: nil,
+                rank: result.rank, rrDelta: 0, isCurrentUser: true, isBot: false, createdAt: result.loggedAt
+            )
+            try? await SupabaseService.shared.upsertTournamentResults(
+                tournamentID: tid, results: [record], accessToken: token
+            )
+            print("[FantasyHub] backstop-persisted \(tid) rank=\(result.rank)/\(result.totalEntries) pts=\(result.lineupPoints)")
+        }
+
         let results = Array(collected.values)
             .filter { !isExcludedFantasy($0.tournamentId ?? "") }
             .sorted { $0.loggedAt > $1.loggedAt }
