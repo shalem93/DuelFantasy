@@ -86,9 +86,26 @@ struct FantasyHubView: View {
     /// empty state during the cold-load window.
     @State private var pastResultsLoading = false
     @State private var hasCompletedAtLeastOneFetch = false
+    /// Bumped to force the past-results list to re-filter after an admin removes
+    /// a corrupt result (the exclusion set lives in UserDefaults, not @State).
+    @State private var excludeTick = 0
 
     private var brandPurple: Color {
         Color(red: 0.48, green: 0.23, blue: 0.93)
+    }
+
+    /// Admin accounts that may remove a corrupt fantasy result.
+    private static let adminEmails: Set<String> = ["shalem93@gmail.com", "sam@builderlabs.co"]
+    private var isAdmin: Bool {
+        Self.adminEmails.contains(golfTiersViewModel.userEmail.lowercased())
+    }
+
+    /// A fantasy result is hidden when its base tournament (ignoring any
+    /// `#group-…` suffix) is in the shared exclusion set.
+    private func isExcludedFantasy(_ tid: String) -> Bool {
+        _ = excludeTick   // re-read after an admin removal
+        let base = tid.split(separator: "#").first.map(String.init) ?? tid
+        return DFSViewModel.excludedTournamentIDs.contains(base)
     }
 
     var body: some View {
@@ -693,7 +710,9 @@ struct FantasyHubView: View {
             return !localTids.contains(tid)
         }
         let combined = local + serverOnly
-        return combined.sorted { $0.loggedAt > $1.loggedAt }
+        return combined
+            .filter { !isExcludedFantasy($0.tournamentId ?? "") }
+            .sorted { $0.loggedAt > $1.loggedAt }
     }
 
     /// Fetch the user's past Fantasy-hub results directly from server
@@ -1081,7 +1100,9 @@ struct FantasyHubView: View {
             }
         }
 
-        let results = Array(collected.values).sorted { $0.loggedAt > $1.loggedAt }
+        let results = Array(collected.values)
+            .filter { !isExcludedFantasy($0.tournamentId ?? "") }
+            .sorted { $0.loggedAt > $1.loggedAt }
         print("[FantasyHub] loadServerFantasyResults: \(results.count) result(s) — tids: \(results.compactMap { $0.tournamentId }.joined(separator: ", "))")
         // Encode and persist to @AppStorage so a tab switch (which can
         // tear down + remount this view) doesn't blank the section.
@@ -1182,11 +1203,27 @@ struct FantasyHubView: View {
     private func pastResultRow(_ result: DFSResult) -> some View {
         let tid = result.tournamentId ?? ""
         let dest = destination(for: tid)
-        if let dest {
-            NavigationLink(value: dest) { pastResultRowContent(result, tid: tid) }
-                .buttonStyle(.plain)
-        } else {
-            pastResultRowContent(result, tid: tid)
+        Group {
+            if let dest {
+                NavigationLink(value: dest) { pastResultRowContent(result, tid: tid) }
+                    .buttonStyle(.plain)
+            } else {
+                pastResultRowContent(result, tid: tid)
+            }
+        }
+        .contextMenu {
+            if isAdmin {
+                Button(role: .destructive) {
+                    // Hide a corrupt result (e.g. a Golf Tiers major built against
+                    // the wrong event) from Past Results + RR. Excludes the BASE
+                    // tid so both the public row and its private-group rows go.
+                    let base = tid.split(separator: "#").first.map(String.init) ?? tid
+                    DFSViewModel.excludeTournament(base)
+                    excludeTick += 1
+                } label: {
+                    Label("Remove Result (admin)", systemImage: "trash")
+                }
+            }
         }
     }
 

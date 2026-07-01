@@ -35,6 +35,7 @@ final class GolfTiersViewModel {
     // MARK: - Auth (synced from ContentView)
     var userID: String?
     var accessToken: String?
+    var userEmail: String = ""
     var profileName: String = ""
     var rrScore: Int = 1000
 

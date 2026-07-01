@@ -1055,6 +1055,7 @@ struct ContentView: View {
         tennisBracketViewModel.profileName = profileName
         golfTiersViewModel.accessToken = auth.accessToken
         golfTiersViewModel.userID = auth.userID
+        golfTiersViewModel.userEmail = auth.userEmail
         golfTiersViewModel.profileName = profileName
         soccerTiersViewModel.accessToken = auth.accessToken
         soccerTiersViewModel.userID = auth.userID
