@@ -4004,60 +4004,50 @@ final class DFSViewModel {
                     print("[PGA-SelfHeal] \(tid): no userEntryRecords, skipping")
                     continue
                 }
-                print("[PGA-SelfHeal] \(tid): attempting settlement (records=\(records.count))")
-                // `settleUnsettledPastGolfTournament` already handles
-                // multi-lineup users internally (it iterates
-                // `allUserGolfEntries` and adds each to the field).
-                // Calling it twice deletes the bots written by the first
-                // call → leaderboard becomes user-only on the server.
-                // One call is enough; pass any user record.
-                //
-                // First wipe local + server stale state so the function's
-                // "skip if already in history" guard doesn't block re-write.
-                let staleRows = dfsHistory.filter { $0.tournamentId == tid }
-                if !staleRows.isEmpty {
-                    let staleRR = staleRows.reduce(0) { $0 + $1.rrDelta }
-                    var updated = dfsHistory
-                    updated.removeAll { $0.tournamentId == tid }
-                    dfsHistoryData = encodedDFSHistory(Array(updated.prefix(500)))
-                    rrScore -= staleRR
-                    var settled = settledTournaments
-                    settled.remove(tid)
-                    settledTournamentData = (try? JSONEncoder().encode(settled)) ?? Data()
-                    try? await SupabaseService.shared.deleteTournamentResults(tournamentID: tid, accessToken: token)
+                // FINALIZE, don't re-grade. The old path WIPED an already-graded
+                // event's result (subtracting its RR), deleted the server rows,
+                // and re-graded from scratch on EVERY session. A PGA event a few
+                // days+ out grades inconsistently (ESPN serves partial/no data
+                // for a finished event), so its RR flip-flopped on each launch —
+                // the churn the user hit. Instead: if this event already has a
+                // result in history, KEEP it, persist the settled flag so it
+                // drops out of the stale set permanently, and never touch it
+                // again. A genuinely-wrong old grade can still be corrected with
+                // the admin Re-grade action.
+                if dfsHistory.contains(where: { $0.tournamentId == tid }) {
+                    print("[PGA-SelfHeal] \(tid): already graded — finalizing (no re-grade)")
+                    markTournamentSettled(tid)
+                    pgaSelfHealedThisSession.insert(tid)
+                    continue
                 }
+                // No result yet — grade ONCE (nothing to wipe). `settle…`
+                // handles multi-lineup users internally; one call is enough.
+                print("[PGA-SelfHeal] \(tid): no result yet — grading once (records=\(records.count))")
                 await settleUnsettledPastGolfTournament(
                     tournamentID: tid, userEntry: firstRecord,
                     forceFinal: true,
                     token: token, userID: userID
                 )
-                // Only latch after a CONFIRMED successful settlement — if the
-                // server upsert failed, we want the next refreshLive cycle
-                // to retry rather than block until app relaunch.
                 if settledTournaments.contains(tid) {
                     print("[PGA-SelfHeal] \(tid): SETTLED successfully — latching")
                     pgaSelfHealedThisSession.insert(tid)
                 } else {
-                    // Escape hatch for older PGA entries ESPN no longer
-                    // serves data for. If the entry has been stale for
-                    // more than 7 days AND we still can't settle it,
-                    // remove it from `enteredTournamentIDs` so it stops
-                    // showing as a shimmer card in Active Contests
-                    // forever. The user's lineup is still on the server
-                    // and they can find the result via past-history
-                    // sync if it ever lands.
+                    // Never gradeable (ESPN no longer serves this event's scores).
+                    // Once it's clearly finished (>3d since submit — PGA finals
+                    // post within hours, so a still-ungradeable entry never will),
+                    // GHOST it permanently: drop it from entries + mark settled so
+                    // it stops retrying and can never churn RR again. It scored
+                    // nothing (no history), so nothing is lost.
                     let submittedAt = firstRecord.submittedAt ?? .distantPast
                     let daysStale = Date().timeIntervalSince(submittedAt) / (24 * 3600)
-                    if daysStale > 7 {
-                        print("[PGA-SelfHeal] \(tid): \(Int(daysStale))d stale and still ungradeable — removing from enteredTournamentIDs as ghost")
+                    if daysStale > 3 {
+                        print("[PGA-SelfHeal] \(tid): \(Int(daysStale))d ungradeable — ghosting permanently")
                         enteredTournamentIDs.remove(tid)
                         userEntryRecords[tid] = nil
-                        // Also mark settled locally so future polls don't
-                        // re-add it from server fetches.
                         markTournamentSettled(tid)
                         pgaSelfHealedThisSession.insert(tid)
                     } else {
-                        print("[PGA-SelfHeal] \(tid): settlement did NOT complete — will retry next cycle")
+                        print("[PGA-SelfHeal] \(tid): not gradeable yet — retry next cycle")
                     }
                 }
             }
