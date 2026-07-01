@@ -2975,6 +2975,22 @@ struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
             }
             return result
         }()
+        // Augment probable pitchers with KNOWN two-way players (both a batting and
+        // an `-sp` pitching season rating) whom DraftKings lists as a pitcher today.
+        // ESPN's scoreboard `probables` intermittently omits a two-way starter
+        // (Ohtani) — when it does, neither two-way branch below fires, so he was
+        // built as ONE entry (the batter, wrongly stamped with his $10k+ DK PITCHER
+        // price and no SP half). DK's own position feed is the reliable "he's
+        // pitching today" signal and avoids a phantom SP on his DH-only days.
+        let mlbDKPositions = await mlbPositionsTask
+        for espnID in batterRatings.keys where !probablePitcherIDs.contains(espnID) {
+            guard let name = filtered.first(where: { $0.id == "mlb-\(espnID)" })?.name else { continue }
+            let dkPos = (mlbDKPositions[RotoGrindersSalaryProvider.normalizeName(name)] ?? "").uppercased()
+            if dkPos.contains("SP") || dkPos.contains("RP") || dkPos == "P" {
+                probablePitcherIDs.insert(espnID)
+                print("[MLB-DFS] Augmented probables: two-way \(name) listed by DK as \(dkPos) — building pitcher half")
+            }
+        }
         // Track indices of SP players who need to be converted to batter entries
         var spToBatterIndices: [Int] = []
         for (index, player) in filtered.enumerated() {
@@ -3053,7 +3069,7 @@ struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
         // When a price is detected as single-game inflated, fall back to DFF DK price.
         let realSalaries = await rgSalaries
         let dkFallback = await dkFallbackSalaries
-        let mlbDKPositions = await mlbPositionsTask
+        // mlbDKPositions already awaited above (probable-pitcher augmentation).
         // Main-slate slots MLB can fill. Anything else (DH, UTIL, unknown)
         // gets remapped from DK's eligible-positions string if available.
         let mlbValidPositions: Set<String> = ["P", "SP", "RP", "C", "1B", "2B", "3B", "SS", "OF"]
