@@ -2983,11 +2983,17 @@ struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
             
             if player.position == "SP" {
                 // Case 2: ESPN lists them as SP but they're also a batter (two-way player).
-                // Detect via: has a batting order AND meaningful batting ratings (> 5 FPPG).
-                // Pitchers who occasionally bat in interleague games will have near-zero
-                // batting ratings and should NOT be treated as two-way.
+                // Detect via meaningful batting ratings alone (> 5 FPPG). `batterRatings`
+                // only holds players who have BOTH a batting AND a `-sp` pitching entry, so
+                // a pitcher who bats occasionally in interleague games (near-zero batting)
+                // never qualifies. We do NOT also require a posted `battingOrder`: on a day
+                // Ohtani is the probable pitcher, ESPN lists him as SP but his batting order
+                // isn't out until ~gametime — so requiring it left him PITCHER-ONLY (his
+                // batter half never got created, and the `mlb-X` id inconsistently meant
+                // "pitcher" that day, which is why a saved pitcher pick later rendered as a
+                // 1B batter). Detecting by FPPG makes both halves exist every start.
                 let batterFPPG = batterRatings[espnID] ?? 0
-                let isTwoWay = (batterFPPG > 5.0 && player.battingOrder != nil)
+                let isTwoWay = batterFPPG > 5.0
                 guard isTwoWay else { continue }
                 spToBatterIndices.append(index)
             } else {
@@ -3012,25 +3018,28 @@ struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
             filtered.append(spEntry)
             print("[MLB-DFS] Two-way player \(player.name): batter (\(player.position) $\(player.salary)) + pitcher (SP $\(spSalary), \(String(format: "%.1f", spProjection)) FPTS)")
         }
-        // Convert SP entries to UTIL batter entries for two-way players (Case 2)
+        // Convert the SP-listed entry into the BATTER half for two-way players
+        // (Case 2). Type it 1B — MLB classic has no UTIL slot, and DK classifies
+        // Ohtani as 1B/OF — so the batter is directly draftable/slottable and the
+        // `mlb-X` id ALWAYS means the batter (its `mlb-X-sp` sibling is the pitcher).
         for index in spToBatterIndices {
             let player = filtered[index]
             let espnID = String(player.id.dropFirst(4))
             let batterFPPG = batterRatings[espnID] ?? 10.0 // fallback: decent DH batter
-            let batterSalary = mlbEstimatedSalary(fppg: batterFPPG, position: "UTIL", playerID: espnID)
-            let batterProjection = mlbProjectedPoints(fppg: batterFPPG, position: "UTIL", playerID: espnID)
+            let batterSalary = mlbEstimatedSalary(fppg: batterFPPG, position: "1B", playerID: espnID)
+            let batterProjection = mlbProjectedPoints(fppg: batterFPPG, position: "1B", playerID: espnID)
             filtered[index] = DFSPlayer(
                 id: player.id,
                 name: player.name,
                 team: player.team,
-                position: "UTIL",
+                position: "1B",
                 salary: batterSalary,
                 projectedPoints: batterProjection,
                 gameID: player.gameID,
                 injuryStatus: player.injuryStatus,
                 battingOrder: player.battingOrder
             )
-            print("[MLB-DFS] Two-way player \(player.name): converted SP → UTIL batter ($\(batterSalary), \(String(format: "%.1f", batterProjection)) FPTS)")
+            print("[MLB-DFS] Two-way player \(player.name): converted SP → 1B batter ($\(batterSalary), \(String(format: "%.1f", batterProjection)) FPTS)")
         }
 
         let deduped = deduplicatePlayers(filtered)

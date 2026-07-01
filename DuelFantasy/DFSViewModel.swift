@@ -604,12 +604,15 @@ final class DFSViewModel {
     /// pitcher — so we check both. DK classifies Ohtani as 1B/OF → default 1B.
     private func normalizeMLBTwoWayBatters(_ pool: [DFSPlayer]) -> [DFSPlayer] {
         guard sport == "MLB" else { return pool }
-        let pitcherSlots: Set<String> = ["SP", "RP", "P"]
+        // Slots a two-way BATTER half must never keep: pitcher slots (a stale live
+        // rebuild types Ohtani-the-batter as SP) and UTIL (MLB classic has no UTIL
+        // slot, so a UTIL batter is unslottable). Both re-type to 1B.
+        let wrongBatterSlots: Set<String> = ["SP", "RP", "P", "UTIL"]
         var spBaseIDs = Set(pool.filter { $0.id.hasSuffix("-sp") }.map { String($0.id.dropLast(3)) })
         spBaseIDs.formUnion(selectedPlayerIDs.filter { $0.hasSuffix("-sp") }.map { String($0.dropLast(3)) })
         guard !spBaseIDs.isEmpty else { return pool }
         return pool.map { p in
-            guard spBaseIDs.contains(p.id), pitcherSlots.contains(p.position) else { return p }
+            guard spBaseIDs.contains(p.id), wrongBatterSlots.contains(p.position) else { return p }
             var fixed = DFSPlayer(id: p.id, name: p.name, team: p.team, position: "1B",
                                   salary: p.salary, projectedPoints: p.projectedPoints,
                                   gameID: p.gameID, injuryStatus: p.injuryStatus,
