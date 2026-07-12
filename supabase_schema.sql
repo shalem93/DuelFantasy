@@ -1404,3 +1404,29 @@ grant execute on function public.delete_current_user() to authenticated;
 
 select pg_notify('pgrst', 'reload schema');
 
+
+-- Crash reports (MetricKit diagnostics uploaded by CrashReporter.swift on the
+-- launch after a crash/hang). `call_stack` holds MetricKit's callStackTree
+-- JSON — raw addresses; symbolicate with tools/symbolicate_metrickit.py.
+create table if not exists public.crash_reports (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid,
+  kind text,                    -- crash | hang
+  app_version text,
+  os_version text,
+  device_model text,
+  signal text,
+  exception_type text,
+  exception_code text,
+  termination_reason text,
+  crashed_at timestamptz,
+  call_stack jsonb,
+  created_at timestamptz not null default now()
+);
+
+alter table public.crash_reports enable row level security;
+
+-- Insert-only for clients (upload can happen before sign-in, so anon too).
+-- No select/update/delete policies: reports are read from the dashboard.
+create policy "crash_reports_insert" on public.crash_reports
+for insert to anon, authenticated with check (true);

@@ -20,6 +20,9 @@ struct GameOnApp: App {
         // exceeded, writes fail silently and reads corrupt (`decode: bad range`),
         // which destabilized the RR total. Caches regenerate; settings are tiny.
         FileBlobStore.sweepOversizedDefaults()
+        // MetricKit crash reporting: receives the previous run's crash/hang
+        // diagnostics at launch and uploads them to the `crash_reports` table.
+        CrashReporter.shared.start()
     }
 
     var body: some Scene {
