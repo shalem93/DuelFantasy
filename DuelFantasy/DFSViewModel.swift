@@ -2263,7 +2263,17 @@ final class DFSViewModel {
                             id: tid,
                             title: record?.title ?? "\(sport) Contest",
                             league: sport,
-                            entryCount: record?.totalEntries ?? Self.entryCountFromTournamentID(tid),
+                            // A server row can carry entry_count = 0 (written at
+                            // submit time, before the field is built). A stub
+                            // synthesized with entryCount 0 poisons refreshLive:
+                            // saved bots get trimmed to prefix(0), the field goes
+                            // empty, and the user-entry injection indexed
+                            // fieldEntries[count - 1] on an empty array → crash.
+                            // Fall back to the tid's size suffix (never 0).
+                            entryCount: {
+                                if let n = record?.totalEntries, n > 0 { return n }
+                                return Self.entryCountFromTournamentID(tid)
+                            }(),
                             lineupSize: single ? 6 : 8,
                             salaryCap: 50000,
                             isSingleGame: single,
@@ -4959,7 +4969,10 @@ final class DFSViewModel {
                 // Replace a bot with the user's entry to maintain correct field size
                 if let botIdx = fieldEntries.firstIndex(where: { !$0.isCurrentUser && !$0.isRealUser }) {
                     fieldEntries[botIdx] = userFieldEntry
-                } else if fieldEntries.count < tournament.entryCount {
+                } else if fieldEntries.isEmpty || fieldEntries.count < tournament.entryCount {
+                    // The isEmpty check guards a stub tournament whose
+                    // entryCount is ≤ 0 (0 < 0 is false) — indexing count-1
+                    // below on an empty field crashed here.
                     fieldEntries.append(userFieldEntry)
                 } else {
                     // Field is full of real users — replace the last entry
