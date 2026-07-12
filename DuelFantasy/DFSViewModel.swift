@@ -2921,11 +2921,12 @@ final class DFSViewModel {
         return false
     }
 
-    /// Staggered soccer slate reservation. The field is generated when game 1
-    /// LOCKS, so every bot is 100% game-1 players — and all of those games have
-    /// STARTED, which means late-swap (it only edits not-started slots) can never
-    /// pull the bots into the later games. The whole field then stays clustered
-    /// on the first match (the "all bots took from the first game" complaint).
+    /// Staggered soccer slate reservation. The field is generated when game 1's
+    /// XI posts (~75 min pre-kickoff), so every bot drafts almost exclusively
+    /// game-1 confirmed players — and late-swap (it only edits
+    /// not-started+UNCONFIRMED slots) can never pull the bots into the later
+    /// games. The whole field then stays clustered on the first match (the
+    /// "all bots took from the first game" complaint).
     ///
     /// This parks a few cheap, POSITION-CORRECT placeholders from games that
     /// haven't started yet into each bot, so (a) the field spreads across the
@@ -2937,31 +2938,51 @@ final class DFSViewModel {
     private func reserveNotStartedGameSlots(_ lineup: [DFSPlayer], slots: [String?], poolForReservation: [DFSPlayer]) -> [DFSPlayer] {
         guard sport == "EPL" || sport == "UCL" || sport == "WC" else { return lineup }
         guard lineup.count == slots.count, slots.count >= 6 else { return lineup }
-        let notStarted = slateGames.filter { !gameHasStarted($0.id) }.map(\.id)
-        let startedSet = Set(slateGames.filter { gameHasStarted($0.id) }.map(\.id))
-        guard !notStarted.isEmpty, !startedSet.isEmpty else { return lineup }
+        // Split the slate by KICKOFF TIME, not started-state. Bot generation
+        // fires as soon as the FIRST game's XI posts — ~75 minutes BEFORE it
+        // kicks off — so at generation time NOTHING has started, and the old
+        // started/not-started split no-op'd this whole function. That's how
+        // the July 11 WC 2-game slate produced bots that were 100% game-1:
+        // no later-game placeholders were parked, every slot held a confirmed
+        // game-1 player, and the late-swap pass (which only edits
+        // not-started+unconfirmed slots) had nothing to migrate into game 2.
+        // "Early" = the earliest-kickoff game(s) anchoring generation, plus
+        // anything already underway; "later" = strictly-later kickoffs that
+        // haven't started.
+        guard let earliestStart = slateGames.map(\.startTime).min() else { return lineup }
+        let laterGames = slateGames
+            .filter { $0.startTime > earliestStart && !gameHasStarted($0.id) }
+            .sorted { $0.startTime < $1.startTime }
+            .map(\.id)
+        let laterSet = Set(laterGames)
+        let earlySet = Set(slateGames.map(\.id)).subtracting(laterSet)
+        guard !laterGames.isEmpty, !earlySet.isEmpty else { return lineup }
 
         var result = lineup
         var used = Set(result.map(\.id))
-        // Reserve ~1 slot per not-started game (+/- a little per-bot variance),
-        // but always keep a majority of real confirmed starters (>= slots-4).
-        let target = min(notStarted.count + Int.random(in: 0...1), max(1, slots.count - 4))
-        var rr = Int.random(in: 0..<notStarted.count)   // round-robin start for spread
-        func reservedCount() -> Int { result.filter { notStarted.contains($0.gameID ?? "") }.count }
+        // Reserve later-game slots roughly PROPORTIONAL to the later games'
+        // share of the slate (2-game slate → ~3-4 of 8 slots, not 1-2), with
+        // a floor of one per later game and per-bot variance — but always
+        // keep a confirmed-starter core from the locking game (>= slots-4).
+        let laterShare = Double(laterGames.count) / Double(max(1, slateGames.count))
+        let proportional = Int((Double(slots.count) * laterShare).rounded(.down)) + Int.random(in: -1...1)
+        let target = min(max(laterGames.count, proportional), max(1, slots.count - 4))
+        var rr = Int.random(in: 0..<laterGames.count)   // round-robin start for spread
+        func reservedCount() -> Int { result.filter { laterSet.contains($0.gameID ?? "") }.count }
 
         for slotIdx in result.indices.shuffled() {
             if reservedCount() >= target { break }
-            // Only convert a slot currently held by a STARTED-game player.
-            guard startedSet.contains(result[slotIdx].gameID ?? "") else { continue }
+            // Only convert a slot currently held by an early-game player.
+            guard earlySet.contains(result[slotIdx].gameID ?? "") else { continue }
             let pos = slots[slotIdx]
             var placeholder: DFSPlayer? = nil
-            for offset in 0..<notStarted.count {
-                let gid = notStarted[(rr + offset) % notStarted.count]
+            for offset in 0..<laterGames.count {
+                let gid = laterGames[(rr + offset) % laterGames.count]
                 placeholder = poolForReservation.filter {
                     $0.gameID == gid && !used.contains($0.id)
                         && (pos == nil || playerMatchesSlot($0, slot: pos!))
                 }.min(by: { $0.salary < $1.salary })
-                if placeholder != nil { rr = (rr + offset + 1) % notStarted.count; break }
+                if placeholder != nil { rr = (rr + offset + 1) % laterGames.count; break }
             }
             guard let pick = placeholder else { continue }
             used.remove(result[slotIdx].id)
