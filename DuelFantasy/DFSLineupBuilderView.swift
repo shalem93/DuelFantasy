@@ -496,10 +496,17 @@ struct DFSLineupBuilderView: View {
     }
 
     private var playerList: some View {
-        List {
-            ForEach(viewModel.filteredPlayers) { player in
+        // Hoisted out of the rows: `canFillSlot` and `confirmedXITeams` each
+        // rebuild the full active player pool per call. Computing them once per
+        // render (instead of once per row) is what keeps this list scrollable
+        // on big slates — see fillablePositions in DFSViewModel.
+        let players = viewModel.filteredPlayers
+        let fillable = viewModel.fillablePositions(among: Set(players.map(\.position)))
+        let confirmedTeams = viewModel.confirmedXITeams
+        return List {
+            ForEach(players) { player in
                 let isSelected = viewModel.selectedPlayerIDs.contains(player.id)
-                let canAdd = isSelected || viewModel.canFillSlot(player)
+                let canAdd = isSelected || fillable.contains(player.position)
                 let playerIsMVP = isSingleGame && viewModel.mvpPlayerID == player.id
                 HStack(spacing: 12) {
                     // Tappable area: position badge + player info → opens detail sheet
@@ -561,7 +568,7 @@ struct DFSLineupBuilderView: View {
                                                 .background(Color.green)
                                                 .clipShape(RoundedRectangle(cornerRadius: 3))
                                         } else if player.playedRecently,
-                                                  !viewModel.confirmedXITeams.contains(player.team) {
+                                                  !confirmedTeams.contains(player.team) {
                                             // Projected starter — started or subbed
                                             // into a recent match AND their team's
                                             // XI isn't out yet. Once the XI drops,

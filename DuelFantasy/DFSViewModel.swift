@@ -1430,45 +1430,74 @@ final class DFSViewModel {
 
     /// Check if a player's position is compatible with a slot label.
     private func playerFitsSlot(_ player: DFSPlayer, slot: String) -> Bool {
+        positionFitsSlot(player.position, slot: slot)
+    }
+
+    private func positionFitsSlot(_ position: String, slot: String) -> Bool {
         let effectiveSport = sport
         switch slot {
         case "MVP":
             return true
         case "FLEX":
             if effectiveSport == "EPL" || effectiveSport == "UCL" {
-                return player.position != "GK"
+                return position != "GK"
             }
             return true
         case "P":
-            return player.position == "SP" || player.position == "RP" || player.position == "P"
+            return position == "SP" || position == "RP" || position == "P"
         case "C/1B":
-            return player.position == "C" || player.position == "1B"
+            return position == "C" || position == "1B"
         case "C":
-            if effectiveSport == "NHL" { return player.position != "G" }
-            if effectiveSport == "MLB" { return player.position == "C" }
-            return player.position == "C" || player.position == "PF/C" || player.position == "C/PF"
+            if effectiveSport == "NHL" { return position != "G" }
+            if effectiveSport == "MLB" { return position == "C" }
+            return position == "C" || position == "PF/C" || position == "C/PF"
         case "W", "D":
-            if effectiveSport == "NHL" { return player.position != "G" }
-            return player.position == slot
+            if effectiveSport == "NHL" { return position != "G" }
+            return position == slot
         case "G":
-            if effectiveSport == "NHL" { return player.position == "G" }
-            let pos = player.position
-            return pos == "PG" || pos == "SG" || pos == "PG/SG" || pos == "SG/PG"
+            if effectiveSport == "NHL" { return position == "G" }
+            return position == "PG" || position == "SG" || position == "PG/SG" || position == "SG/PG"
         case "F":
-            let pos = player.position
-            return pos == "SF" || pos == "PF" || pos == "SF/PF" || pos == "PF/SF"
+            return position == "SF" || position == "PF" || position == "SF/PF" || position == "PF/SF"
         case "UTIL":
-            if effectiveSport == "MLB" { return !["SP", "RP", "P"].contains(player.position) }
-            if effectiveSport == "NHL" { return player.position != "G" }
+            if effectiveSport == "MLB" { return !["SP", "RP", "P"].contains(position) }
+            if effectiveSport == "NHL" { return position != "G" }
             return true
         case "1B", "2B", "3B", "SS", "OF":
-            return player.position == slot
+            return position == slot
         case "PG", "SG", "SF", "PF":
-            return player.position == slot || player.position.contains(slot)
+            return position == slot || position.contains(slot)
         case "GK", "DEF", "MID", "FWD":
-            return player.position == slot
+            return position == slot
         default:
-            return player.position == slot
+            return position == slot
+        }
+    }
+
+    /// One-pass replacement for calling `canFillSlot` on every player-list row.
+    /// `canFillSlot` re-derives `selectedPlayers` — a full pool rebuild — per
+    /// call, which on a big slate (WC: ~800 players) made each row cost O(pool)
+    /// and the picker drop frames while scrolling. Slot availability depends
+    /// only on a player's POSITION, so the builder computes this once per
+    /// render and answers each row with a set lookup.
+    func fillablePositions(among positions: Set<String>) -> Set<String> {
+        guard let slots = rosterSlots else { return positions }
+        let filled = selectedPlayers
+        guard filled.count < slots.count else { return [] }
+        // Same greedy assignment as canFillSlot: mark slots taken by the
+        // current selection, then test each position against the open slots.
+        var slotTaken = [Bool](repeating: false, count: slots.count)
+        for p in filled {
+            for (i, slot) in slots.enumerated() where !slotTaken[i] {
+                if positionFitsSlot(p.position, slot: slot) {
+                    slotTaken[i] = true
+                    break
+                }
+            }
+        }
+        let openSlots = slots.enumerated().filter { !slotTaken[$0.offset] }.map(\.element)
+        return positions.filter { pos in
+            openSlots.contains { positionFitsSlot(pos, slot: $0) }
         }
     }
 
@@ -1723,7 +1752,22 @@ final class DFSViewModel {
         return slateGames.map { $0.startTime }.min() ?? .distantFuture
     }
 
+    /// Memoized decode of `dfsHistoryData`. The getter below runs on every
+    /// access, and the lobby/My Contests bodies access it many times per
+    /// render (recent results, `isTournamentFinished` per entered tournament,
+    /// the 12-VM merge) — decoding a 500-result blob each time made body
+    /// re-evaluation cost tens of ms and scroll stutter on history-heavy
+    /// sports (WC). The cache is keyed on the raw blob (memcmp — orders of
+    /// magnitude cheaper than a decode) plus the admin-excluded set.
+    @ObservationIgnored private var dfsHistoryCacheKey: Data?
+    @ObservationIgnored private var dfsHistoryCacheExcluded: Set<String>?
+    @ObservationIgnored private var dfsHistoryCacheValue: [DFSResult] = []
+
     var dfsHistory: [DFSResult] {
+        let excluded = Self.excludedTournamentIDs
+        if dfsHistoryCacheKey == dfsHistoryData, dfsHistoryCacheExcluded == excluded {
+            return dfsHistoryCacheValue
+        }
         guard let decoded = try? JSONDecoder().decode([DFSResult].self, from: dfsHistoryData) else {
             return []
         }
@@ -1732,12 +1776,15 @@ final class DFSViewModel {
         // the server (and a still-settling contest re-writes them). Filtering
         // here means an excluded tournament stays gone no matter what comes
         // back, so its RR (which is history-derived) never reappears.
-        let excluded = Self.excludedTournamentIDs
         let visible = decoded.filter {
             let tid = $0.tournamentId ?? ""
             return !excluded.contains(tid) && !Self.isFantasyModeTid(tid)
         }
-        return deduplicatedHistory(visible)
+        let result = deduplicatedHistory(visible)
+        dfsHistoryCacheKey = dfsHistoryData
+        dfsHistoryCacheExcluded = excluded
+        dfsHistoryCacheValue = result
+        return result
     }
 
     /// True for a tournament id that belongs to a Fantasy game mode (Playoff
@@ -1790,10 +1837,22 @@ final class DFSViewModel {
         UserDefaults.standard.set((try? JSONEncoder().encode(set)) ?? Data(), forKey: excludedTournamentsKey)
     }
 
+    /// Memoized like `dfsHistory` above: `isTournamentSettledOrSibling` runs
+    /// inside per-tournament filters (`availableTournaments`, the lineup
+    /// counter, `isTournamentFinished`), so this decoded on every element of
+    /// every filter pass each render.
+    @ObservationIgnored private var settledCacheKey: Data?
+    @ObservationIgnored private var settledCacheValue: Set<String> = []
+
     var settledTournaments: Set<String> {
+        if settledCacheKey == settledTournamentData {
+            return settledCacheValue
+        }
         guard let decoded = try? JSONDecoder().decode(Set<String>.self, from: settledTournamentData) else {
             return []
         }
+        settledCacheKey = settledTournamentData
+        settledCacheValue = decoded
         return decoded
     }
 
