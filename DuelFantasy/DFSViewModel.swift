@@ -4119,6 +4119,18 @@ final class DFSViewModel {
                     tournamentID: tid, accessToken: token
                 ), serverT.lockTime > Date() {
                     print("[PGA-SelfHeal] \(tid): server lock \(serverT.lockTime) is in the future — upcoming event, skipping")
+                    // The loaded slate is pointing at a DIFFERENT event than
+                    // this upcoming entered contest (e.g. Corales adopted
+                    // before ESPN listed The Open). `loadSlateIfNeeded`
+                    // no-ops once a slate exists, so without a forced reload
+                    // the wrong slate STICKS all session and the entered
+                    // contest keeps rendering as a fake LIVE card. Throttled
+                    // so flaky ESPN listings can't cause reload churn.
+                    if Date().timeIntervalSince(lastEventMismatchSlateReload) > 1800 {
+                        lastEventMismatchSlateReload = Date()
+                        print("[PGA-SelfHeal] \(tid): reloading slate to re-resolve the active event")
+                        await loadSlate(force: true)
+                    }
                     continue
                 }
                 // FINALIZE, don't re-grade. The old path WIPED an already-graded
@@ -6653,6 +6665,9 @@ final class DFSViewModel {
     /// Per-session latch: tids we've already force-re-settled via the PGA
     /// self-heal so we don't wipe + re-settle on every refresh cycle.
     private var pgaSelfHealedThisSession: Set<String> = []
+    /// Throttle for the event-mismatch slate reload in the PGA self-heal
+    /// (entered upcoming contest vs a slate stuck on a different event).
+    @ObservationIgnored private var lastEventMismatchSlateReload: Date = .distantPast
 
     /// Discards a contaminated cache entry along with every stale entry
     /// derived from it (rank-by-key cache that the Active Contests cards

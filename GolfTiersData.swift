@@ -324,8 +324,9 @@ struct ESPNGolfTiersDataProvider: Sendable {
                     continue
                 }
                 let majorCandidates = probeScoreboard.events.filter {
-                    let s = $0.status.type.state ?? ""
-                    guard s == "pre" || s == "in" else { return false }
+                    // Anything not finished counts — a just-posted event can
+                    // briefly carry a nil/unknown state.
+                    guard ($0.status.type.state ?? "") != "post" else { return false }
                     return GolfTiersTournament.matchEventToMajor(eventName: $0.name, year: seasonYear) != nil
                 }
                 if let major = majorCandidates.min(by: { (Int($0.id) ?? .max) < (Int($1.id) ?? .max) }) {

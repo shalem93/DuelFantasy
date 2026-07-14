@@ -249,9 +249,12 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
                 // don't keep adopting last week's finished tournament.
                 // primaryEvent (min id) so a two-event week (major +
                 // opposite-field) always resolves to the same tournament.
+                // Accepts a nil/unknown state (`s != "post"` rather than
+                // requiring pre/in) — a just-posted event can briefly carry
+                // no state, and excluding it made the probe adopt the
+                // opposite-field event instead.
                 if let probeEvent = primaryEvent(probeScoreboard.events.filter {
-                    let s = $0.status.type.state ?? ""
-                    return s == "pre" || s == "in"
+                    ($0.status.type.state ?? "") != "post"
                 }) {
                     print("[GolfDFS] Found upcoming event \(probeEvent.id) (\(probeEvent.name)) via date probe +\(offset)d, state=\(probeEvent.status.type.state ?? "?")")
                     scoreboard = probeScoreboard

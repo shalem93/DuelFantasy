@@ -456,6 +456,17 @@ final class GolfTiersViewModel {
                 let year = Calendar.current.component(.year, from: Date())
                 let matched = GolfTiersTournament.matchEventToMajor(eventName: ev.name, year: year)
                 if matched != tournamentID {
+                    // Don't DOWNGRADE good state: if an earlier load this
+                    // session already resolved this major's field (tiers
+                    // shown), one flaky/rotating ESPN fetch returning a
+                    // non-major must not wipe it back to "awaiting field" —
+                    // that's the tier-list-flashes-then-vanishes bug.
+                    if !tiers.isEmpty, tournament?.id == tournamentID {
+                        print("[GolfTiers] Later fetch returned non-major '\(ev.name)' — keeping already-loaded \(tournamentID) field")
+                        isLoading = false
+                        hasAttemptedLoad = true
+                        return
+                    }
                     print("[GolfTiers] ESPN current event '\(ev.name)' is NOT \(tournamentID) — field not announced yet")
                     // If a stored row already adopted the wrong event, heal it:
                     // reset to pre-signup and clear the bogus bot field.
