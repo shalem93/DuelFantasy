@@ -312,28 +312,43 @@ struct ESPNGolfTiersDataProvider: Sendable {
             return GolfTiersTournament.matchEventToMajor(eventName: e.name, year: seasonYear) != nil
         }()
         if !pickedIsUpcomingMajor {
+            // Probe all 14 dates CONCURRENTLY and pick across the union —
+            // cache-busted so one stale edge-cache listing (e.g. a Corales-only
+            // payload from before The Open's field was posted) can't hide the
+            // major. Mirrors GolfDFSData's probe.
             let df = DateFormatter()
             df.dateFormat = "yyyyMMdd"
             let cal = Calendar(identifier: .gregorian)
-            for offset in 0..<14 {
-                guard let probeDate = cal.date(byAdding: .day, value: offset, to: Date()),
-                      let probeURL = URL(string: "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard?dates=\(df.string(from: probeDate))"),
-                      let (probeData, probeResp) = try? await session.data(from: probeURL),
-                      let probeHTTP = probeResp as? HTTPURLResponse, (200..<300).contains(probeHTTP.statusCode),
-                      let probeScoreboard = try? JSONDecoder().decode(ESPNPGAScoreboardResponse.self, from: probeData) else {
-                    continue
+            let cacheBust = Int(Date().timeIntervalSince1970)
+            let probed: [ESPNPGAEvent] = await withTaskGroup(of: [ESPNPGAEvent].self, returning: [ESPNPGAEvent].self) { group in
+                for offset in 0..<14 {
+                    guard let probeDate = cal.date(byAdding: .day, value: offset, to: Date()) else { continue }
+                    let dateKey = df.string(from: probeDate)
+                    group.addTask {
+                        guard let probeURL = URL(string: "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard?dates=\(dateKey)&_cb=\(cacheBust)") else { return [] }
+                        var request = URLRequest(url: probeURL)
+                        request.cachePolicy = .reloadIgnoringLocalCacheData
+                        guard let (probeData, probeResp) = try? await self.session.data(for: request),
+                              let probeHTTP = probeResp as? HTTPURLResponse, (200..<300).contains(probeHTTP.statusCode),
+                              let probeScoreboard = try? JSONDecoder().decode(ESPNPGAScoreboardResponse.self, from: probeData) else {
+                            return []
+                        }
+                        return probeScoreboard.events
+                    }
                 }
-                let majorCandidates = probeScoreboard.events.filter {
-                    // Anything not finished counts — a just-posted event can
-                    // briefly carry a nil/unknown state.
-                    guard ($0.status.type.state ?? "") != "post" else { return false }
-                    return GolfTiersTournament.matchEventToMajor(eventName: $0.name, year: seasonYear) != nil
-                }
-                if let major = majorCandidates.min(by: { (Int($0.id) ?? .max) < (Int($1.id) ?? .max) }) {
-                    print("[GolfTiers] Found upcoming major \(major.id) (\(major.name)) via date probe +\(offset)d")
-                    pickedEvent = major
-                    break
-                }
+                var merged: [ESPNPGAEvent] = []
+                for await chunk in group { merged.append(contentsOf: chunk) }
+                return merged
+            }
+            let majorCandidates = probed.filter {
+                // Anything not finished counts — a just-posted event can
+                // briefly carry a nil/unknown state.
+                guard ($0.status.type.state ?? "") != "post" else { return false }
+                return GolfTiersTournament.matchEventToMajor(eventName: $0.name, year: seasonYear) != nil
+            }
+            if let major = majorCandidates.min(by: { (Int($0.id) ?? .max) < (Int($1.id) ?? .max) }) {
+                print("[GolfTiers] Found upcoming major \(major.id) (\(major.name)) via date probes (\(majorCandidates.count) candidates)")
+                pickedEvent = major
             }
         }
 

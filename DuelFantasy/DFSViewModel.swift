@@ -4099,6 +4099,42 @@ final class DFSViewModel {
                 return true
             }
             print("[PGA-SelfHeal] activeTID=\(activeTID ?? "nil") entered=\(enteredTournamentIDs.count) stale=\(stalePGA.count) healed=\(pgaSelfHealedThisSession.count) settled=\(settledTournaments.count)")
+
+            // WRONG-EVENT SLATE HEAL — runs for ANY entered unsettled contest
+            // whose event doesn't match the loaded slate, INCLUDING fresh
+            // (<2-day-old) entries the stale filter above deliberately skips.
+            // If the server says such a contest locks in the FUTURE, the slate
+            // picker is on the wrong event (Corales adopted while The Open's
+            // field lagged on ESPN's date endpoints). Cache the server lock —
+            // lockTimeForTournament's serverLockTimes branch then stops
+            // faking a past lock, so the contest instantly moves from the
+            // fake LIVE card back to Upcoming Lineups — and force a slate
+            // reload (throttled) so the lobby re-resolves to the right event.
+            if !activeBaseEventID.isEmpty {
+                let mismatchedUpcoming = enteredTournamentIDs.filter { tid in
+                    tid.hasPrefix("pga-")
+                        && pgaBaseEventID(from: tid) != activeBaseEventID
+                        && !settledTournaments.contains(tid)
+                        && serverLockTimes[tid] == nil
+                }
+                var foundUpcomingMismatch = false
+                for tid in mismatchedUpcoming {
+                    if let serverT = try? await SupabaseService.shared.fetchTournament(
+                        tournamentID: tid, accessToken: token
+                    ), serverT.lockTime > Date() {
+                        serverLockTimes[tid] = serverT.lockTime
+                        foundUpcomingMismatch = true
+                        print("[PGA] \(tid) locks \(serverT.lockTime) (future) but slate is on \(activeBaseEventID) — wrong event adopted")
+                    }
+                }
+                if foundUpcomingMismatch,
+                   Date().timeIntervalSince(lastEventMismatchSlateReload) > 900 {
+                    lastEventMismatchSlateReload = Date()
+                    print("[PGA] Reloading slate to re-resolve the active event")
+                    await loadSlate(force: true)
+                }
+            }
+
             for tid in stalePGA {
                 // Once-per-session: avoid wiping+re-settling on every poll.
                 if pgaSelfHealedThisSession.contains(tid) {

@@ -226,41 +226,23 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
         // tournament with another.
         let shouldProbe = pickedEvent == nil || (pickedEvent?.status.type.state == "post")
         if shouldProbe {
-            let dateFormatter = DateFormatter()
-            dateFormatter.dateFormat = "yyyyMMdd"
-            let calendar = Calendar(identifier: .gregorian)
-            let today = Date()
-            for offset in 0..<14 {
-                guard let probeDate = calendar.date(byAdding: .day, value: offset, to: today),
-                      let probeURL = URL(string: "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard?dates=\(dateFormatter.string(from: probeDate))") else {
-                    continue
-                }
-                guard let (probeData, probeResp) = try? await session.data(from: probeURL),
-                      let probeHTTP = probeResp as? HTTPURLResponse, (200..<300).contains(probeHTTP.statusCode),
-                      let probeScoreboard = try? JSONDecoder().decode(ESPNPGAScoreboardResponse.self, from: probeData) else {
-                    print("[GolfDFS] date probe +\(offset)d (\(dateFormatter.string(from: probeDate))) HTTP fetch failed")
-                    continue
-                }
-                let probeStates = probeScoreboard.events.map { "\($0.id):\($0.status.type.state ?? "?")" }.joined(separator: ", ")
-                if !probeScoreboard.events.isEmpty {
-                    print("[GolfDFS] date probe +\(offset)d (\(dateFormatter.string(from: probeDate))) events: \(probeStates)")
-                }
-                // Find a non-"post" event in the probed scoreboard so we
-                // don't keep adopting last week's finished tournament.
-                // primaryEvent (min id) so a two-event week (major +
-                // opposite-field) always resolves to the same tournament.
-                // Accepts a nil/unknown state (`s != "post"` rather than
-                // requiring pre/in) — a just-posted event can briefly carry
-                // no state, and excluding it made the probe adopt the
-                // opposite-field event instead.
-                if let probeEvent = primaryEvent(probeScoreboard.events.filter {
-                    ($0.status.type.state ?? "") != "post"
-                }) {
-                    print("[GolfDFS] Found upcoming event \(probeEvent.id) (\(probeEvent.name)) via date probe +\(offset)d, state=\(probeEvent.status.type.state ?? "?")")
-                    scoreboard = probeScoreboard
-                    pickedEvent = probeEvent
-                    break
-                }
+            // Probe ALL 14 dates CONCURRENTLY and pick across the UNION of
+            // results. The old sequential first-hit loop broke on a stale
+            // edge-cache payload: the first date returning events could list
+            // ONLY the opposite-field event (Corales) while the major (The
+            // Open) was already present on later dates' responses — one stale
+            // response decided the whole slate. Requests are cache-busted
+            // (unique query param + no local cache) so a poisoned cache entry
+            // can't keep serving yesterday's listing, and min-id across the
+            // union always resolves the marquee event. Accepts nil/unknown
+            // state (anything != "post") — a just-posted event can briefly
+            // carry no state.
+            let probedEvents = await probeDateScoreboards(days: 14)
+            let candidates = probedEvents.filter { ($0.status.type.state ?? "") != "post" }
+            if let probeEvent = primaryEvent(candidates) {
+                print("[GolfDFS] Found upcoming event \(probeEvent.id) (\(probeEvent.name)) via date probes (\(candidates.count) candidates), state=\(probeEvent.status.type.state ?? "?")")
+                scoreboard = ESPNPGAScoreboardResponse(events: [probeEvent])
+                pickedEvent = probeEvent
             }
         }
 
@@ -743,6 +725,45 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
     /// Active Contest card, excluded from Lineups Today).
     private func primaryEvent(_ events: [ESPNPGAEvent]) -> ESPNPGAEvent? {
         events.min { (Int($0.id) ?? Int.max) < (Int($1.id) ?? Int.max) }
+    }
+
+    /// Fetch the date-targeted scoreboard for today..+(days-1) concurrently and
+    /// return the DEDUPED union of all events. Each request is cache-busted
+    /// (unique `_cb` param defeats CDN-edge staleness; `reloadIgnoringLocalCacheData`
+    /// defeats URLCache) so one stale cached listing can't hide a newly-posted
+    /// event from the picker.
+    private func probeDateScoreboards(days: Int) async -> [ESPNPGAEvent] {
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyyMMdd"
+        let calendar = Calendar(identifier: .gregorian)
+        let today = Date()
+        let cacheBust = Int(today.timeIntervalSince1970)
+        let events: [ESPNPGAEvent] = await withTaskGroup(of: [ESPNPGAEvent].self, returning: [ESPNPGAEvent].self) { group in
+            for offset in 0..<days {
+                guard let probeDate = calendar.date(byAdding: .day, value: offset, to: today) else { continue }
+                let dateKey = dateFormatter.string(from: probeDate)
+                group.addTask {
+                    guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard?dates=\(dateKey)&_cb=\(cacheBust)") else { return [] }
+                    var request = URLRequest(url: url)
+                    request.cachePolicy = .reloadIgnoringLocalCacheData
+                    guard let (data, resp) = try? await self.session.data(for: request),
+                          let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                          let sb = try? JSONDecoder().decode(ESPNPGAScoreboardResponse.self, from: data) else {
+                        return []
+                    }
+                    if !sb.events.isEmpty {
+                        let states = sb.events.map { "\($0.id):\($0.status.type.state ?? "?")" }.joined(separator: ", ")
+                        print("[GolfDFS] date probe \(dateKey) events: \(states)")
+                    }
+                    return sb.events
+                }
+            }
+            var merged: [ESPNPGAEvent] = []
+            for await chunk in group { merged.append(contentsOf: chunk) }
+            return merged
+        }
+        var seen = Set<String>()
+        return events.filter { seen.insert($0.id).inserted }
     }
 
     /// Pick the current in-progress or next upcoming PGA event
