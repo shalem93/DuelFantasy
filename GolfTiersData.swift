@@ -349,6 +349,39 @@ struct ESPNGolfTiersDataProvider: Sendable {
             if let major = majorCandidates.min(by: { (Int($0.id) ?? .max) < (Int($1.id) ?? .max) }) {
                 print("[GolfTiers] Found upcoming major \(major.id) (\(major.name)) via date probes (\(majorCandidates.count) candidates)")
                 pickedEvent = major
+            } else {
+                // Sequential core-API walk — the only ESPN endpoint shape that
+                // kept working on-device while the site API's ?dates= queries
+                // returned empty (The Open week: every date probe came back
+                // blank on the phone but core /events/<id> fetches succeeded).
+                // Walk ids forward from the newest default-scoreboard event and
+                // take the min-id upcoming event whose name matches a major.
+                let anchor = scoreboard.events.compactMap { Int($0.id) }.max() ?? 401_811_950
+                let cal2 = Calendar(identifier: .gregorian)
+                let lowerBound = cal2.date(byAdding: .day, value: -1, to: cal2.startOfDay(for: Date())) ?? Date()
+                let walked: [ESPNPGAEvent] = await withTaskGroup(of: ESPNPGAEvent?.self, returning: [ESPNPGAEvent].self) { group in
+                    for id in (anchor + 1)...(anchor + 30) {
+                        guard let url = URL(string: "https://sports.core.api.espn.com/v2/sports/golf/leagues/pga/events/\(id)") else { continue }
+                        group.addTask {
+                            guard let (data, resp) = try? await self.session.data(from: url),
+                                  let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                                  let event = try? JSONDecoder().decode(ESPNPGAEvent.self, from: data) else { return nil }
+                            return event
+                        }
+                    }
+                    var collected: [ESPNPGAEvent] = []
+                    for await e in group { if let e { collected.append(e) } }
+                    return collected
+                }
+                let walkedMajors = walked.filter { ev in
+                    guard GolfTiersTournament.matchEventToMajor(eventName: ev.name, year: seasonYear) != nil else { return false }
+                    guard let d = parseGolfTiersDate(ev.date) else { return false }
+                    return d >= lowerBound
+                }
+                if let major = walkedMajors.min(by: { (Int($0.id) ?? .max) < (Int($1.id) ?? .max) }) {
+                    print("[GolfTiers] Found upcoming major \(major.id) (\(major.name)) via sequential-ID walk")
+                    pickedEvent = major
+                }
             }
         }
 
@@ -360,9 +393,23 @@ struct ESPNGolfTiersDataProvider: Sendable {
             throw NSError(domain: "GolfTiers", code: 4, userInfo: [NSLocalizedDescriptionKey: "No competition data in event"])
         }
 
+        // Core-API events (sequential-ID walk) carry competitors as $refs, so
+        // the inline array decodes empty — hydrate the field the same way the
+        // DFS provider does.
+        let fieldCompetitors: [ESPNPGACompetitor]
+        if competition.competitors.isEmpty {
+            print("[GolfTiers] Competitors empty in event payload — hydrating from core API")
+            fieldCompetitors = await ESPNPGADFSSlateProvider().hydrateCompetitors(
+                eventID: event.id, competitionID: competition.id
+            )
+            print("[GolfTiers] Hydrated \(fieldCompetitors.count) competitors from core API")
+        } else {
+            fieldCompetitors = competition.competitors
+        }
+
         let worldRankByName = await fetchOWGRRankings()
 
-        let golfers: [GolfTiersGolfer] = competition.competitors.compactMap { competitor in
+        let golfers: [GolfTiersGolfer] = fieldCompetitors.compactMap { competitor in
             let athleteID = competitor.id
             let name = competitor.athlete.displayName
             let country = competitor.athlete.flag?.alt ?? ""

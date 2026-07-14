@@ -584,7 +584,9 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
         return index
     }
 
-    private func hydrateCompetitors(eventID: String, competitionID: String) async -> [ESPNPGACompetitor] {
+    // Internal (not private): GolfTiersData reuses this to hydrate a major's
+    // field when its event came from the core API (competitors are $refs there).
+    func hydrateCompetitors(eventID: String, competitionID: String) async -> [ESPNPGACompetitor] {
         guard let listURL = URL(string: "https://sports.core.api.espn.com/v2/sports/golf/leagues/pga/events/\(eventID)/competitions/\(competitionID)/competitors?limit=200") else {
             return []
         }
@@ -706,7 +708,17 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
                 return (ev, d)
             }
             .filter { $0.1 >= lowerBound }
-            .sorted { $0.1 < $1.1 }
+            // (date, id) sort — NOT date alone. The Open and its opposite-field
+            // twin Corales share the same start instant, and this list is
+            // collected in task-completion order, so a date-only sort broke the
+            // tie randomly per fetch. This probe is the LAST fallback (it runs
+            // when the scoreboard/date/season paths all fail, which is exactly
+            // what happened on-device) — it picked Corales and the whole slate
+            // followed. Min-id = the marquee event, deterministically.
+            .sorted {
+                if $0.1 != $1.1 { return $0.1 < $1.1 }
+                return (Int($0.0.id) ?? Int.max) < (Int($1.0.id) ?? Int.max)
+            }
         if let (event, eventDate) = upcoming.first {
             print("[GolfDFS] sequential-ID probe: picking \(event.id) (\(event.name)) startDate=\(eventDate)")
             return event
@@ -746,9 +758,16 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
                     guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard?dates=\(dateKey)&_cb=\(cacheBust)") else { return [] }
                     var request = URLRequest(url: url)
                     request.cachePolicy = .reloadIgnoringLocalCacheData
-                    guard let (data, resp) = try? await self.session.data(for: request),
-                          let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-                          let sb = try? JSONDecoder().decode(ESPNPGAScoreboardResponse.self, from: data) else {
+                    guard let (data, resp) = try? await self.session.data(for: request) else {
+                        print("[GolfDFS] date probe \(dateKey): network fail")
+                        return []
+                    }
+                    guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                        print("[GolfDFS] date probe \(dateKey): HTTP \((resp as? HTTPURLResponse)?.statusCode ?? -1)")
+                        return []
+                    }
+                    guard let sb = try? JSONDecoder().decode(ESPNPGAScoreboardResponse.self, from: data) else {
+                        print("[GolfDFS] date probe \(dateKey): decode fail (\(data.count) bytes)")
                         return []
                     }
                     if !sb.events.isEmpty {
