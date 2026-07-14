@@ -4109,6 +4109,18 @@ final class DFSViewModel {
                     print("[PGA-SelfHeal] \(tid): no userEntryRecords, skipping")
                     continue
                 }
+                // An entered event whose server lock time is still in the
+                // FUTURE is not a stale PAST event — it's an upcoming
+                // tournament the slate picker mis-identified (The Open vs its
+                // same-week opposite-field twin Corales). Grading it would
+                // settle a zero score, and the >3d branch below would GHOST a
+                // real entry days before the event tees off.
+                if let serverT = try? await SupabaseService.shared.fetchTournament(
+                    tournamentID: tid, accessToken: token
+                ), serverT.lockTime > Date() {
+                    print("[PGA-SelfHeal] \(tid): server lock \(serverT.lockTime) is in the future — upcoming event, skipping")
+                    continue
+                }
                 // FINALIZE, don't re-grade. The old path WIPED an already-graded
                 // event's result (subtracting its RR), deleted the server rows,
                 // and re-graded from scratch on EVERY session. A PGA event a few
@@ -4379,7 +4391,7 @@ final class DFSViewModel {
                     // and regenerate.
                     let salaryByPID: [String: Int] = Dictionary(players.map { ($0.id, $0.salary) }, uniquingKeysWith: { a, _ in a })
                     let capForCheck = tournament.salaryCap
-                    let isSG = tournament.isSingleGame
+2                    let isSG = tournament.isSingleGame
                     let overCapCount = bots.prefix(100).filter { bot in
                         var total = 0
                         for (idx, pid) in bot.playerIDs.enumerated() {

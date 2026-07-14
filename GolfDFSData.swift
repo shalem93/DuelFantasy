@@ -247,7 +247,9 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
                 }
                 // Find a non-"post" event in the probed scoreboard so we
                 // don't keep adopting last week's finished tournament.
-                if let probeEvent = probeScoreboard.events.first(where: {
+                // primaryEvent (min id) so a two-event week (major +
+                // opposite-field) always resolves to the same tournament.
+                if let probeEvent = primaryEvent(probeScoreboard.events.filter {
                     let s = $0.status.type.state ?? ""
                     return s == "pre" || s == "in"
                 }) {
@@ -545,7 +547,16 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
                     return (ev, d)
                 }
                 .filter { $0.1 >= lowerBound }
-                .sorted { $0.1 < $1.1 }
+                // Tiebreak same-start events by id: The Open and its
+                // opposite-field Corales share the same start instant, and
+                // the task-group dereference above collects in COMPLETION
+                // order — sorting by date alone made this pick random per
+                // fetch (this is the path that adopted Corales on 7/13 and
+                // turned the user's Open entry into a fake LIVE contest).
+                .sorted {
+                    if $0.1 != $1.1 { return $0.1 < $1.1 }
+                    return (Int($0.0.id) ?? Int.max) < (Int($1.0.id) ?? Int.max)
+                }
             if let (event, eventDate) = upcoming.first {
                 print("[GolfDFS] core-events: picking \(event.id) (\(event.name)) startDate=\(eventDate)")
                 return event
@@ -718,14 +729,27 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
         return nil
     }
 
+    /// Deterministic tiebreak for weeks with TWO concurrent events (a major +
+    /// an opposite-field event: The Open 401811957 + Corales 401811958, Scottish
+    /// 401811955 + ISCO 401811956). ESPN assigns the PRIMARY event the lower
+    /// sequential id, so "min id" both selects the marquee tournament and —
+    /// critically — never flips between fetches. A non-deterministic pick
+    /// (array order, task-completion order) made the app adopt The Open on one
+    /// refresh and Corales on the next; the VM's stale-PGA-event logic then
+    /// treated the user's entered Open contest as a PAST event (fake LIVE
+    /// Active Contest card, excluded from Lineups Today).
+    private func primaryEvent(_ events: [ESPNPGAEvent]) -> ESPNPGAEvent? {
+        events.min { (Int($0.id) ?? Int.max) < (Int($1.id) ?? Int.max) }
+    }
+
     /// Pick the current in-progress or next upcoming PGA event
     private func pickActiveEvent(from events: [ESPNPGAEvent]) -> ESPNPGAEvent? {
         // Prefer in-progress events first
-        if let live = events.first(where: { $0.status.type.state == "in" }) {
+        if let live = primaryEvent(events.filter { $0.status.type.state == "in" }) {
             return live
         }
         // Then upcoming (pre) events
-        if let upcoming = events.first(where: { $0.status.type.state == "pre" }) {
+        if let upcoming = primaryEvent(events.filter { $0.status.type.state == "pre" }) {
             return upcoming
         }
         // Then a RECENTLY finished (post) event. Window the recency from the
