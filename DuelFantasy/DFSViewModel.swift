@@ -4391,7 +4391,7 @@ final class DFSViewModel {
                     // and regenerate.
                     let salaryByPID: [String: Int] = Dictionary(players.map { ($0.id, $0.salary) }, uniquingKeysWith: { a, _ in a })
                     let capForCheck = tournament.salaryCap
-2                    let isSG = tournament.isSingleGame
+                    let isSG = tournament.isSingleGame
                     let overCapCount = bots.prefix(100).filter { bot in
                         var total = 0
                         for (idx, pid) in bot.playerIDs.enumerated() {
