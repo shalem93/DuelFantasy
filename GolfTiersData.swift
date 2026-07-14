@@ -292,7 +292,51 @@ struct ESPNGolfTiersDataProvider: Sendable {
 
         let scoreboard = try JSONDecoder().decode(ESPNPGAScoreboardResponse.self, from: data)
 
-        guard let event = pickActiveEvent(from: scoreboard.events) else {
+        var pickedEvent = pickActiveEvent(from: scoreboard.events)
+
+        // The default scoreboard only carries the CURRENT week's events — in a
+        // major's pick window it can still be showing LAST week's finished
+        // tournaments while the major's full field is already published on the
+        // date-targeted scoreboard (The Open's 156 players were up 2+ days out
+        // while the default board still listed the Scottish Open/ISCO, leaving
+        // Golf Tiers stuck on "Signups will open when the field is announced").
+        // If the default pick isn't an upcoming/live MAJOR, probe forward for
+        // one. Regular Tour weeks find no major and keep the default pick, so
+        // non-major behavior is unchanged. min-id tiebreak matches the DFS
+        // provider: never adopt the opposite-field event (Corales) over the
+        // major it shares the week with.
+        let seasonYear = Calendar.current.component(.year, from: Date())
+        let pickedIsUpcomingMajor: Bool = {
+            guard let e = pickedEvent else { return false }
+            guard (e.status.type.state ?? "") != "post" else { return false }
+            return GolfTiersTournament.matchEventToMajor(eventName: e.name, year: seasonYear) != nil
+        }()
+        if !pickedIsUpcomingMajor {
+            let df = DateFormatter()
+            df.dateFormat = "yyyyMMdd"
+            let cal = Calendar(identifier: .gregorian)
+            for offset in 0..<14 {
+                guard let probeDate = cal.date(byAdding: .day, value: offset, to: Date()),
+                      let probeURL = URL(string: "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard?dates=\(df.string(from: probeDate))"),
+                      let (probeData, probeResp) = try? await session.data(from: probeURL),
+                      let probeHTTP = probeResp as? HTTPURLResponse, (200..<300).contains(probeHTTP.statusCode),
+                      let probeScoreboard = try? JSONDecoder().decode(ESPNPGAScoreboardResponse.self, from: probeData) else {
+                    continue
+                }
+                let majorCandidates = probeScoreboard.events.filter {
+                    let s = $0.status.type.state ?? ""
+                    guard s == "pre" || s == "in" else { return false }
+                    return GolfTiersTournament.matchEventToMajor(eventName: $0.name, year: seasonYear) != nil
+                }
+                if let major = majorCandidates.min(by: { (Int($0.id) ?? .max) < (Int($1.id) ?? .max) }) {
+                    print("[GolfTiers] Found upcoming major \(major.id) (\(major.name)) via date probe +\(offset)d")
+                    pickedEvent = major
+                    break
+                }
+            }
+        }
+
+        guard let event = pickedEvent else {
             throw NSError(domain: "GolfTiers", code: 3, userInfo: [NSLocalizedDescriptionKey: "No active PGA Tour event found"])
         }
 
@@ -512,9 +556,17 @@ struct ESPNGolfTiersDataProvider: Sendable {
     // MARK: Private Helpers
 
     private func pickActiveEvent(from events: [ESPNPGAEvent]) -> ESPNPGAEvent? {
-        if let live = events.first(where: { $0.status.type.state == "in" }) { return live }
-        if let upcoming = events.first(where: { $0.status.type.state == "pre" }) { return upcoming }
-        if let finished = events.first(where: { $0.status.type.state == "post" }) { return finished }
+        // min-id per tier: on a two-event week (major + opposite-field, e.g.
+        // The Open + Corales) ESPN gives the marquee event the lower
+        // sequential id — array order isn't guaranteed, and a flip-flopping
+        // pick re-binds the tiers tournament to the wrong event.
+        func best(_ state: String) -> ESPNPGAEvent? {
+            events.filter { $0.status.type.state == state }
+                .min { (Int($0.id) ?? .max) < (Int($1.id) ?? .max) }
+        }
+        if let live = best("in") { return live }
+        if let upcoming = best("pre") { return upcoming }
+        if let finished = best("post") { return finished }
         return events.first
     }
 

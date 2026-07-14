@@ -34,12 +34,18 @@ enum SoccerLeague: String, Sendable {
     /// Substring matched against RG's slate `name` field to scope salary
     /// and confirmed-starter lookups to this league only. RG names its
     /// soccer slates with the competition in parens (e.g. "FIFA WC ESP
-    /// vs CPV (WC) ...", "Premier League ARS vs CHE (EPL)").
+    /// vs CPV (WC) ...", "Premier League ARS vs CHE (EPL)"). Matched with
+    /// `contains`, so the closing paren is deliberately OMITTED: RG also
+    /// names slates with qualifiers inside the parens — the WC semifinal
+    /// classic slate was "2026-07-14 3:00pm (WC Tue-Wed)", which "(WC)"
+    /// failed to match, so the salary fetch came back empty and the whole
+    /// slate threw "Waiting for DraftKings" (lobby showed No Fixtures
+    /// Today with Spain-France <24h out).
     var rgSlateNameFilter: String {
         switch self {
-        case .epl: return "(EPL)"
-        case .ucl: return "(UCL)"
-        case .worldCup: return "(WC)"
+        case .epl: return "(EPL"
+        case .ucl: return "(UCL"
+        case .worldCup: return "(WC"
         }
     }
 }

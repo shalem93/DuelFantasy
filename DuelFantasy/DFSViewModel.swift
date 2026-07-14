@@ -4175,6 +4175,19 @@ final class DFSViewModel {
         // self-heal above is the only work to do this cycle — bail here.
         guard var tournament else { return }
 
+        // PGA: never score a contest against a slate from a DIFFERENT event.
+        // During the weekly rotation window (last week's finished event still
+        // in its settle-grace period / ESPN not yet serving the new one), the
+        // loaded slate's score snapshot belongs to the OLD event — scoring the
+        // new event's entries against it marked every golfer DNP "Final 0.0"
+        // and flagged the whole contest Final two days before the first tee
+        // (The Open, 7/14). Skip scoring until the slate IS this event.
+        if sport == "PGA", let activeEvent = slateGames.first?.id, !activeEvent.isEmpty,
+           pgaBaseEventID(from: tournament.id) != activeEvent {
+            print("[DFS-PGA] refreshLive: \(tournament.id) is not the loaded slate's event (\(activeEvent)) — skipping live scoring")
+            return
+        }
+
         // NHL: pick up starting-goalie announcements that landed after the
         // slate loaded (throttled; no-op for other sports / once marked).
         await reprobeNHLStartingGoaliesIfNeeded()
