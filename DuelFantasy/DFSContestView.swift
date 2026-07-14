@@ -505,8 +505,11 @@ struct DFSContestView: View {
                 // Stop only once the slate is truly loaded — a non-nil
                 // tournament with an empty player pool (synthetic/instance
                 // stub from a saved entry) still needs the real fetch, else
-                // contest details shimmer forever.
-                let poolLoaded = vm.tournament != nil && !(vm.players.isEmpty && vm.singleGamePlayers.isEmpty)
+                // contest details shimmer forever. slateGames must be loaded
+                // too: stub players injected from the user's own entry made a
+                // failed PGA load read as "loaded" (6 players, 0 games).
+                let poolLoaded = vm.tournament != nil && !vm.slateGames.isEmpty
+                    && !(vm.players.isEmpty && vm.singleGamePlayers.isEmpty)
                 if poolLoaded { return }
                 if !vm.isLoading {
                     await vm.loadSlateIfNeeded()

@@ -2274,7 +2274,10 @@ final class DFSViewModel {
                                 if let n = record?.totalEntries, n > 0 { return n }
                                 return Self.entryCountFromTournamentID(tid)
                             }(),
-                            lineupSize: single ? 6 : 8,
+                            // Golf lineups are 6, not the team-sport 8 — an
+                            // 8-size PGA stub made every saved 6-player bot
+                            // read as "wrong shape" and the builder demand 8.
+                            lineupSize: single || sport == "PGA" ? 6 : 8,
                             salaryCap: 50000,
                             isSingleGame: single,
                             tournamentType: single ? .singleGame : .main
@@ -2299,13 +2302,16 @@ final class DFSViewModel {
             print("[DFS-\(sport)] loadSlate: previous attempt stuck for \(Int(Date().timeIntervalSince(started)))s — taking over")
         }
         // Skip a non-forced reload only when the slate is genuinely loaded —
-        // i.e. there's a tournament AND a player pool. A non-nil `tournament`
-        // alone isn't enough: it can be a synthetic stub (selectTournament) or
-        // an instance clone (ensureInstanceTournamentsExist) created from a
-        // saved entry while the real fetch never completed (timed out, was
-        // cancelled). In that state `players` is empty and every contest
-        // detail sits in shimmer forever, so we must still attempt the load.
-        if !force && tournament != nil && !(players.isEmpty && singleGamePlayers.isEmpty) { return }
+        // i.e. there's a tournament AND a player pool AND slate games. A
+        // non-nil `tournament` alone isn't enough: it can be a synthetic stub
+        // (selectTournament / fetchEntriesIfNeeded) created from a saved entry
+        // while the real fetch never completed. The slateGames check matters
+        // too: stub PLAYERS can get injected into `players` (missing-name
+        // resolution fills the user's own lineup in), which made a failed PGA
+        // session read as "loaded" — 6 stub players, no games — so the real
+        // slate was never fetched again all session.
+        if !force && tournament != nil && !slateGames.isEmpty
+            && !(players.isEmpty && singleGamePlayers.isEmpty) { return }
 
         isLoading = true
         slateLoadStartedAt = Date()
@@ -4235,6 +4241,16 @@ final class DFSViewModel {
             print("[DFS-PGA] refreshLive: \(tournament.id) is not the loaded slate's event (\(activeEvent)) — skipping live scoring")
             return
         }
+        // PGA: with NO slate loaded at all, the "tournament" is a synthesized
+        // stub and `players` holds only stubs resolved from the user's own
+        // entry. Running the bot machinery in that state generated 1999
+        // garbage bots FROM THE USER'S 6 GOLFERS and saved them over the
+        // contest's real server bot field (7/14). Nothing downstream of here
+        // is valid without a slate — bail until one loads.
+        if sport == "PGA", slateGames.isEmpty {
+            print("[DFS-PGA] refreshLive: no slate loaded — skipping scoring/bot generation for \(tournament.id)")
+            return
+        }
 
         // NHL: pick up starting-goalie announcements that landed after the
         // slate loaded (throttled; no-op for other sports / once marked).
@@ -5087,7 +5103,17 @@ final class DFSViewModel {
             // which blocked persisting every post-lock heal — the regenerated
             // field was thrown away, so each app launch re-downloaded the bad
             // bots, displayed them for ~15s, re-healed in memory, and repeated.
-            if (savedBots == nil || needsResave) && (!tournamentIsLocked || needsResave), let token = accessToken {
+            // Never persist a bot field built from a COLLAPSED pool — a failed
+            // slate load can leave `players` holding only stubs resolved from
+            // the user's own lineup, and bots generated from that overwrote
+            // The Open's real 1999-bot server field with garbage (7/14).
+            // Single-game pools are legitimately small; main slates never are.
+            let poolAdequateForSave = tournament.isSingleGame
+                || activePlayers.count >= tournament.lineupSize * 2
+            if !poolAdequateForSave {
+                print("[DFS-\(sport)] NOT saving bot field for \(tournament.id) — pool collapsed (\(activePlayers.count) players for \(tournament.lineupSize)-player lineups)")
+            }
+            if (savedBots == nil || needsResave) && (!tournamentIsLocked || needsResave) && poolAdequateForSave, let token = accessToken {
                 let tid = tournament.id
                 let salaryLookup = Dictionary(activePlayers.map { ($0.id, $0.salary) }, uniquingKeysWith: { a, _ in a })
                 let botEntriesToSave = fieldEntries.filter { !$0.isCurrentUser && !$0.isRealUser }.map { entry -> BotFieldEntry in
