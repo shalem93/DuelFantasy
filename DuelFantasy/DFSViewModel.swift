@@ -6566,37 +6566,45 @@ final class DFSViewModel {
                     lineupPlayerNames: namesList,
                     lineupNumber: finalLineupNumber
                 )
-                if isEditing {
-                    // Replace the existing entry in the local cache
-                    if var entries = userEntryRecords[resolvedTournamentID] {
-                        if let idx = entries.firstIndex(where: { $0.lineupNumber == finalLineupNumber }) {
-                            entries[idx] = newEntry
-                        } else {
-                            entries.append(newEntry)
-                        }
-                        userEntryRecords[resolvedTournamentID] = entries
+                // Replace-by-lineupNumber for EVERY submit path, not just
+                // edits. The server upserts on (tournament, user, lineup_number),
+                // and a concurrent entries sync (35s poll / foreground refresh)
+                // can land the SERVER copy of this row between `submitEntry`
+                // returning and this local append — a blind append then leaves
+                // two records for the same lineup number (different ids) and
+                // the lobby showed every lineup twice until a force-quit.
+                if var entries = userEntryRecords[resolvedTournamentID] {
+                    if let idx = entries.firstIndex(where: { $0.lineupNumber == finalLineupNumber }) {
+                        entries[idx] = newEntry
+                    } else {
+                        entries.append(newEntry)
                     }
-                } else if userEntryRecords[resolvedTournamentID] != nil {
-                    userEntryRecords[resolvedTournamentID]!.append(newEntry)
+                    userEntryRecords[resolvedTournamentID] = entries
                 } else {
                     userEntryRecords[resolvedTournamentID] = [newEntry]
                 }
                 // Update the local tournament reference if we got routed to an instance
                 if resolvedTournamentID != tournament.id {
-                    let instanceTournament = DFSTournament(
-                        id: resolvedTournamentID,
-                        title: tournament.title,
-                        league: tournament.league,
-                        entryCount: tournament.entryCount,
-                        lineupSize: tournament.lineupSize,
-                        salaryCap: tournament.salaryCap,
-                        rosterSlots: tournament.rosterSlots,
-                        isSingleGame: tournament.isSingleGame,
-                        tournamentType: tournament.tournamentType,
-                        gameID: tournament.gameID,
-                        entryFee: tournament.entryFee
-                    )
-                    tournaments.append(instanceTournament)
+                    // Guarded append: re-routing to an instance the array
+                    // already holds (resubmit/edit) must not add a duplicate
+                    // tournament object — a duplicate id makes every list that
+                    // iterates `tournaments` render that contest's cards twice.
+                    if !tournaments.contains(where: { $0.id == resolvedTournamentID }) {
+                        let instanceTournament = DFSTournament(
+                            id: resolvedTournamentID,
+                            title: tournament.title,
+                            league: tournament.league,
+                            entryCount: tournament.entryCount,
+                            lineupSize: tournament.lineupSize,
+                            salaryCap: tournament.salaryCap,
+                            rosterSlots: tournament.rosterSlots,
+                            isSingleGame: tournament.isSingleGame,
+                            tournamentType: tournament.tournamentType,
+                            gameID: tournament.gameID,
+                            entryFee: tournament.entryFee
+                        )
+                        tournaments.append(instanceTournament)
+                    }
                     activeTournamentID = resolvedTournamentID
                     // Reset field so it rebuilds with the correct instance's entries
                     fieldGenerated = false

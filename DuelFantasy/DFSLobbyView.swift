@@ -558,6 +558,10 @@ struct DFSLobbyView: View {
 
     private var enteredLineupsSection: some View {
         // Only show unlocked (upcoming) entries — locked ones already appear in Active Contests
+        // Dedup by id: a tournament object accidentally appended twice (edit
+        // re-routing, sync races) would render every one of its lineup cards
+        // twice until a force-quit rebuilt state from the server.
+        var seenTournamentIDs = Set<String>()
         let upcomingTournaments = viewModel.tournaments.filter {
             viewModel.enteredTournamentIDs.contains($0.id)
                 && !viewModel.isTournamentLocked($0)
@@ -565,12 +569,34 @@ struct DFSLobbyView: View {
                 // results, never in "Upcoming Lineups" — defends against a stale
                 // lock time leaving a finished event editable here.
                 && !viewModel.isTournamentFinished($0.id)
+                && seenTournamentIDs.insert($0.id).inserted
         }
-        // Build a global lineup number for each entry across all instances of the same base type.
-        // Group entries by base tournament ID, sort by submission time, assign sequential numbers.
+        // Dedup each tournament's records by lineup number, keeping the
+        // LATEST submission. A server-entries sync racing a submit/edit can
+        // leave the SERVER copy and the LOCAL copy of the same lineup in
+        // userEntryRecords (different record ids, same lineup number) — which
+        // doubled every card here until a force-quit rebuilt from the server.
+        let dedupedEntriesByTID: [String: [DFSEntryRecord]] = viewModel.userEntryRecords.mapValues { raw in
+            var byNumber: [Int: DFSEntryRecord] = [:]
+            var unnumbered: [DFSEntryRecord] = []
+            for entry in raw {
+                guard let ln = entry.lineupNumber else { unnumbered.append(entry); continue }
+                if let existing = byNumber[ln] {
+                    if (entry.submittedAt ?? .distantPast) > (existing.submittedAt ?? .distantPast) {
+                        byNumber[ln] = entry
+                    }
+                } else {
+                    byNumber[ln] = entry
+                }
+            }
+            return byNumber.keys.sorted().compactMap { byNumber[$0] } + unnumbered
+        }
+        // Build a global lineup number for each entry across all instances of
+        // the same base type — from the DEDUPED records, so a duplicate pair
+        // can't inflate the numbering.
         let globalLineupNumbers: [String: Int] = {
             var byBase: [String: [(entry: DFSEntryRecord, tournamentID: String)]] = [:]
-            for (tid, entries) in viewModel.userEntryRecords {
+            for (tid, entries) in dedupedEntriesByTID {
                 let base = viewModel.baseTournamentID(tid)
                 for entry in entries {
                     byBase[base, default: []].append((entry, tid))
@@ -592,7 +618,7 @@ struct DFSLobbyView: View {
                     .font(.headline)
 
                 ForEach(upcomingTournaments, id: \.id) { tournament in
-                    let entries = viewModel.userEntryRecords[tournament.id] ?? []
+                    let entries = dedupedEntriesByTID[tournament.id] ?? []
                     ForEach(Array(entries.enumerated()), id: \.offset) { idx, entry in
                         let num = globalLineupNumbers[entry.id] ?? entry.lineupNumber ?? (idx + 1)
                         enteredLineupCard(tournament: tournament, entry: entry, lineupNumber: num)
