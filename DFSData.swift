@@ -3309,14 +3309,16 @@ struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
             }
         }()
 
-        // MLB never has a single-game-only slate (always many games per day)
+        // A 1-game MLB day (All-Star break, weather wipeouts) gets ONLY the
+        // showdown contest, same as every other sport — a 10-player classic
+        // slate drawn from two teams is redundant with the single game.
         let (tournaments, sgPlayers) = buildMultiTournamentSlate(
             baseID: tournamentID,
             league: "MLB",
             mainSalaryCap: 50000,
             mainLineupSize: 10,
             mainRosterSlots: ["P", "P", "C", "1B", "2B", "3B", "SS", "OF", "OF", "OF"],
-            isSingleGameSlate: false,
+            isSingleGameSlate: includedGames.count == 1,
             includedGames: includedGames,
             mainPlayers: sortedPlayersFiltered,
             perGameShowdownSalaries: mlbPerGameShowdownSalaries.isEmpty ? nil : mlbPerGameShowdownSalaries
