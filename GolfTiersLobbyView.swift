@@ -40,6 +40,9 @@ struct GolfTiersLobbyView: View {
                         playerList
                         submitButton
                         groupsSection
+                        if !viewModel.settledTournaments.isEmpty {
+                            majorResultsSection
+                        }
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 8)
@@ -81,9 +84,10 @@ struct GolfTiersLobbyView: View {
                 await viewModel.recheckStatusIfNeeded()
             }
             await viewModel.loadMyGroups()
-            if viewModel.isSettled {
-                await viewModel.loadSettledHistory()
-            }
+            // Always load — past major results show in the OPEN lobby too
+            // (previously only the settled view could reach them, so history
+            // was invisible during a live pick window).
+            await viewModel.loadSettledHistory()
         }
         .sheet(isPresented: $showCreateGroup) {
             createGroupSheet
@@ -571,6 +575,46 @@ struct GolfTiersLobbyView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    // MARK: - Past Major Results
+
+    /// Shared "MAJOR RESULTS" history list — shown in the settled view AND at
+    /// the bottom of the open pick lobby, so past tiers results are reachable
+    /// year-round (they used to be visible only once the current major
+    /// settled).
+    private var majorResultsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "arrow.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text("MAJOR RESULTS")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(viewModel.settledTournaments.count) major\(viewModel.settledTournaments.count == 1 ? "" : "s")")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+
+            VStack(spacing: 0) {
+                ForEach(Array(viewModel.settledTournaments.enumerated()), id: \.element.id) { index, tournament in
+                    NavigationLink {
+                        GolfTiersSettledDetailView(viewModel: viewModel, tournamentRecord: tournament)
+                    } label: {
+                        settledHistoryRow(tournament)
+                    }
+                    .buttonStyle(.plain)
+                    if index < viewModel.settledTournaments.count - 1 {
+                        Divider().padding(.leading, 40)
+                    }
+                }
+            }
+            .background(.white)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .shadow(color: .black.opacity(0.05), radius: 4, y: 2)
+        }
+    }
+
     // MARK: - Settled View (History)
 
     private var settledView: some View {
@@ -589,37 +633,7 @@ struct GolfTiersLobbyView: View {
 
                 // ── Past major results ──
                 if !viewModel.settledTournaments.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Image(systemName: "arrow.down")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                            Text("MAJOR RESULTS")
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Text("\(viewModel.settledTournaments.count) major\(viewModel.settledTournaments.count == 1 ? "" : "s")")
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                        }
-
-                        VStack(spacing: 0) {
-                            ForEach(Array(viewModel.settledTournaments.enumerated()), id: \.element.id) { index, tournament in
-                                NavigationLink {
-                                    GolfTiersSettledDetailView(viewModel: viewModel, tournamentRecord: tournament)
-                                } label: {
-                                    settledHistoryRow(tournament)
-                                }
-                                .buttonStyle(.plain)
-                                if index < viewModel.settledTournaments.count - 1 {
-                                    Divider().padding(.leading, 40)
-                                }
-                            }
-                        }
-                        .background(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .shadow(color: .black.opacity(0.05), radius: 4, y: 2)
-                    }
+                    majorResultsSection
                 } else if viewModel.isLoadingHistory {
                     VStack(spacing: 8) {
                         ProgressView().tint(.secondary)
