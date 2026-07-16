@@ -1438,3 +1438,10 @@ alter table public.pickem_picks add column if not exists winner_team text;
 -- Winner captured at settle time so restored pick'em history can show it on
 -- LOSSES too (result alone only recovers the winner for wins).
 alter table public.pickem_picks add column if not exists winner_team text;
+
+-- Leaderboard aggregation reads only user rows from this bot-heavy table
+-- (2000 bot rows per contest); a partial index keeps the query off the
+-- statement timeout as the table grows.
+create index if not exists idx_dfs_results_user_rows
+  on public.dfs_tournament_results (created_at desc)
+  where is_current_user;

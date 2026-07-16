@@ -1903,7 +1903,13 @@ final class SupabaseService {
         components?.queryItems = [
             URLQueryItem(name: "is_current_user", value: "eq.true"),
             URLQueryItem(name: "created_at", value: "gte.\(sinceISO)"),
-            URLQueryItem(name: "select", value: "user_id,rr_delta,tournament_id,entry_name,created_at")
+            URLQueryItem(name: "select", value: "user_id,rr_delta,tournament_id,entry_name,created_at"),
+            // The unbounded scan over this table (2000 bot rows per contest)
+            // hits the statement timeout — bounding the query keeps the
+            // planner honest. Newest-first so a hit on the cap drops the
+            // OLDEST rows.
+            URLQueryItem(name: "order", value: "created_at.desc"),
+            URLQueryItem(name: "limit", value: "5000")
         ]
         guard let url = components?.url else { throw URLError(.badURL) }
         return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
