@@ -2353,7 +2353,32 @@ struct ContentView: View {
                 userStats[pick.userID] = stats
             }
 
+            // Aggregate DFS the same way the home-screen pill derives its
+            // total — raw row sums ran ~2x high (profile +3600 vs home +1800):
+            //  1. Re-settles INSERT the user's row again with a fresh UUID id,
+            //     so the same lineup's RR appears multiple times. Dedupe on
+            //     (user, tournament, lineup) keeping the LATEST row.
+            //  2. Fantasy modes (tiers/brackets) share dfs_tournament_results
+            //     but aren't DFS RR — drop their tids (incl. #group- rows).
+            //  3. Admin-excluded contests are filtered from the current
+            //     user's local history — apply the same exclusions here.
+            let excludedTids = DFSViewModel.excludedTournamentIDs
+            var latestByKey: [String: AllUserDFSResult] = [:]
             for dfs in allDFS {
+                let tid = dfs.tournamentID ?? UUID().uuidString
+                let baseTid = tid.components(separatedBy: "#group-").first ?? tid
+                guard !DFSViewModel.isFantasyModeTid(baseTid), !tid.contains("#group-") else { continue }
+                guard !excludedTids.contains(tid) else { continue }
+                let key = "\(dfs.userID)|\(tid)|\(dfs.lineupNumber ?? 0)"
+                if let existing = latestByKey[key] {
+                    if (dfs.createdAt ?? .distantPast) > (existing.createdAt ?? .distantPast) {
+                        latestByKey[key] = dfs
+                    }
+                } else {
+                    latestByKey[key] = dfs
+                }
+            }
+            for dfs in latestByKey.values {
                 var stats = userStats[dfs.userID, default: (rr: 0, wins: 0, losses: 0)]
                 stats.rr += dfs.rrDelta
                 userStats[dfs.userID] = stats

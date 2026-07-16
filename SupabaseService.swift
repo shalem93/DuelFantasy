@@ -224,10 +224,20 @@ struct AllUserSettledPick: Codable {
 struct AllUserDFSResult: Codable {
     let userID: String
     let rrDelta: Int
+    // For leaderboard aggregation hygiene: re-settles INSERT the user's row
+    // again (fresh UUID id), so summing raw rows double-counts — dedupe on
+    // (user, tournament, lineup) keeping the latest, and drop fantasy-mode
+    // tids (tiers/brackets share this table but aren't DFS RR).
+    let tournamentID: String?
+    let lineupNumber: Int?
+    let createdAt: Date?
 
     enum CodingKeys: String, CodingKey {
         case userID = "user_id"
         case rrDelta = "rr_delta"
+        case tournamentID = "tournament_id"
+        case lineupNumber = "lineup_number"
+        case createdAt = "created_at"
     }
 }
 
@@ -1881,7 +1891,7 @@ final class SupabaseService {
         components?.queryItems = [
             URLQueryItem(name: "is_current_user", value: "eq.true"),
             URLQueryItem(name: "created_at", value: "gte.\(sinceISO)"),
-            URLQueryItem(name: "select", value: "user_id,rr_delta")
+            URLQueryItem(name: "select", value: "user_id,rr_delta,tournament_id,lineup_number,created_at")
         ]
         guard let url = components?.url else { throw URLError(.badURL) }
         return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
