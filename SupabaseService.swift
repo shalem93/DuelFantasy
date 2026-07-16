@@ -1803,7 +1803,21 @@ final class SupabaseService {
         return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
     }
 
+    /// 5-minute in-memory cache for tournament metadata. This is called from
+    /// the 60s sync loop, the Fantasy hub, and every profile open — all
+    /// wanting the same 200 rows. Tournament titles/lock times change rarely;
+    /// re-fetching per caller per minute was pure server load.
+    private static let recentTournamentsCacheLock = NSLock()
+    nonisolated(unsafe) private static var recentTournamentsCache: (fetchedAt: Date, records: [DFSTournamentRecord])?
+
     func fetchRecentTournaments(limit: Int = 200, accessToken: String) async throws -> [DFSTournamentRecord] {
+        Self.recentTournamentsCacheLock.lock()
+        let cached = Self.recentTournamentsCache
+        Self.recentTournamentsCacheLock.unlock()
+        if let cached, Date().timeIntervalSince(cached.fetchedAt) < 300, cached.records.count >= min(limit, 200) {
+            return Array(cached.records.prefix(limit))
+        }
+
         var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/dfs_tournaments"), resolvingAgainstBaseURL: false)
         components?.queryItems = [
             // METADATA ONLY — never `*`. Each row's bot_field is a ~2000-lineup
@@ -1815,7 +1829,11 @@ final class SupabaseService {
             URLQueryItem(name: "limit", value: "\(limit)")
         ]
         guard let url = components?.url else { throw URLError(.badURL) }
-        return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+        let records: [DFSTournamentRecord] = try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+        Self.recentTournamentsCacheLock.lock()
+        Self.recentTournamentsCache = (Date(), records)
+        Self.recentTournamentsCacheLock.unlock()
+        return records
     }
 
     func fetchProfiles(userIDs: [String], accessToken: String) async throws -> [DFSProfileRecord] {

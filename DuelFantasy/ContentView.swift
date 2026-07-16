@@ -410,7 +410,10 @@ struct ContentView: View {
     @State private var isRunningLeaderboardLoad: Bool = false
     @State private var hasPerformedInitialSync: Bool = false
     @State private var needsRRRecompute: Bool = false
-    @State private var serverPickemRRDelta: Int = 0
+    // Persisted (not @State): the home-screen "Pick'em +N" pill reads this,
+    // and it used to sit at +0 from launch until the first successful
+    // settled-picks fetch — or indefinitely during a server outage.
+    @AppStorage("serverPickemRRDelta") private var serverPickemRRDelta: Int = 0
 
     // Time-filtered leaderboard
     enum LeaderboardTimeFrame: String, CaseIterable {
@@ -3979,8 +3982,12 @@ struct ContentView: View {
                 offset += page.count
             }
 
-            // Update Pick'em RR delta from server settled picks (used by home screen breakdown)
-            serverPickemRRDelta = allSettledPicks.reduce(0) { $0 + $1.rrDelta }
+            // Update Pick'em RR delta from server settled picks (used by home
+            // screen breakdown). NEVER on an empty fetch: a timeout/outage
+            // returns zero pages and used to zero the pill ("Pick'em +0").
+            if !allSettledPicks.isEmpty {
+                serverPickemRRDelta = allSettledPicks.reduce(0) { $0 + $1.rrDelta }
+            }
 
             // Recompute rrScore from Pick'em server data + local DFS history.
             // Server Pick'em records are authoritative for picks.
