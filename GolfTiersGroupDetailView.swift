@@ -211,35 +211,69 @@ struct GolfTiersGroupDetailView: View {
                 VStack(spacing: 0) {
                     ForEach(entries) { entry in
                         DisclosureGroup {
+                            // Same row anatomy as the main leaderboard's
+                            // expanded entry: colored tier chip, MC/WD badge,
+                            // counting check, per-round scores, to-par.
                             VStack(spacing: 4) {
                                 ForEach(entry.picks.sorted(by: { $0.tier < $1.tier }), id: \.playerID) { pick in
+                                    let pickScore = entry.pickScores[pick.playerID] ?? viewModel.liveGolferScores[pick.playerID] ?? 0
+                                    let isCounting = entry.countingPicks.contains(pick.playerID)
+                                    let golferStatus = viewModel.liveGolferStatuses[pick.playerID] ?? .active
+                                    let rounds = viewModel.liveGolferRounds[pick.playerID] ?? []
                                     HStack(spacing: 10) {
                                         Text("T\(pick.tier)")
-                                            .font(.system(size: 9, weight: .bold))
+                                            .font(.system(size: 11, weight: .bold))
                                             .foregroundStyle(.white)
-                                            .frame(width: 26, height: 18)
-                                            .background(darkGreen.opacity(0.8))
-                                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                                            .frame(width: 28, height: 28)
+                                            .background(tierColor(pick.tier))
+                                            .clipShape(RoundedRectangle(cornerRadius: 6))
                                         VStack(alignment: .leading, spacing: 1) {
-                                            Text(pick.playerName)
-                                                .font(.caption.weight(.medium))
-                                                .lineLimit(1)
-                                            Text(pick.playerCountry)
-                                                .font(.system(size: 9))
-                                                .foregroundStyle(.secondary)
-                                        }
-                                        if entry.countingPicks.contains(pick.playerID) {
-                                            Text("✓")
-                                                .font(.system(size: 9, weight: .bold))
-                                                .foregroundStyle(darkGreen)
+                                            HStack(spacing: 4) {
+                                                Text(pick.playerName)
+                                                    .font(.subheadline.weight(.semibold))
+                                                    .foregroundStyle(isCounting ? .primary : .secondary)
+                                                    .lineLimit(1)
+                                                if golferStatus == .cut {
+                                                    Text("MC")
+                                                        .font(.system(size: 8, weight: .heavy))
+                                                        .padding(.horizontal, 4)
+                                                        .padding(.vertical, 1)
+                                                        .background(Color.red.opacity(0.15))
+                                                        .foregroundStyle(.red)
+                                                        .clipShape(Capsule())
+                                                } else if golferStatus == .withdrawn {
+                                                    Text("WD")
+                                                        .font(.system(size: 8, weight: .heavy))
+                                                        .padding(.horizontal, 4)
+                                                        .padding(.vertical, 1)
+                                                        .background(Color.orange.opacity(0.15))
+                                                        .foregroundStyle(.orange)
+                                                        .clipShape(Capsule())
+                                                }
+                                                if isCounting {
+                                                    Image(systemName: "checkmark.circle.fill")
+                                                        .font(.system(size: 10))
+                                                        .foregroundStyle(darkGreen)
+                                                }
+                                            }
+                                            HStack(spacing: 4) {
+                                                Text(pick.playerCountry)
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                                ForEach(Array(rounds.enumerated()), id: \.offset) { _, roundScore in
+                                                    Text(roundScore > 0 ? "\(roundScore)" : "-")
+                                                        .font(.system(size: 10, weight: .medium).monospacedDigit())
+                                                        .foregroundStyle(.secondary)
+                                                }
+                                            }
                                         }
                                         Spacer()
-                                        let score = entry.pickScores[pick.playerID] ?? 0
-                                        Text(GolfTiersEngine.scoreToParDisplay(score))
-                                            .font(.caption.weight(.semibold).monospacedDigit())
-                                            .foregroundStyle(score < 0 ? .red : .secondary)
+                                        Text(GolfTiersEngine.scoreToParDisplay(pickScore))
+                                            .font(.subheadline.weight(.bold).monospacedDigit())
+                                            .foregroundStyle(isCounting ? (pickScore < 0 ? Color(red: 0.85, green: 0.15, blue: 0.15) : .primary) : .secondary)
                                     }
-                                    .padding(.vertical, 2)
+                                    .padding(.vertical, 4)
+                                    .opacity(isCounting ? 1.0 : 0.5)
                                 }
                                 Text("✓ = counting toward best 4 of 6")
                                     .font(.system(size: 9))
@@ -332,6 +366,19 @@ struct GolfTiersGroupDetailView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 10))
                 }
             }
+        }
+    }
+
+    // Mirrors GolfTiersLiveView so group rows match the main leaderboard.
+    private func tierColor(_ tier: Int) -> Color {
+        switch tier {
+        case 1: return Color(red: 0.85, green: 0.65, blue: 0.13)  // Gold
+        case 2: return Color(red: 0.60, green: 0.60, blue: 0.65)  // Silver
+        case 3: return Color(red: 0.70, green: 0.45, blue: 0.20)  // Bronze
+        case 4: return Color(red: 0.30, green: 0.50, blue: 0.75)  // Blue
+        case 5: return Color(red: 0.45, green: 0.65, blue: 0.45)  // Green
+        case 6: return Color(red: 0.55, green: 0.45, blue: 0.65)  // Purple
+        default: return .secondary
         }
     }
 }
