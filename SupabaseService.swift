@@ -1806,7 +1806,11 @@ final class SupabaseService {
     func fetchRecentTournaments(limit: Int = 200, accessToken: String) async throws -> [DFSTournamentRecord] {
         var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/dfs_tournaments"), resolvingAgainstBaseURL: false)
         components?.queryItems = [
-            URLQueryItem(name: "select", value: "*"),
+            // METADATA ONLY — never `*`. Each row's bot_field is a ~2000-lineup
+            // JSON blob (several MB); selecting it across 200 tournaments hit
+            // the gateway timeout (Cloudflare 522) and left every caller
+            // (other-user profiles, Fantasy hub past results) spinning forever.
+            URLQueryItem(name: "select", value: "id,title,league,lock_time,is_settled,total_entries,is_single_game"),
             URLQueryItem(name: "order", value: "lock_time.desc"),
             URLQueryItem(name: "limit", value: "\(limit)")
         ]

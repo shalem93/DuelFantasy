@@ -1445,3 +1445,9 @@ alter table public.pickem_picks add column if not exists winner_team text;
 create index if not exists idx_dfs_results_user_rows
   on public.dfs_tournament_results (created_at desc)
   where is_current_user;
+
+-- fetchRecentTournaments orders by lock_time over a table whose rows carry
+-- multi-MB bot_field blobs; without this index the sort scans everything and
+-- hits the gateway timeout.
+create index if not exists idx_dfs_tournaments_lock_time
+  on public.dfs_tournaments (lock_time desc);

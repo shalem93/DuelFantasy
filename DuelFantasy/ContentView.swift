@@ -1787,7 +1787,7 @@ struct ContentView: View {
                                         .frame(width: 65, alignment: .trailing)
                                 }
                                 Text(leaderboardTimeFrame == .allTime ? "RR" : "+/−")
-                                    .frame(width: 50, alignment: .trailing)
+                                    .frame(width: 70, alignment: .trailing)
                                 Image(systemName: "chevron.right")
                                     .font(.caption2)
                                     .opacity(0)
@@ -1818,12 +1818,16 @@ struct ContentView: View {
                                         if leaderboardTimeFrame == .allTime {
                                             Text("\(friend.rrScore)")
                                                 .font(.subheadline.weight(.semibold).monospacedDigit())
-                                                .frame(width: 50, alignment: .trailing)
+                                                .lineLimit(1)
+                                                .minimumScaleFactor(0.7)
+                                                .frame(width: 70, alignment: .trailing)
                                         } else {
                                             Text(friend.rrScore >= 0 ? "+\(friend.rrScore)" : "\(friend.rrScore)")
                                                 .font(.subheadline.weight(.semibold).monospacedDigit())
                                                 .foregroundStyle(friend.rrScore > 0 ? brandPurple : (friend.rrScore < 0 ? .red : .secondary))
-                                                .frame(width: 50, alignment: .trailing)
+                                                .lineLimit(1)
+                                                .minimumScaleFactor(0.7)
+                                                .frame(width: 70, alignment: .trailing)
                                         }
                                         Image(systemName: "chevron.right")
                                             .font(.caption2)
@@ -1874,7 +1878,7 @@ struct ContentView: View {
                                         .frame(width: 65, alignment: .trailing)
                                 }
                                 Text(leaderboardTimeFrame == .allTime ? "RR" : "+/−")
-                                    .frame(width: 50, alignment: .trailing)
+                                    .frame(width: 70, alignment: .trailing)
                                 Image(systemName: "chevron.right")
                                     .font(.caption2)
                                     .opacity(0)
@@ -2249,7 +2253,9 @@ struct ContentView: View {
                 }
             }
             .font(.subheadline.weight(.semibold).monospacedDigit())
-            .frame(width: 50, alignment: .trailing)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .frame(width: 70, alignment: .trailing)
             Image(systemName: "chevron.right")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
