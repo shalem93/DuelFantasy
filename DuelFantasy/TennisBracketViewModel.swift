@@ -735,7 +735,8 @@ final class TennisBracketViewModel {
             if tournament?.status == "open", drawAvailable,
                let t = tournament {
                 let espnResults = await espnProvider.fetchMatchResults(
-                    drawType: t.drawType, drawPlayers: drawPlayers, grandSlam: t.grandSlam
+                    drawType: t.drawType, drawPlayers: drawPlayers, grandSlam: t.grandSlam,
+                    notBefore: t.lockTime
                 )
                 if !espnResults.isEmpty {
                     for (slot, winner) in espnResults { results[slot] = winner }
@@ -771,7 +772,8 @@ final class TennisBracketViewModel {
                     let freshResults = await espnProvider.fetchMatchResults(
                         drawType: t.drawType,
                         drawPlayers: drawPlayers,
-                        grandSlam: t.grandSlam
+                        grandSlam: t.grandSlam,
+                        notBefore: t.lockTime
                     )
                     var merged = results
                     for (slot, winner) in freshResults {
@@ -1039,7 +1041,8 @@ final class TennisBracketViewModel {
             let espnResults = await espnProvider.fetchMatchResults(
                 drawType: tournament.drawType,
                 drawPlayers: drawPlayers,
-                grandSlam: tournament.grandSlam
+                grandSlam: tournament.grandSlam,
+                notBefore: tournament.lockTime
             )
             var merged = results
             for (slot, winner) in espnResults {
@@ -1441,7 +1444,10 @@ final class TennisBracketViewModel {
             let fieldRows = (try? await SupabaseService.shared.fetchTournamentResults(
                 tournamentID: tid, accessToken: token
             )) ?? []
-            let totalEntries = max(fieldRows.count, 1)
+            // Bracket fields are 999 bots + user = 1000, but bot rows are
+            // rarely in dfs_tournament_results — counting the fetched rows
+            // gave "rank 99 of 1". Trust the count only when it's a real field.
+            let totalEntries = fieldRows.count > 1 ? fieldRows.count : 1000
             let title: String = {
                 if let t = tournament, t.id == tid { return t.title }
                 return derivedTennisTitleFromTID(tid)
@@ -1553,7 +1559,8 @@ final class TennisBracketViewModel {
         // proves the slam is underway despite a stale estimate.
         if !lockTimePassed, drawAvailable {
             let espnResults = await espnProvider.fetchMatchResults(
-                drawType: tournament.drawType, drawPlayers: drawPlayers, grandSlam: tournament.grandSlam
+                drawType: tournament.drawType, drawPlayers: drawPlayers, grandSlam: tournament.grandSlam,
+                notBefore: tournament.lockTime
             )
             if !espnResults.isEmpty {
                 for (slot, winner) in espnResults { results[slot] = winner }

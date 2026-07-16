@@ -3052,7 +3052,7 @@ struct ContentView: View {
                         async let pickSettle: Bool = SupabaseService.shared.settlePick(
                             userID: uid, matchID: matchID,
                             result: result,
-                            rrDelta: delta, accessToken: token
+                            rrDelta: delta, winnerTeam: winner, accessToken: token
                         )
                         _ = try await (statsSync, pickSettle)
                         break // success
@@ -3224,7 +3224,8 @@ struct ContentView: View {
                     do {
                         wasSettled = try await SupabaseService.shared.settlePick(
                             userID: job.userID, matchID: job.matchID,
-                            result: job.result, rrDelta: job.rrDelta, accessToken: token
+                            result: job.result, rrDelta: job.rrDelta,
+                            winnerTeam: job.winner, accessToken: token
                         )
                     } catch {
                         print("[Pick'em Global] settlePick failed for \(job.userID.prefix(8))/\(job.matchID): \(error.localizedDescription)")
@@ -3357,7 +3358,8 @@ struct ContentView: View {
                     group.addTask { @Sendable in
                         let wasSettled = (try? await SupabaseService.shared.settlePick(
                             userID: job.userID, matchID: job.matchID,
-                            result: job.result, rrDelta: job.rrDelta, accessToken: token
+                            result: job.result, rrDelta: job.rrDelta,
+                            winnerTeam: job.winner, accessToken: token
                         )) ?? false
                         return SettleResult(job: job, wasSettled: wasSettled)
                     }
@@ -4007,7 +4009,7 @@ struct ContentView: View {
                         id: UUID(),
                         matchName: pick.matchName,
                         pickedTeam: pick.pickedTeam,
-                        winnerTeam: pick.result == "win" ? pick.pickedTeam : "—",
+                        winnerTeam: restoredWinnerLabel(for: pick),
                         rrDelta: pick.rrDelta,
                         loggedAt: pick.createdAt ?? pick.settledAt ?? Date()
                     ))
@@ -4233,7 +4235,7 @@ struct ContentView: View {
                         id: UUID(),
                         matchName: pick.matchName,
                         pickedTeam: pick.pickedTeam,
-                        winnerTeam: pick.result == "win" ? pick.pickedTeam : "—",
+                        winnerTeam: restoredWinnerLabel(for: pick),
                         rrDelta: pick.rrDelta,
                         loggedAt: pick.createdAt ?? pick.settledAt ?? Date()
                     )
@@ -4362,6 +4364,22 @@ private struct PredictionRecord: Codable, Identifiable {
     let winnerTeam: String
     let rrDelta: Int
     let loggedAt: Date
+}
+
+/// Winner label for a settled pick restored from the server. Prefers the
+/// stored `winner_team` (captured at settle time — covers losses). For legacy
+/// rows settled before the column existed: a WIN's winner is the pick itself;
+/// a tennis "A vs B" LOSS is unambiguous (no draws) so the other player won;
+/// team formats ("A @ B") stay "—" because a soccer loss could be a draw.
+private func restoredWinnerLabel(for pick: SettledPickRecord) -> String {
+    if let stored = pick.winnerTeam, !stored.isEmpty { return stored }
+    if pick.result == "win" { return pick.pickedTeam }
+    let players = pick.matchName.components(separatedBy: " vs ")
+    if players.count == 2, pick.result == "loss" {
+        if players[0] == pick.pickedTeam { return players[1] }
+        if players[1] == pick.pickedTeam { return players[0] }
+    }
+    return "—"
 }
 
 private struct PickDetail: Codable {

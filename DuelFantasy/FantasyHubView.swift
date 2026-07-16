@@ -712,6 +712,19 @@ struct FantasyHubView: View {
         let combined = local + serverOnly
         return combined
             .filter { !isExcludedFantasy($0.tournamentId ?? "") }
+            // Heal incoherent rows already persisted with a bad field size
+            // ("#99 of 1"/"of 0" from counting only the user's own result
+            // row): a rank above totalEntries is impossible — fantasy fields
+            // are 999 bots + user = 1000.
+            .map { r -> DFSResult in
+                guard r.totalEntries < max(r.rank, 2) else { return r }
+                return DFSResult(
+                    id: r.id, tournamentTitle: r.tournamentTitle, rank: r.rank,
+                    totalEntries: max(1000, r.rank), lineupPoints: r.lineupPoints,
+                    rrDelta: r.rrDelta, loggedAt: r.loggedAt, tournamentId: r.tournamentId,
+                    lineupNumber: r.lineupNumber
+                )
+            }
             .sorted { $0.loggedAt > $1.loggedAt }
     }
 
@@ -760,7 +773,13 @@ struct FantasyHubView: View {
             let metaByID = Dictionary(uniqueKeysWithValues: metaList.map { ($0.id, $0) })
             for row in fantasyRows {
                 let title = metaByID[row.tournamentID]?.title ?? derivedFantasyTitle(row.tournamentID)
-                let totalEntries = metaByID[row.tournamentID]?.totalEntries ?? 0
+                // Fantasy-mode fields are always 999 bots + user = 1000. A
+                // missing/zero metadata row used to fall back to 0 and the
+                // Past Results row read "#99 of 0".
+                let totalEntries: Int = {
+                    if let n = metaByID[row.tournamentID]?.totalEntries, n > 0 { return n }
+                    return 1000
+                }()
                 collected[row.tournamentID] = DFSResult(
                     id: UUID(),
                     tournamentTitle: title,
@@ -1140,10 +1159,22 @@ struct FantasyHubView: View {
             .filter { !isExcludedFantasy($0.tournamentId ?? "") }
             .sorted { $0.loggedAt > $1.loggedAt }
         print("[FantasyHub] loadServerFantasyResults: \(results.count) result(s) — tids: \(results.compactMap { $0.tournamentId }.joined(separator: ", "))")
-        // Encode and persist to @AppStorage so a tab switch (which can
-        // tear down + remount this view) doesn't blank the section.
-        if let encoded = try? JSONEncoder().encode(results) {
-            fantasyPastResultsCache = encoded
+        // MERGE into the persisted cache instead of replacing it. This load
+        // runs inside a SwiftUI .task and gets CANCELLED whenever the view
+        // remounts — a cancelled/failed run used to encode an EMPTY array
+        // over the cache, which is why past results vanished between
+        // sessions and took a full slow re-fetch to reappear.
+        let existing: [DFSResult] = (try? JSONDecoder().decode([DFSResult].self, from: fantasyPastResultsCache)) ?? []
+        var merged: [String: DFSResult] = [:]
+        for r in existing { if let tid = r.tournamentId { merged[tid] = r } }
+        for r in results { if let tid = r.tournamentId { merged[tid] = r } }   // fresh rows win
+        let mergedResults = Array(merged.values)
+            .filter { !isExcludedFantasy($0.tournamentId ?? "") }
+            .sorted { $0.loggedAt > $1.loggedAt }
+        if !mergedResults.isEmpty || dfsRowsResult != nil {
+            if let encoded = try? JSONEncoder().encode(mergedResults) {
+                fantasyPastResultsCache = encoded
+            }
         }
         hasCompletedAtLeastOneFetch = true
     }

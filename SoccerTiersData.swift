@@ -1120,7 +1120,13 @@ struct ESPNSoccerTiersDataProvider: Sendable {
             let noteText = notes.compactMap { $0["headline"] as? String }
                 .joined(separator: " ").lowercased()
             let seasonType = (event["season"] as? [String: Any])?["slug"] as? String ?? ""
+            // Normalize hyphens: ESPN often leaves `notes` EMPTY and carries
+            // the round only in season.slug as "round-of-32"/"round-of-16" —
+            // the space-form keywords below never matched those, so knockout
+            // losers from slug-only matches (Senegal, 7/1) were never marked
+            // eliminated while notes-tagged matches worked.
             let combined = (noteText + " " + seasonType).lowercased()
+                .replacingOccurrences(of: "-", with: " ")
 
             let isKnockout = combined.contains("round of 32")
                 || combined.contains("round of 16")

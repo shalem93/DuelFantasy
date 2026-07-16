@@ -459,20 +459,42 @@ struct ESPNGolfTiersDataProvider: Sendable {
     /// `searchAroundDate` lets us look up past majors via the dates-based scoreboard
     /// query (ESPN's current scoreboard only carries the active week's event).
     func fetchLiveScores(espnEventID: String, searchAroundDate: Date? = nil) async throws -> GolfTiersScoreSnapshot {
-        // Try main scoreboard first
-        guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard") else {
-            throw NSError(domain: "GolfTiers", code: 1)
+        var resolvedEvent: ESPNPGAEvent?
+
+        // PREFERRED: the leaderboard endpoint. It's the only ESPN shape that
+        // reliably carries per-competitor STATUS (STATUS_CUT / withdrawals)
+        // and per-round linescores — the scoreboard endpoints return bare
+        // competitors (id + total score only) for date-targeted/past events,
+        // which meant NO golfer was ever flagged .cut and the missed-cut +20
+        // penalty in effectiveScoreToPar never fired.
+        if !espnEventID.isEmpty,
+           let lbURL = URL(string: "https://site.web.api.espn.com/apis/site/v2/sports/golf/leaderboard?league=pga&event=\(espnEventID)") {
+            if let (lbData, lbResp) = try? await session.data(from: lbURL),
+               let lbHTTP = lbResp as? HTTPURLResponse, (200..<300).contains(lbHTTP.statusCode),
+               let lbBoard = try? JSONDecoder().decode(ESPNPGAScoreboardResponse.self, from: lbData),
+               let match = lbBoard.events.first(where: { $0.id == espnEventID }) {
+                resolvedEvent = match
+            } else {
+                print("[GolfTiers ESPN] leaderboard endpoint miss for \(espnEventID) — falling back to scoreboard")
+            }
         }
 
-        let (data, response) = try await session.data(from: url)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw NSError(domain: "GolfTiers", code: 2)
+        // Fallback: main scoreboard (also the only path when espnEventID is empty)
+        if resolvedEvent == nil {
+            guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard") else {
+                throw NSError(domain: "GolfTiers", code: 1)
+            }
+
+            let (data, response) = try await session.data(from: url)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                throw NSError(domain: "GolfTiers", code: 2)
+            }
+
+            let scoreboard = try JSONDecoder().decode(ESPNPGAScoreboardResponse.self, from: data)
+
+            resolvedEvent = scoreboard.events.first(where: { $0.id == espnEventID })
+                ?? (espnEventID.isEmpty ? scoreboard.events.first : nil)
         }
-
-        let scoreboard = try JSONDecoder().decode(ESPNPGAScoreboardResponse.self, from: data)
-
-        var resolvedEvent: ESPNPGAEvent? = scoreboard.events.first(where: { $0.id == espnEventID })
-            ?? (espnEventID.isEmpty ? scoreboard.events.first : nil)
 
         // Fallback A: direct event URL (works for any past event without needing the date).
         if resolvedEvent == nil, !espnEventID.isEmpty {

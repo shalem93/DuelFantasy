@@ -189,6 +189,9 @@ struct SettledPickRecord: Codable, Identifiable {
     let rrDelta: Int
     let settledAt: Date?
     let createdAt: Date?
+    /// Actual game winner captured at settle time. Nil on rows settled before
+    /// the column existed — history falls back to "—" for those losses.
+    let winnerTeam: String?
 
     enum CodingKeys: String, CodingKey {
         case matchId = "match_id"
@@ -200,6 +203,7 @@ struct SettledPickRecord: Codable, Identifiable {
         case rrDelta = "rr_delta"
         case settledAt = "settled_at"
         case createdAt = "created_at"
+        case winnerTeam = "winner_team"
     }
 }
 
@@ -2808,7 +2812,7 @@ final class SupabaseService {
 
     /// Settle a pick. Returns `true` if the pick was actually settled, `false` if already settled by another client.
     @discardableResult
-    func settlePick(userID: String, matchID: String, result: String, rrDelta: Int, accessToken: String) async throws -> Bool {
+    func settlePick(userID: String, matchID: String, result: String, rrDelta: Int, winnerTeam: String? = nil, accessToken: String) async throws -> Bool {
         var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/pickem_picks"), resolvingAgainstBaseURL: false)
         components?.queryItems = [
             URLQueryItem(name: "user_id", value: "eq.\(userID)"),
@@ -2820,16 +2824,20 @@ final class SupabaseService {
             let result: String
             let rrDelta: Int
             let settledAt: String
+            // Persisted so history restored from the server can show the
+            // winner on LOSSES too — result alone only recovers it for wins.
+            let winnerTeam: String?
             enum CodingKeys: String, CodingKey {
                 case result
                 case rrDelta = "rr_delta"
                 case settledAt = "settled_at"
+                case winnerTeam = "winner_team"
             }
         }
         let iso = ISO8601DateFormatter()
         let rows: [SettledPickRecord] = try await request(
             url: url, method: "PATCH",
-            body: Payload(result: result, rrDelta: rrDelta, settledAt: iso.string(from: Date())),
+            body: Payload(result: result, rrDelta: rrDelta, settledAt: iso.string(from: Date()), winnerTeam: winnerTeam),
             bearerToken: accessToken,
             preferReturn: "representation"
         )
@@ -2855,7 +2863,7 @@ final class SupabaseService {
             // and excludes real NULLs as a side-effect of NULL-vs-NULL = NULL.
             // Use `not.is.null` for an actual IS NOT NULL filter.
             URLQueryItem(name: "result", value: "not.is.null"),
-            URLQueryItem(name: "select", value: "match_id,picked_team,match_name,gain_rr,loss_rr,result,rr_delta,settled_at,created_at"),
+            URLQueryItem(name: "select", value: "match_id,picked_team,match_name,gain_rr,loss_rr,result,rr_delta,settled_at,created_at,winner_team"),
             URLQueryItem(name: "order", value: "settled_at.desc"),
             URLQueryItem(name: "limit", value: "\(limit)"),
             URLQueryItem(name: "offset", value: "\(offset)")

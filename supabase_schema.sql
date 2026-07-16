@@ -1430,3 +1430,11 @@ alter table public.crash_reports enable row level security;
 -- No select/update/delete policies: reports are read from the dashboard.
 create policy "crash_reports_insert" on public.crash_reports
 for insert to anon, authenticated with check (true);
+
+-- Winner captured at settle time so restored history can show it on LOSSES
+-- too (result alone only recovers the winner for wins).
+alter table public.pickem_picks add column if not exists winner_team text;
+
+-- Winner captured at settle time so restored pick'em history can show it on
+-- LOSSES too (result alone only recovers the winner for wins).
+alter table public.pickem_picks add column if not exists winner_team text;

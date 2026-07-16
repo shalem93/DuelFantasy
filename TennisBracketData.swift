@@ -502,7 +502,13 @@ struct ESPNTennisResultsProvider: Sendable {
     func fetchMatchResults(
         drawType: DrawType,
         drawPlayers: [TennisBracketPlayer],
-        grandSlam: GrandSlam = .frenchOpen
+        grandSlam: GrandSlam = .frenchOpen,
+        // Main-draw start (tournament lock). Matches dated before this are
+        // QUALIFYING or warm-up results — two future main-draw players who met
+        // there would get slotted into the round their DRAW positions imply
+        // (often a deep one), marking the loser eliminated in a round that
+        // hasn't been played ("pre-eliminated Sinner"). Nil = no gate.
+        notBefore: Date? = nil
     ) async -> [String: String] {
         var results: [String: String] = [:]
         var totalCompleted = 0
@@ -758,6 +764,14 @@ struct ESPNTennisResultsProvider: Sendable {
                             }
                             return nil
                         }()
+                        // Date gate: drop qualifying/warm-up matches played before
+                        // the main draw started (12h grace for timezone skew).
+                        // Undated competitions pass — the draw-position mapping
+                        // still validates them.
+                        if let notBefore, let d = compDate,
+                           d < notBefore.addingTimeInterval(-12 * 3600) {
+                            continue
+                        }
                         group.addTask {
                             let names: [String?] = await withTaskGroup(of: (Int, String?).self) { inner in
                                 for (i, c) in competitors.enumerated() {
