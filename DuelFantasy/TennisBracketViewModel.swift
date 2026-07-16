@@ -764,6 +764,21 @@ final class TennisBracketViewModel {
                 if fieldEntries.isEmpty {
                     await loadFieldEntries()
                 }
+                // FIRST: restore the persisted results_data. A settled slam's
+                // full slot map (127 winners) lives on the server row; the
+                // ESPN re-fetch below can return NOTHING days after the final
+                // (the scoreboard lookback rolls past the event, and the
+                // device's ESPN date queries are flaky) — which rendered the
+                // settled bracket completely unfilled (0/64 R1, all picks
+                // pending) even though the server had every result.
+                if results.isEmpty, let t = tournament, let token = accessToken,
+                   let stored = try? await SupabaseService.shared.fetchTennisBracketResults(
+                       tournamentID: t.id, accessToken: token
+                   ),
+                   !stored.isEmpty {
+                    results = stored
+                    print("[TennisBracket] settled: restored \(stored.count) results from server row")
+                }
                 // Fetch ESPN results for the settled tournament's own
                 // draw type. Without this, `results` was empty (Supabase
                 // stored row may have been cleared) and bot leaderboard

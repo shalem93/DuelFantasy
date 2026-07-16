@@ -682,6 +682,20 @@ struct FantasyHubView: View {
         return nil
     }
 
+    /// Tournaments still IN PROGRESS in their own VM. A live score push can
+    /// land the user's row in `dfs_tournament_results` mid-tournament (Soccer
+    /// Tiers pushes leaderboard scores while the World Cup is live), and Past
+    /// Results must never show a contest that's still running.
+    private var activeFantasyTournamentIDs: Set<String> {
+        var s = Set<String>()
+        func addActive(_ id: String?, _ settled: Bool) { if let id, !settled { s.insert(id) } }
+        addActive(playoffTiersViewModel.tournament?.id, playoffTiersViewModel.isSettled)
+        addActive(soccerTiersViewModel.tournament?.id, soccerTiersViewModel.isSettled)
+        addActive(golfTiersViewModel.tournament?.id, golfTiersViewModel.isSettled)
+        addActive(tennisBracketViewModel.tournament?.id, tennisBracketViewModel.isSettled)
+        return s
+    }
+
     /// Union of (1) locally-cached results from `dfsHistoryData` and
     /// (2) results freshly fetched from the server, filtered to just
     /// the Fantasy-hub games. Deduped by `tournamentId`; the locally-
@@ -710,8 +724,10 @@ struct FantasyHubView: View {
             return !localTids.contains(tid)
         }
         let combined = local + serverOnly
+        let activeTids = activeFantasyTournamentIDs
         return combined
             .filter { !isExcludedFantasy($0.tournamentId ?? "") }
+            .filter { !activeTids.contains($0.tournamentId ?? "") }
             // Heal incoherent rows already persisted with a bad field size
             // ("#99 of 1"/"of 0" from counting only the user's own result
             // row): a rank above totalEntries is impossible — fantasy fields
@@ -1129,15 +1145,11 @@ struct FantasyHubView: View {
         // rrDelta is 0 — fantasy RR is credited separately per VM and isn't shown
         // on these rows — and isFantasyModeTid keeps these tids out of DFS.
         let alreadyPersisted = Set((dfsRowsResult ?? []).map { $0.tournamentID })
-        let activeFantasyTids: Set<String> = {
-            var s = Set<String>()
-            func addActive(_ id: String?, _ settled: Bool) { if let id, !settled { s.insert(id) } }
-            addActive(playoffTiersViewModel.tournament?.id, playoffTiersViewModel.isSettled)
-            addActive(soccerTiersViewModel.tournament?.id, soccerTiersViewModel.isSettled)
-            addActive(golfTiersViewModel.tournament?.id, golfTiersViewModel.isSettled)
-            addActive(tennisBracketViewModel.tournament?.id, tennisBracketViewModel.isSettled)
-            return s
-        }()
+        let activeFantasyTids = activeFantasyTournamentIDs
+        // Drop in-progress tournaments from the collected set entirely so a
+        // live score push (Soccer Tiers writes the user's row mid-World Cup)
+        // can't land in the persisted Past Results cache.
+        collected = collected.filter { !activeFantasyTids.contains($0.key) }
         let entryName = tennisBracketViewModel.profileName.isEmpty ? "Player" : tennisBracketViewModel.profileName
         for (tid, result) in collected {
             guard !tid.contains("#group-"), !tid.hasPrefix("bestball-") else { continue }
