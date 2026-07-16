@@ -1779,8 +1779,13 @@ struct ContentView: View {
                                     .frame(width: 24, alignment: .leading)
                                 Text("PLAYER")
                                 Spacer()
-                                Text("W-L")
-                                    .frame(width: 65, alignment: .trailing)
+                                // DFS has no win-loss record — the column is
+                                // pick'em-only and read "0-0" noise under the
+                                // DFS filter.
+                                if leaderboardGameFilter != .dfs {
+                                    Text("W-L")
+                                        .frame(width: 65, alignment: .trailing)
+                                }
                                 Text(leaderboardTimeFrame == .allTime ? "RR" : "+/−")
                                     .frame(width: 50, alignment: .trailing)
                                 Image(systemName: "chevron.right")
@@ -1804,10 +1809,12 @@ struct ContentView: View {
                                             .font(.subheadline.weight(.medium))
                                             .foregroundStyle(.primary)
                                         Spacer()
-                                        Text("\(friend.wins)-\(friend.losses)")
-                                            .font(.caption.monospacedDigit())
-                                            .foregroundStyle(.secondary)
-                                            .frame(width: 65, alignment: .trailing)
+                                        if leaderboardGameFilter != .dfs {
+                                            Text("\(friend.wins)-\(friend.losses)")
+                                                .font(.caption.monospacedDigit())
+                                                .foregroundStyle(.secondary)
+                                                .frame(width: 65, alignment: .trailing)
+                                        }
                                         if leaderboardTimeFrame == .allTime {
                                             Text("\(friend.rrScore)")
                                                 .font(.subheadline.weight(.semibold).monospacedDigit())
@@ -1859,8 +1866,13 @@ struct ContentView: View {
                                     .frame(width: 28, alignment: .leading)
                                 Text("PLAYER")
                                 Spacer()
-                                Text("W-L")
-                                    .frame(width: 65, alignment: .trailing)
+                                // DFS has no win-loss record — the column is
+                                // pick'em-only and read "0-0" noise under the
+                                // DFS filter.
+                                if leaderboardGameFilter != .dfs {
+                                    Text("W-L")
+                                        .frame(width: 65, alignment: .trailing)
+                                }
                                 Text(leaderboardTimeFrame == .allTime ? "RR" : "+/−")
                                     .frame(width: 50, alignment: .trailing)
                                 Image(systemName: "chevron.right")
@@ -2221,10 +2233,12 @@ struct ContentView: View {
                 .font(.subheadline.weight(isMe ? .bold : .medium))
                 .foregroundStyle(isMe ? brandPurple : .primary)
             Spacer()
-            Text("\(profile.wins)-\(profile.losses)")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 65, alignment: .trailing)
+            if leaderboardGameFilter != .dfs {
+                Text("\(profile.wins)-\(profile.losses)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 65, alignment: .trailing)
+            }
             Group {
                 if leaderboardTimeFrame == .allTime {
                     Text("\(profile.rrScore)")
@@ -4368,16 +4382,29 @@ private struct PredictionRecord: Codable, Identifiable {
 
 /// Winner label for a settled pick restored from the server. Prefers the
 /// stored `winner_team` (captured at settle time — covers losses). For legacy
-/// rows settled before the column existed: a WIN's winner is the pick itself;
-/// a tennis "A vs B" LOSS is unambiguous (no draws) so the other player won;
-/// team formats ("A @ B") stay "—" because a soccer loss could be a draw.
+/// rows settled before the column existed, derive where unambiguous:
+/// - a WIN's winner is the pick itself
+/// - a tennis "A vs B" LOSS: no draws, the other player won
+/// - a team-sport "A @ B" LOSS in a draw-free sport (MLB/WNBA/NBA/NFL —
+///   identified via the ESPN match id): the other team won
+/// - soccer LOSSES stay "—" (the opponent won OR it was a draw), as do
+///   Draw picks.
 private func restoredWinnerLabel(for pick: SettledPickRecord) -> String {
     if let stored = pick.winnerTeam, !stored.isEmpty { return stored }
     if pick.result == "win" { return pick.pickedTeam }
+    guard pick.result == "loss" else { return "—" }
     let players = pick.matchName.components(separatedBy: " vs ")
-    if players.count == 2, pick.result == "loss" {
+    if players.count == 2 {
         if players[0] == pick.pickedTeam { return players[1] }
         if players[1] == pick.pickedTeam { return players[0] }
+    }
+    let isSoccer = pick.matchId.lowercased().contains("soccer")
+    if !isSoccer {
+        let teams = pick.matchName.components(separatedBy: " @ ")
+        if teams.count == 2 {
+            if teams[0] == pick.pickedTeam { return teams[1] }
+            if teams[1] == pick.pickedTeam { return teams[0] }
+        }
     }
     return "—"
 }
