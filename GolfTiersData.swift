@@ -575,15 +575,43 @@ struct ESPNGolfTiersDataProvider: Sendable {
         var golferStatuses: [String: GolfTiersGolfer.GolferStatus] = [:]
         var maxRound = 0
 
+        // "+4"/"-2"/"E" → Int; "-" (round not started) → nil.
+        func parseToPar(_ s: String?) -> Int? {
+            guard let s, !s.isEmpty, s != "-" else { return nil }
+            if s.uppercased() == "E" { return 0 }
+            return Int(s.replacingOccurrences(of: "+", with: ""))
+        }
+
         for competitor in competition.competitors {
             let playerID = "pga-\(competitor.id)"
-            let scoreToPar = Int(competitor.score?.value ?? 0)
+            // LIVE leaderboard quirk: competitor.score.value is raw STROKES
+            // (e.g. 17 through 9 holes) and score.displayValue lags at "E"
+            // mid-round — using them showed the whole field at E during R1.
+            // The true running to-par is the SUM of per-round to-par
+            // displayValues ("-2", "+4", "E"), which also sums correctly for
+            // finished events.
+            let scoreToPar: Int = {
+                if let linescores = competitor.linescores {
+                    let perRound = linescores.compactMap { parseToPar($0.displayValue) }
+                    if !perRound.isEmpty { return perRound.reduce(0, +) }
+                }
+                if let dv = parseToPar(competitor.score?.displayValue) { return dv }
+                return Int(competitor.score?.value ?? 0)
+            }()
             golferScoresToPar[playerID] = scoreToPar
 
             var rounds: [Int] = []
             if let linescores = competitor.linescores {
-                rounds = linescores.map { Int($0.value ?? 0) }
-                maxRound = max(maxRound, rounds.filter({ $0 > 0 }).count)
+                // Round STROKES. Mid-round the value is a running partial —
+                // only accept plausible complete-round totals so the R1-R4
+                // row stays "-" until a round actually finishes.
+                rounds = linescores.map { ls in
+                    let v = Int(ls.value ?? 0)
+                    return v >= 55 ? v : 0
+                }
+                // A round counts as underway once it has a to-par value.
+                let startedRounds = linescores.filter { parseToPar($0.displayValue) != nil }.count
+                maxRound = max(maxRound, startedRounds)
             }
             while rounds.count < 4 { rounds.append(0) }
             golferRoundScores[playerID] = rounds

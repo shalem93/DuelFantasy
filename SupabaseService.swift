@@ -3727,6 +3727,23 @@ final class SupabaseService {
         try await requestNoResponse(url: url, method: "PATCH", body: Payload(status: "settled", isSettled: true), bearerToken: accessToken)
     }
 
+    /// Reverse of markSoccerTiersTournamentSettled — used by the premature-
+    /// settle heal (World Cup settled after the semis with 2 games left).
+    func resetSoccerTiersTournamentToLive(tournamentID: String, accessToken: String) async throws {
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/soccer_tiers_tournaments"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "id", value: "eq.\(tournamentID)")]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        struct Payload: Codable {
+            let status: String
+            let isSettled: Bool
+            enum CodingKeys: String, CodingKey {
+                case status
+                case isSettled = "is_settled"
+            }
+        }
+        try await requestNoResponse(url: url, method: "PATCH", body: Payload(status: "live", isSettled: false), bearerToken: accessToken)
+    }
+
     // MARK: - Soccer Tiers Groups
 
     func createSoccerTiersGroup(

@@ -178,6 +178,43 @@ final class SoccerTiersViewModel {
         }
 
         if var existing = loadedTournament {
+            // PREMATURE-SETTLE HEAL: the old completion check (>=100 of 104
+            // matches) settled the World Cup after the SEMIS — with the
+            // 3rd-place game and the final still to play. If a "settled"
+            // tournament's final hasn't actually been played, un-settle it:
+            // reverse the RR + history row the early settle credited (the
+            // real settle after the final re-credits correctly), reset the
+            // server row to live, and let scoring resume. Idempotent — after
+            // the first heal the stale history row is gone, so reruns
+            // reverse nothing.
+            if existing.isSettled || existing.status == "settled" {
+                let reallyComplete = await espnProvider.checkTournamentComplete()
+                if !reallyComplete {
+                    print("[SoccerTiers] \(existing.id) settled PREMATURELY (final not played) — un-settling")
+                    if let decoded = try? JSONDecoder().decode([DFSResult].self, from: dfsHistoryData) {
+                        let stale = decoded.filter { $0.tournamentId == existing.id }
+                        let staleRR = stale.reduce(0) { $0 + $1.rrDelta }
+                        if staleRR != 0 { rrScore -= staleRR }
+                        if !stale.isEmpty {
+                            let cleaned = decoded.filter { $0.tournamentId != existing.id }
+                            dfsHistoryData = (try? JSONEncoder().encode(cleaned)) ?? dfsHistoryData
+                        }
+                    }
+                    var settled = (try? JSONDecoder().decode(Set<String>.self, from: settledTournamentData)) ?? []
+                    settled.remove(existing.id)
+                    settledTournamentData = (try? JSONEncoder().encode(settled)) ?? settledTournamentData
+                    existing = SoccerTiersTournament(
+                        id: existing.id, title: existing.title, season: existing.season,
+                        status: "live", lockTime: existing.lockTime, entryCount: existing.entryCount,
+                        isSettled: false, createdAt: existing.createdAt
+                    )
+                    if let token = accessToken {
+                        try? await SupabaseService.shared.resetSoccerTiersTournamentToLive(
+                            tournamentID: existing.id, accessToken: token
+                        )
+                    }
+                }
+            }
             // Only reset "locked" to "open" if lock time is still in the future.
             if existing.status == "locked" && !existing.isSettled {
                 if Date() < lockTime {

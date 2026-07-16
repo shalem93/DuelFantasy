@@ -1061,17 +1061,28 @@ struct ESPNSoccerTiersDataProvider: Sendable {
     /// Check if the World Cup is complete (final has been played)
     func checkTournamentComplete() async -> Bool {
         let events = await fetchWorldCupMatches()
-        let completedCount = events.filter { event in
+        // Complete ONLY when the FINAL itself has been played. The old
+        // ">=100 of 104 completed" heuristic tripped right after the semis
+        // (102 done) and settled the tournament with the 3rd-place game and
+        // the final still to play.
+        for event in events {
             guard let competitions = event["competitions"] as? [[String: Any]],
                   let competition = competitions.first,
                   let status = competition["status"] as? [String: Any],
                   let statusType = status["type"] as? [String: Any],
-                  let completed = statusType["completed"] as? Bool else { return false }
-            return completed
-        }.count
-        // World Cup 2026: 48 teams, 104 total matches
-        // If we have 100+ completed matches, tournament is likely done
-        return completedCount >= 100
+                  (statusType["completed"] as? Bool) == true else { continue }
+            let notes = (competition["notes"] as? [[String: Any]] ?? [])
+            let noteText = notes.compactMap { $0["headline"] as? String }.joined(separator: " ")
+            let seasonType = (event["season"] as? [String: Any])?["slug"] as? String ?? ""
+            let combined = (noteText + " " + seasonType).lowercased()
+                .replacingOccurrences(of: "-", with: " ")
+            let isTheFinal = combined.contains("final")
+                && !combined.contains("semifinal") && !combined.contains("semi final")
+                && !combined.contains("quarterfinal") && !combined.contains("quarter final")
+                && !combined.contains("third") && !combined.contains("3rd")
+            if isTheFinal { return true }
+        }
+        return false
     }
 
     /// Detect which nations have been eliminated from the World Cup.
@@ -1139,6 +1150,21 @@ struct ESPNSoccerTiersDataProvider: Sendable {
                 || combined.contains("group-stage")
 
             if isKnockout {
+                // SEMIFINAL losers are NOT eliminated — they still play the
+                // 3rd-place game, and its goals count officially (golden
+                // boot, records), so their players can still score here too.
+                let isSemifinal = combined.contains("semifinal") || combined.contains("semi final")
+                let isThirdPlace = combined.contains("third") || combined.contains("3rd")
+                if isSemifinal { continue }
+                if isThirdPlace {
+                    // After the 3rd-place game BOTH teams are done.
+                    for c in competitors {
+                        let team = c["team"] as? [String: Any]
+                        guard let abbr = team?["abbreviation"] as? String else { continue }
+                        eliminated.insert(abbr.uppercased())
+                    }
+                    continue
+                }
                 // The team flagged winner=false (or whose score is lower
                 // with no winner flag) is eliminated.
                 for c in competitors {
