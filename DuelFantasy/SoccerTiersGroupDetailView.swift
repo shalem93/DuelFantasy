@@ -212,30 +212,52 @@ struct SoccerTiersGroupDetailView: View {
                 VStack(spacing: 0) {
                     ForEach(entries) { entry in
                         DisclosureGroup {
+                            // Same row anatomy as the main leaderboard's
+                            // expanded entry: colored tier chip, ELIM badge,
+                            // country + position, FPTS stack.
                             VStack(spacing: 4) {
                                 ForEach(entry.picks.sorted(by: { $0.tier < $1.tier }), id: \.playerID) { pick in
+                                    let pts = entry.playerPoints[pick.playerID] ?? viewModel.livePlayerPoints[pick.playerID] ?? 0
+                                    let isEliminated = viewModel.eliminatedNations.contains(pick.playerCountry)
                                     HStack(spacing: 10) {
                                         Text("T\(pick.tier)")
-                                            .font(.system(size: 9, weight: .bold))
+                                            .font(.system(size: 11, weight: .bold))
                                             .foregroundStyle(.white)
-                                            .frame(width: 26, height: 18)
-                                            .background(brandPurple.opacity(0.8))
-                                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                                            .frame(width: 28, height: 28)
+                                            .background(tierColor(pick.tier))
+                                            .clipShape(RoundedRectangle(cornerRadius: 6))
                                         VStack(alignment: .leading, spacing: 1) {
-                                            Text(pick.playerName)
-                                                .font(.caption.weight(.medium))
-                                                .lineLimit(1)
-                                            Text(pick.playerCountry)
-                                                .font(.system(size: 9))
+                                            HStack(spacing: 4) {
+                                                Text(pick.playerName)
+                                                    .font(.subheadline.weight(.semibold))
+                                                    .foregroundStyle(isEliminated ? .secondary : .primary)
+                                                    .lineLimit(1)
+                                                if isEliminated {
+                                                    Text("ELIM")
+                                                        .font(.system(size: 8, weight: .heavy))
+                                                        .padding(.horizontal, 4)
+                                                        .padding(.vertical, 1)
+                                                        .background(Color.red.opacity(0.15))
+                                                        .foregroundStyle(.red)
+                                                        .clipShape(Capsule())
+                                                }
+                                            }
+                                            let position = positionForPlayer(pick.playerID)
+                                            Text(position.isEmpty ? pick.playerCountry : "\(pick.playerCountry) \u{00B7} \(position)")
+                                                .font(.caption)
                                                 .foregroundStyle(.secondary)
                                         }
                                         Spacer()
-                                        let pts = entry.playerPoints[pick.playerID] ?? 0
-                                        Text(String(format: "%.1f", pts))
-                                            .font(.caption.weight(.semibold).monospacedDigit())
-                                            .foregroundStyle(pts > 0 ? brandPurple : .secondary)
+                                        VStack(alignment: .trailing, spacing: 1) {
+                                            Text(String(format: "%.1f", pts))
+                                                .font(.subheadline.weight(.bold).monospacedDigit())
+                                                .foregroundStyle(isEliminated ? .secondary : .primary)
+                                            Text("FPTS")
+                                                .font(.system(size: 9, weight: .medium))
+                                                .foregroundStyle(.secondary)
+                                        }
                                     }
-                                    .padding(.vertical, 2)
+                                    .padding(.vertical, 4)
                                 }
                             }
                             .padding(.leading, 24)
@@ -325,5 +347,27 @@ struct SoccerTiersGroupDetailView: View {
                 }
             }
         }
+    }
+
+    // Mirrors SoccerTiersLiveView so group rows match the main leaderboard.
+    private func tierColor(_ tier: Int) -> Color {
+        switch tier {
+        case 1: return Color(red: 0.85, green: 0.65, blue: 0.13)  // Gold
+        case 2: return Color(red: 0.60, green: 0.60, blue: 0.65)  // Silver
+        case 3: return Color(red: 0.70, green: 0.45, blue: 0.20)  // Bronze
+        case 4: return Color(red: 0.30, green: 0.50, blue: 0.75)  // Blue
+        case 5: return Color(red: 0.45, green: 0.65, blue: 0.45)  // Green
+        case 6: return Color(red: 0.55, green: 0.45, blue: 0.65)  // Purple
+        default: return .secondary
+        }
+    }
+
+    private func positionForPlayer(_ playerID: String) -> String {
+        for tier in viewModel.tiers {
+            if let player = tier.first(where: { $0.id == playerID }) {
+                return player.position
+            }
+        }
+        return ""
     }
 }

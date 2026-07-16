@@ -725,9 +725,17 @@ struct FantasyHubView: View {
         }
         let combined = local + serverOnly
         let activeTids = activeFantasyTournamentIDs
+        // Match by BASE tid: private-group rows use "<tid>#group-<id>", which
+        // slipped past an exact-match filter and showed a LIVE World Cup
+        // group as a past result.
+        func isActive(_ tid: String?) -> Bool {
+            guard let tid else { return false }
+            let base = tid.components(separatedBy: "#group-").first ?? tid
+            return activeTids.contains(base)
+        }
         return combined
             .filter { !isExcludedFantasy($0.tournamentId ?? "") }
-            .filter { !activeTids.contains($0.tournamentId ?? "") }
+            .filter { !isActive($0.tournamentId) }
             // Heal incoherent rows already persisted with a bad field size
             // ("#99 of 1"/"of 0" from counting only the user's own result
             // row): a rank above totalEntries is impossible — fantasy fields
@@ -1148,8 +1156,12 @@ struct FantasyHubView: View {
         let activeFantasyTids = activeFantasyTournamentIDs
         // Drop in-progress tournaments from the collected set entirely so a
         // live score push (Soccer Tiers writes the user's row mid-World Cup)
-        // can't land in the persisted Past Results cache.
-        collected = collected.filter { !activeFantasyTids.contains($0.key) }
+        // can't land in the persisted Past Results cache. Base-tid match so
+        // "<tid>#group-<id>" private-group rows are excluded too.
+        collected = collected.filter { entry in
+            let base = entry.key.components(separatedBy: "#group-").first ?? entry.key
+            return !activeFantasyTids.contains(base)
+        }
         let entryName = tennisBracketViewModel.profileName.isEmpty ? "Player" : tennisBracketViewModel.profileName
         for (tid, result) in collected {
             guard !tid.contains("#group-"), !tid.hasPrefix("bestball-") else { continue }

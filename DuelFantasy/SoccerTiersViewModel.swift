@@ -526,8 +526,16 @@ final class SoccerTiersViewModel {
             print("[SoccerTiers] Score fetch returned empty — keeping \(livePlayerPoints.count) existing scores")
         }
 
-        // Fetch eliminated nations
-        eliminatedNations = await espnProvider.fetchEliminatedNations()
+        // Fetch eliminated nations — STICKY: a flaky/empty fetch (device ESPN
+        // date queries fail in bursts) used to wipe the whole set, making
+        // every ELIM badge vanish mid-session until a later fetch succeeded.
+        // Eliminations never un-happen, so keep the last non-empty set.
+        let fetchedEliminated = await espnProvider.fetchEliminatedNations()
+        if !fetchedEliminated.isEmpty {
+            eliminatedNations = fetchedEliminated
+        } else if !eliminatedNations.isEmpty {
+            print("[SoccerTiers] eliminated-nations fetch returned empty — keeping \(eliminatedNations.count) cached")
+        }
 
         // Update tier player data with elimination status
         for tierIndex in 0..<tiers.count {
