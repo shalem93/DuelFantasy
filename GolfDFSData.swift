@@ -422,8 +422,12 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
             throw NSError(domain: "GolfDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "No golfers found in event"])
         }
 
-        // Parse start date and set lock time to 4:00 AM ET on tournament day
-        // ESPN often returns midnight UTC which locks lineups too early.
+        // Parse start date and set the lock to a conservative pre-first-tee
+        // hour on tournament day (ESPN's event date is midnight UTC, not a
+        // real tee time). UK-hosted events (The Open, Scottish/Irish Opens)
+        // tee off ~1:30 AM ET — the old flat 4:00 AM ET lock left The Open's
+        // lineups editable 2.5 hours into round 1. US events rarely start
+        // before ~6:45 AM ET, so 5:00 AM is safely early there.
         let rawDate = parseESPNDate(event.date) ?? Date()
         let startDate: Date = {
             let eastern = TimeZone(identifier: "America/New_York")!
@@ -431,7 +435,13 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
             cal.timeZone = eastern
             let components = cal.dateComponents([.year, .month, .day], from: rawDate)
             var lockComponents = components
-            lockComponents.hour = 4
+            let lowerName = event.name.lowercased()
+            let isUKEvent = lowerName.hasPrefix("the open")
+                || lowerName.contains("open championship")
+                || lowerName.contains("scottish")
+                || lowerName.contains("irish open")
+                || lowerName.contains("british")
+            lockComponents.hour = isUKEvent ? 1 : 5
             lockComponents.minute = 0
             lockComponents.second = 0
             return cal.date(from: lockComponents) ?? rawDate
