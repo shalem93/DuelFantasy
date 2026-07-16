@@ -224,20 +224,32 @@ struct AllUserSettledPick: Codable {
 struct AllUserDFSResult: Codable {
     let userID: String
     let rrDelta: Int
-    // For leaderboard aggregation hygiene: re-settles INSERT the user's row
-    // again (fresh UUID id), so summing raw rows double-counts — dedupe on
-    // (user, tournament, lineup) keeping the latest, and drop fantasy-mode
-    // tids (tiers/brackets share this table but aren't DFS RR).
+    // For leaderboard aggregation hygiene: the table is unique on
+    // (tournament_id, entry_name), and the same lineup can be persisted under
+    // BOTH "You #1" and "<profileName> #1" by settles run at different times —
+    // summing raw rows double-counted RR. Dedupe on (user, tournament, lineup
+    // ordinal parsed from entry_name) keeping the latest row, and drop
+    // fantasy-mode tids (tiers/brackets share this table but aren't DFS RR).
     let tournamentID: String?
-    let lineupNumber: Int?
+    let entryName: String?
     let createdAt: Date?
 
     enum CodingKeys: String, CodingKey {
         case userID = "user_id"
         case rrDelta = "rr_delta"
         case tournamentID = "tournament_id"
-        case lineupNumber = "lineup_number"
+        case entryName = "entry_name"
         case createdAt = "created_at"
+    }
+
+    /// "SmartManWhoop2 #3" / "You #3" → 3; unnumbered names → 1.
+    var lineupOrdinal: Int {
+        guard let entryName,
+              let hashRange = entryName.range(of: "#", options: .backwards),
+              let n = Int(entryName[hashRange.upperBound...].trimmingCharacters(in: .whitespaces)) else {
+            return 1
+        }
+        return n
     }
 }
 
@@ -1891,7 +1903,7 @@ final class SupabaseService {
         components?.queryItems = [
             URLQueryItem(name: "is_current_user", value: "eq.true"),
             URLQueryItem(name: "created_at", value: "gte.\(sinceISO)"),
-            URLQueryItem(name: "select", value: "user_id,rr_delta,tournament_id,lineup_number,created_at")
+            URLQueryItem(name: "select", value: "user_id,rr_delta,tournament_id,entry_name,created_at")
         ]
         guard let url = components?.url else { throw URLError(.badURL) }
         return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)

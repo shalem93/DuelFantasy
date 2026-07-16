@@ -2369,7 +2369,7 @@ struct ContentView: View {
                 let baseTid = tid.components(separatedBy: "#group-").first ?? tid
                 guard !DFSViewModel.isFantasyModeTid(baseTid), !tid.contains("#group-") else { continue }
                 guard !excludedTids.contains(tid) else { continue }
-                let key = "\(dfs.userID)|\(tid)|\(dfs.lineupNumber ?? 0)"
+                let key = "\(dfs.userID)|\(tid)|\(dfs.lineupOrdinal)"
                 if let existing = latestByKey[key] {
                     if (dfs.createdAt ?? .distantPast) > (existing.createdAt ?? .distantPast) {
                         latestByKey[key] = dfs

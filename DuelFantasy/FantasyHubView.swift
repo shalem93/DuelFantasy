@@ -695,24 +695,42 @@ struct FantasyHubView: View {
     /// land the user's row in `dfs_tournament_results` mid-tournament (Soccer
     /// Tiers pushes leaderboard scores while the World Cup is live), and Past
     /// Results must never show a contest that's still running.
+    /// Which fantasy mode a tid belongs to — used for per-mode snapshot
+    /// reconciliation below.
+    private func fantasyMode(forTid tid: String) -> String? {
+        let t = tid.lowercased()
+        if t.hasPrefix("world-cup-") { return "soccer" }
+        if t.contains("-playoffs-") { return "playoff" }
+        if t.contains("-atp-") || t.contains("-wta-") { return "tennis" }
+        let golfPrefixes = ["masters-", "the-masters-", "us-open-", "the-open-", "pga-championship-"]
+        if golfPrefixes.contains(where: { t.hasPrefix($0) }) { return "golf" }
+        return nil
+    }
+
     private var activeFantasyTournamentIDs: Set<String> {
         var s = Set<String>()
-        func addActive(_ id: String?, _ settled: Bool) { if let id, !settled { s.insert(id) } }
-        addActive(playoffTiersViewModel.tournament?.id, playoffTiersViewModel.isSettled)
-        addActive(soccerTiersViewModel.tournament?.id, soccerTiersViewModel.isSettled)
-        addActive(golfTiersViewModel.tournament?.id, golfTiersViewModel.isSettled)
-        addActive(tennisBracketViewModel.tournament?.id, tennisBracketViewModel.isSettled)
-        // Persist/refresh the snapshot whenever the VMs are warm so cold
-        // launches can filter from the first frame. Only rewrite once at
-        // least one VM has resolved its tournament — an all-cold pass would
-        // wipe the snapshot and reintroduce the flash.
-        let anyLoaded = playoffTiersViewModel.tournament != nil
-            || soccerTiersViewModel.tournament != nil
-            || golfTiersViewModel.tournament != nil
-            || tennisBracketViewModel.tournament != nil
+        // PER-MODE reconciliation with the persisted snapshot: each mode's
+        // contribution comes from its VM when that VM is WARM (tournament
+        // loaded); a still-cold VM carries over the snapshot's tids for its
+        // mode. Rewriting the whole snapshot when only SOME VMs were warm
+        // dropped the cold modes' tids — golf loading first wiped
+        // world-cup-2026 from the snapshot and the WC rows flashed into Past
+        // Results until the soccer VM warmed.
+        let snapshot = snapshotActiveTids
+        func contribute(mode: String, id: String?, settled: Bool) {
+            if let id {
+                if !settled { s.insert(id) }
+            } else {
+                s.formUnion(snapshot.filter { fantasyMode(forTid: $0) == mode })
+            }
+        }
+        contribute(mode: "playoff", id: playoffTiersViewModel.tournament?.id, settled: playoffTiersViewModel.isSettled)
+        contribute(mode: "soccer", id: soccerTiersViewModel.tournament?.id, settled: soccerTiersViewModel.isSettled)
+        contribute(mode: "golf", id: golfTiersViewModel.tournament?.id, settled: golfTiersViewModel.isSettled)
+        contribute(mode: "tennis", id: tennisBracketViewModel.tournament?.id, settled: tennisBracketViewModel.isSettled)
         // Sorted array for a deterministic encoding (Set order varies per run,
         // which would spuriously dirty the stored data every render).
-        if anyLoaded, let encoded = try? JSONEncoder().encode(Array(s).sorted()), encoded != activeTidsSnapshotData {
+        if let encoded = try? JSONEncoder().encode(Array(s).sorted()), encoded != activeTidsSnapshotData {
             DispatchQueue.main.async { activeTidsSnapshotData = encoded }
         }
         return s
