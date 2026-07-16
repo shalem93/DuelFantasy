@@ -81,6 +81,15 @@ struct FantasyHubView: View {
     // dropped writes AND returned corrupt reads (`decode: bad range`) for other
     // keys — scrambling the live RR aggregation. FileBlob auto-migrates it.
     @FileBlob("fantasyPastResultsCache") private var fantasyPastResultsCache: Data
+    /// Persisted snapshot of the last-known ACTIVE (unsettled) fantasy
+    /// tournament ids. The live `activeFantasyTournamentIDs` set is empty
+    /// until the mode view models finish loading (several seconds after the
+    /// tab opens), during which cached past-result rows for LIVE tournaments
+    /// leaked through and then visibly vanished once the VMs warmed. The
+    /// filter unions this snapshot so it knows from the very first frame;
+    /// the snapshot is rewritten whenever the VMs are warm, so a tournament
+    /// that settles gets released promptly.
+    @AppStorage("fantasyActiveTidsSnapshot") private var activeTidsSnapshotData: Data = Data()
     /// True only when we have neither cached data nor a completed fetch.
     /// Used to show a loading indicator instead of the "No past results"
     /// empty state during the cold-load window.
@@ -693,7 +702,26 @@ struct FantasyHubView: View {
         addActive(soccerTiersViewModel.tournament?.id, soccerTiersViewModel.isSettled)
         addActive(golfTiersViewModel.tournament?.id, golfTiersViewModel.isSettled)
         addActive(tennisBracketViewModel.tournament?.id, tennisBracketViewModel.isSettled)
+        // Persist/refresh the snapshot whenever the VMs are warm so cold
+        // launches can filter from the first frame. Only rewrite once at
+        // least one VM has resolved its tournament — an all-cold pass would
+        // wipe the snapshot and reintroduce the flash.
+        let anyLoaded = playoffTiersViewModel.tournament != nil
+            || soccerTiersViewModel.tournament != nil
+            || golfTiersViewModel.tournament != nil
+            || tennisBracketViewModel.tournament != nil
+        // Sorted array for a deterministic encoding (Set order varies per run,
+        // which would spuriously dirty the stored data every render).
+        if anyLoaded, let encoded = try? JSONEncoder().encode(Array(s).sorted()), encoded != activeTidsSnapshotData {
+            DispatchQueue.main.async { activeTidsSnapshotData = encoded }
+        }
         return s
+    }
+
+    /// Last-known active set from the previous warm pass — bridges the
+    /// cold-launch window before the mode VMs load.
+    private var snapshotActiveTids: Set<String> {
+        Set((try? JSONDecoder().decode([String].self, from: activeTidsSnapshotData)) ?? [])
     }
 
     /// Union of (1) locally-cached results from `dfsHistoryData` and
@@ -724,7 +752,10 @@ struct FantasyHubView: View {
             return !localTids.contains(tid)
         }
         let combined = local + serverOnly
-        let activeTids = activeFantasyTournamentIDs
+        // Union the live set with the persisted snapshot: on a cold launch the
+        // VMs haven't loaded yet, the live set is empty, and cached rows for
+        // LIVE tournaments flashed in Past Results until the VMs warmed.
+        let activeTids = activeFantasyTournamentIDs.union(snapshotActiveTids)
         // Match by BASE tid: private-group rows use "<tid>#group-<id>", which
         // slipped past an exact-match filter and showed a LIVE World Cup
         // group as a past result.
