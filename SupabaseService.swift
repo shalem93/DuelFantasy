@@ -1908,15 +1908,31 @@ final class SupabaseService {
     }
 
     /// Fetch all users' settled picks since a given date (for time-filtered leaderboard).
+    /// Paginated: PostgREST silently caps unordered/unlimited responses at its
+    /// max-rows setting (1000), which truncated all-time leaderboards to an
+    /// arbitrary slice once the table outgrew one page — W-L and RR then
+    /// changed on every fetch. Ordered pages make the walk deterministic.
     func fetchAllSettledPicksSince(sinceISO: String, accessToken: String) async throws -> [AllUserSettledPick] {
-        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/pickem_picks"), resolvingAgainstBaseURL: false)
-        components?.queryItems = [
-            URLQueryItem(name: "result", value: "not.is.null"),
-            URLQueryItem(name: "settled_at", value: "gte.\(sinceISO)"),
-            URLQueryItem(name: "select", value: "user_id,result,rr_delta")
-        ]
-        guard let url = components?.url else { throw URLError(.badURL) }
-        return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+        var all: [AllUserSettledPick] = []
+        let pageSize = 1000
+        var offset = 0
+        while true {
+            var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/pickem_picks"), resolvingAgainstBaseURL: false)
+            components?.queryItems = [
+                URLQueryItem(name: "result", value: "not.is.null"),
+                URLQueryItem(name: "settled_at", value: "gte.\(sinceISO)"),
+                URLQueryItem(name: "select", value: "user_id,result,rr_delta"),
+                URLQueryItem(name: "order", value: "settled_at.asc,id.asc"),
+                URLQueryItem(name: "limit", value: "\(pageSize)"),
+                URLQueryItem(name: "offset", value: "\(offset)")
+            ]
+            guard let url = components?.url else { throw URLError(.badURL) }
+            let page: [AllUserSettledPick] = try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+            all.append(contentsOf: page)
+            if page.count < pageSize { break }
+            offset += page.count
+        }
+        return all
     }
 
     /// Fetch all users' DFS results since a given date (for time-filtered leaderboard).

@@ -1451,3 +1451,10 @@ create index if not exists idx_dfs_results_user_rows
 -- hits the gateway timeout.
 create index if not exists idx_dfs_tournaments_lock_time
   on public.dfs_tournaments (lock_time desc);
+
+-- The time-filtered leaderboard walks ALL users' settled picks in ordered
+-- pages (result is not null, settled_at >= cutoff, order settled_at,id).
+-- A matching partial composite index keeps each page an index scan.
+create index if not exists idx_pickem_picks_settled_notnull
+  on public.pickem_picks (settled_at asc, id asc)
+  where result is not null;

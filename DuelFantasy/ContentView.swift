@@ -431,6 +431,12 @@ struct ContentView: View {
     @State private var timeFilteredLeaderboard: [LeaderboardProfile] = []
     @State private var timeFilteredFriendProfiles: [String: LeaderboardProfile] = [:]
     @State private var isLoadingTimeFiltered: Bool = false
+    /// Per-(game filter, time frame) cache of aggregated leaderboard profiles.
+    /// Flipping the segmented pickers re-fired full cross-user scans of
+    /// pickem_picks + dfs_tournament_results on EVERY tap — this keeps a tab
+    /// tour to at most one fetch per combination per TTL window.
+    @State private var timeFilteredCache: [String: (profiles: [LeaderboardProfile], fetchedAt: Date)] = [:]
+    private static let timeFilteredCacheTTL: TimeInterval = 120
 
     private var matchProvider: MatchProvider {
         ConfiguredMatchProvider(apiKey: oddsAPIKey)
@@ -2322,13 +2328,32 @@ struct ContentView: View {
         guard leaderboardGameFilter != .all || leaderboardTimeFrame != .allTime else { return }
         guard let token = auth.accessToken else { return }
 
+        // Serve from cache when this filter combination was fetched recently —
+        // the aggregation scans every user's rows, so it shouldn't re-run on
+        // every picker tap.
+        let cacheKey = "\(leaderboardGameFilter.rawValue)|\(leaderboardTimeFrame.rawValue)"
+        if let cached = timeFilteredCache[cacheKey],
+           Date().timeIntervalSince(cached.fetchedAt) < Self.timeFilteredCacheTTL {
+            applyTimeFilteredProfiles(cached.profiles)
+            return
+        }
+
+        // One in-flight aggregation at a time; rapid picker taps otherwise
+        // stack concurrent cross-user scans. The trailing re-run below picks
+        // up whatever combo is selected once the in-flight fetch finishes.
+        guard !isLoadingTimeFiltered else { return }
         isLoadingTimeFiltered = true
         defer { isLoadingTimeFiltered = false }
 
+        // Snapshot the requested combo — the user can flip pickers mid-fetch,
+        // and mixing live state into the query/caching produced hybrid rows.
+        let requestedGameFilter = leaderboardGameFilter
+        let requestedTimeFrame = leaderboardTimeFrame
+
         let sinceISO: String
-        if leaderboardTimeFrame == .allTime {
+        if requestedTimeFrame == .allTime {
             sinceISO = "2020-01-01T00:00:00Z"
-        } else if let cutoff = leaderboardCutoffDate(for: leaderboardTimeFrame) {
+        } else if let cutoff = leaderboardCutoffDate(for: requestedTimeFrame) {
             sinceISO = ISO8601DateFormatter().string(from: cutoff)
         } else {
             return
@@ -2338,7 +2363,7 @@ struct ContentView: View {
             var allPicks: [AllUserSettledPick] = []
             var allDFS: [AllUserDFSResult] = []
 
-            switch leaderboardGameFilter {
+            switch requestedGameFilter {
             case .pickem:
                 allPicks = try await SupabaseService.shared.fetchAllSettledPicksSince(sinceISO: sinceISO, accessToken: token)
             case .dfs:
@@ -2427,18 +2452,32 @@ struct ContentView: View {
                 ))
             }
 
-            timeFilteredLeaderboard = Array(profiles.prefix(100))
+            timeFilteredCache[cacheKey] = (profiles: profiles, fetchedAt: Date())
 
-            // Build friend profiles for the time-filtered view
-            timeFilteredFriendProfiles = Dictionary(uniqueKeysWithValues:
-                profiles.compactMap { profile in
-                    // Include all profiles so friend lookup works
-                    (profile.id, profile)
-                }
-            )
+            // Only publish if the user is still on the combo we fetched;
+            // otherwise the stale result would overwrite the current view.
+            if requestedGameFilter == leaderboardGameFilter && requestedTimeFrame == leaderboardTimeFrame {
+                applyTimeFilteredProfiles(profiles)
+            }
         } catch {
             print("[Leaderboard] Failed to load time-filtered data: \(error.localizedDescription)")
         }
+
+        // If the selection moved while we were fetching, load it now (cache
+        // makes this a no-op when the new combo was fetched recently).
+        if requestedGameFilter != leaderboardGameFilter || requestedTimeFrame != leaderboardTimeFrame {
+            isLoadingTimeFiltered = false
+            await loadTimeFilteredLeaderboard()
+        }
+    }
+
+    /// Publishes an aggregated profile list into the time-filtered
+    /// leaderboard + friends state (shared by the fetch and cache-hit paths).
+    private func applyTimeFilteredProfiles(_ profiles: [LeaderboardProfile]) {
+        timeFilteredLeaderboard = Array(profiles.prefix(100))
+        timeFilteredFriendProfiles = Dictionary(uniqueKeysWithValues:
+            profiles.map { ($0.id, $0) }
+        )
     }
 
     /// Reads the picked image, compresses to a small JPEG, uploads to the
@@ -3971,21 +4010,32 @@ struct ContentView: View {
         let isSameUser = (lastUserID == userID)
         if isSameUser {
             // Merge settled picks from server into local resolvedMatches so we don't re-settle
-            // Fetch ALL settled picks (paginated) to get accurate counts
+            // Fetch ALL settled picks (paginated) to get accurate counts.
+            // Track whether the walk finished cleanly: a page failure mid-way
+            // yields a PARTIAL list that passes the "not empty" guard below —
+            // adopting it used to shrink RR/W-L on the home screen and then
+            // syncProfileStats cemented the truncated numbers on the server.
             var allSettledPicks: [SettledPickRecord] = []
+            var settledFetchComplete = true
             var offset = 0
             let pageSize = 200
             while true {
-                guard let page = try? await SupabaseService.shared.fetchSettledPicks(userID: userID, limit: pageSize, offset: offset, accessToken: token) else { break }
+                guard let page = try? await SupabaseService.shared.fetchSettledPicks(userID: userID, limit: pageSize, offset: offset, accessToken: token) else {
+                    settledFetchComplete = false
+                    break
+                }
                 allSettledPicks.append(contentsOf: page)
                 if page.count < pageSize { break }
                 offset += page.count
             }
+            if !settledFetchComplete {
+                print("[Pick'em] Sync: settled-picks pagination failed after \(allSettledPicks.count) rows — skipping RR/record adoption this pass")
+            }
 
             // Update Pick'em RR delta from server settled picks (used by home
-            // screen breakdown). NEVER on an empty fetch: a timeout/outage
-            // returns zero pages and used to zero the pill ("Pick'em +0").
-            if !allSettledPicks.isEmpty {
+            // screen breakdown). NEVER on an empty or partial fetch: a
+            // timeout/outage used to zero or shrink the pill ("Pick'em +0").
+            if !allSettledPicks.isEmpty && settledFetchComplete {
                 serverPickemRRDelta = allSettledPicks.reduce(0) { $0 + $1.rrDelta }
             }
 
@@ -4001,16 +4051,16 @@ struct ContentView: View {
                 let localDFSDelta = dfsViewModel.dfsHistory.reduce(0) { $0 + $1.rrDelta }
                 let fullRR = 1000 + pickemDelta + localDFSDelta
 
-                // Safety guard: if the server fetch came back EMPTY but we
-                // have non-zero local record, treat it as a transient
-                // failure and DON'T overwrite. Without this, a single bad
-                // fetch (RLS hiccup, paging error, etc.) used to wipe the
-                // user's record to 0-0 and then syncProfileStats cemented
-                // it on the server, requiring manual recovery.
+                // Safety guard: if the server fetch came back EMPTY or
+                // PARTIAL but we have a non-zero local record, treat it as
+                // a transient failure and DON'T overwrite. Without this, a
+                // single bad fetch (RLS hiccup, paging error, etc.) used to
+                // wipe or shrink the user's record and then syncProfileStats
+                // cemented it on the server, requiring manual recovery.
                 let serverReturnedNothing = allSettledPicks.isEmpty
                 let haveLocalRecord = wins > 0 || losses > 0
-                if serverReturnedNothing && haveLocalRecord {
-                    print("[Pick'em] Sync: server returned 0 settled picks but local W=\(wins)/L=\(losses) — keeping local record (likely transient fetch issue)")
+                if !settledFetchComplete || (serverReturnedNothing && haveLocalRecord) {
+                    print("[Pick'em] Sync: settled-picks fetch \(settledFetchComplete ? "empty" : "incomplete") (local W=\(wins)/L=\(losses)) — keeping local record (likely transient fetch issue)")
                 } else {
                     if rrScore != fullRR || wins != settledWins || losses != settledLosses {
                         print("[Pick'em] Sync: adopting RR=\(fullRR) (pickem=\(pickemDelta), dfs=\(localDFSDelta)) was \(rrScore). W=\(settledWins) (was \(wins)), L=\(settledLosses) (was \(losses))")
@@ -4025,7 +4075,9 @@ struct ContentView: View {
             }
 
             // Merge server settled picks into resolvedMatches and history.
-            if !allSettledPicks.isEmpty {
+            // Only on a COMPLETE fetch: rewriting historyData from a partial
+            // list can drop server-only records that didn't make the page.
+            if !allSettledPicks.isEmpty && settledFetchComplete {
                 // Build a set of all settled match IDs so we can distinguish remapped IDs
                 // from completely different games that happen to share a team name.
                 let settledMatchIDs = Set(allSettledPicks.map(\.matchId))
@@ -4080,7 +4132,7 @@ struct ContentView: View {
             // settled pick's match name AND falls on the same date, the pick is a
             // duplicate under a different ID (e.g. odds- vs espn- for the same game).
             // Mark it as resolved and remove it from picksByMatch.
-            if !allSettledPicks.isEmpty {
+            if !allSettledPicks.isEmpty && settledFetchComplete {
                 // Build settled names WITH dates to avoid false matches across different days
                 // (e.g. same tennis players meeting in consecutive tournament rounds).
                 let settledNamesWithDates: Set<String> = {
