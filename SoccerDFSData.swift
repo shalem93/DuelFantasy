@@ -303,6 +303,20 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
             sport: "soc",
             nameContains: league.rgSlateNameFilter
         )
+
+        // Phase 2: pull RG's per-match showdown salaries for THIS league.
+        // Match by the slate's team abbreviations (RG names showdown slates
+        // with the matchup, e.g. "(MEX vs RSA)", not the league tag — the
+        // name filter alone never matched them); the league name filter
+        // stays as a fallback for any oddly-tagged slates. Fetched BEFORE the
+        // classic gate below because one-game days need it as the fallback.
+        let slateTeams = Set(includedGames.flatMap { [$0.awayTeam.uppercased(), $0.homeTeam.uppercased()] })
+        let socShowdownSalaries = await RotoGrindersSalaryProvider.shared.fetchAllShowdownSalaries(
+            sport: "soc",
+            nameContains: league.rgSlateNameFilter,
+            teamFilter: slateTeams.isEmpty ? nil : slateTeams
+        )
+
         let playersWithRealSalaries: [DFSPlayer]
         if !socClassicSalaries.isEmpty {
             var applied = 0
@@ -335,24 +349,40 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
                 return updated
             }
             print("[Soccer-DFS] LineupHQ applied: \(applied)/\(markedPlayers.count) players matched DK prices")
+        } else if isSingleGame && !socShowdownSalaries.isEmpty {
+            // One-game day (WC semifinal/3rd-place/final): DK doesn't post a
+            // CLASSIC slate for a single game — only a Showdown — so the
+            // classic master is legitimately empty and gating on it hid the
+            // slate entirely. Price the pool from the showdown salaries.
+            var applied = 0
+            playersWithRealSalaries = markedPlayers.map { player in
+                guard let dkPrice = RotoGrindersSalaryProvider.lookupSalary(espnName: player.name, in: socShowdownSalaries) else {
+                    return player
+                }
+                applied += 1
+                let athleteID = String(player.id.dropFirst(league.playerIDPrefix.count))
+                let realProjection = projectedSoccerPoints(
+                    position: player.position,
+                    salary: dkPrice,
+                    athleteID: athleteID
+                )
+                var updated = DFSPlayer(
+                    id: player.id, name: player.name, team: player.team,
+                    position: player.position, salary: dkPrice,
+                    projectedPoints: realProjection,
+                    gameID: player.gameID, injuryStatus: player.injuryStatus
+                )
+                updated.isConfirmedActive = player.isConfirmedActive
+                updated.playedRecently = player.playedRecently
+                return updated
+            }
+            print("[Soccer-DFS] One-game day, no classic slate — showdown prices applied: \(applied)/\(markedPlayers.count)")
         } else {
             // No LineupHQ/DraftKings prices for this soccer slate yet — don't
             // offer a slate built on synthetic salaries. Wait until DK posts it.
             throw NSError(domain: "SoccerDFS", code: 4, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post the \(league.displayName) slate"])
         }
         let sortedPlayers = playersWithRealSalaries.sorted(by: { $0.salary > $1.salary })
-
-        // Phase 2: pull RG's per-match showdown salaries for THIS league.
-        // Match by the slate's team abbreviations (RG names showdown slates
-        // with the matchup, e.g. "(MEX vs RSA)", not the league tag — the
-        // name filter alone never matched them); the league name filter
-        // stays as a fallback for any oddly-tagged slates.
-        let slateTeams = Set(includedGames.flatMap { [$0.awayTeam.uppercased(), $0.homeTeam.uppercased()] })
-        let socShowdownSalaries = await RotoGrindersSalaryProvider.shared.fetchAllShowdownSalaries(
-            sport: "soc",
-            nameContains: league.rgSlateNameFilter,
-            teamFilter: slateTeams.isEmpty ? nil : slateTeams
-        )
 
         let (tournaments, sgPlayers) = buildMultiTournamentSlate(
             baseID: tournamentID,

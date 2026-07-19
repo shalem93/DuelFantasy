@@ -2430,7 +2430,17 @@ actor RotoGrindersSalaryProvider {
     /// Each player is unique to a single game on a date, so name-key
     /// dedup never collides.
     func fetchAllShowdownSalaries(sport: String, nameContains: String? = nil, teamFilter: Set<String>? = nil, date: Date = Date()) async -> [String: Int] {
-        let master = await fetchSlateMaster(sport: sport, date: date)
+        var master = await fetchSlateMaster(sport: sport, date: date)
+        // RG sometimes hasn't published the current day's master yet while the
+        // PREVIOUS day's master already lists the upcoming matchup's showdown
+        // (WC final weekend: the 07/18 master carried the 07/19 ESP-ARG
+        // slate). Only safe when a team filter scopes the lookup to the exact
+        // matchup — without one, a day-back fallback would import a whole
+        // prior day's unrelated showdowns.
+        if master.isEmpty, teamFilter != nil,
+           let prevDay = Calendar(identifier: .gregorian).date(byAdding: .day, value: -1, to: date) {
+            master = await fetchSlateMaster(sport: sport, date: prevDay)
+        }
         guard !master.isEmpty else { return [:] }
 
         // Only true single-game showdowns (games.length == 1). Series-level
