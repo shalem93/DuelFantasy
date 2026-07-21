@@ -198,6 +198,39 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
         return deduped
     }
 
+    /// Frozen weekly DK salary snapshot: {eventID, salaries}. Only the
+    /// current event's snapshot is kept — a new event overwrites it.
+    private static let salarySnapshotKey = "pga_dk_salary_snapshot_v1"
+
+    /// DK salaries for this event: reuse the frozen snapshot when we have
+    /// one, otherwise fetch the week's primary classic slate (today's
+    /// master, then yesterday's) and freeze the first non-empty result.
+    /// Returns empty when DK hasn't posted the slate yet — the caller
+    /// shows "Waiting for DraftKings" rather than estimated prices.
+    static func weeklyClassicSalaries(eventID: String) async -> [String: Int] {
+        struct Snapshot: Codable {
+            let eventID: String
+            let salaries: [String: Int]
+        }
+        if let data = UserDefaults.standard.data(forKey: salarySnapshotKey),
+           let snap = try? JSONDecoder().decode(Snapshot.self, from: data),
+           snap.eventID == eventID, !snap.salaries.isEmpty {
+            return snap.salaries
+        }
+
+        var salaries = await RotoGrindersSalaryProvider.shared.fetchGolfPrimaryClassicSalaries()
+        if salaries.isEmpty,
+           let prevDay = Calendar(identifier: .gregorian).date(byAdding: .day, value: -1, to: Date()) {
+            salaries = await RotoGrindersSalaryProvider.shared.fetchGolfPrimaryClassicSalaries(date: prevDay)
+        }
+        if !salaries.isEmpty,
+           let data = try? JSONEncoder().encode(Snapshot(eventID: eventID, salaries: salaries)) {
+            UserDefaults.standard.set(data, forKey: salarySnapshotKey)
+            print("[GolfDFS] Froze \(salaries.count) DK salaries for event \(eventID)")
+        }
+        return salaries
+    }
+
     func fetchSlate() async throws -> DFSSlate {
         // Fetch PGA Tour scoreboard (current week)
         guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard") else {
@@ -298,11 +331,15 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
         }
 
         // Fetch DraftKings salaries (primary) and OWGR world rankings (fallback).
-        // Golf doesn't have showdown/single-game DK variants — the salary
-        // distribution is naturally compressed (top ~$11k, bottom ~$6k), so
-        // the median-based showdown detection in the salary provider was
-        // false-positive-ing every PGA fetch. Pass nil to skip that gate.
-        async let dkSalariesTask = RotoGrindersSalaryProvider.shared.fetchSalaries(sport: "golf", maxClassicSalary: nil)
+        // Salaries come from the week's PRIMARY classic slate only and are
+        // FROZEN per event: the old aggregate fetch merged every DK golf
+        // slate keeping the max price, so weekend single-round / "Late
+        // Round" captain slates ($15K+ mid-tier golfers) leaked into the
+        // pool and prices drifted Monday → Tuesday → Wednesday as RG's
+        // sources rolled over. Now the first successful DK fetch for an
+        // event is snapshotted and reused until the event changes — one
+        // consistent DK-matching price for the whole week.
+        async let dkSalariesTask = Self.weeklyClassicSalaries(eventID: event.id)
         async let worldRankTask = fetchOWGRRankings()
         // ESPN athlete index (normalized name → ESPN athlete ID). Lets the
         // DK-only fallback assign REAL ESPN IDs so the slate, bots, and the

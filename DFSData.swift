@@ -424,55 +424,43 @@ func singleGameSalary(from mainSalary: Int, league: String = "NBA") -> Int {
     return max(floor, min(16000, rounded))
 }
 
-/// Dedicated MLB showdown salary conversion.
-/// DK MLB Showdown uses $50K cap with 6 players instead of 10 in main slate.
-/// Real DK showdown pricing for MLB (from actual slate comparisons):
-///   Main $6,300 batter → Showdown ~$10,200   (1.62x)
-///   Main $4,500 batter → Showdown ~$7,800    (1.73x)
-///   Main $3,000 batter → Showdown ~$5,800    (1.93x)
-///   Main $2,200 batter → Showdown ~$4,800    (2.18x — floor gets biggest bump)
-///   Main $10,000 pitcher → Showdown ~$15,000 (1.50x)
+/// Dedicated MLB showdown salary conversion for BATTERS (pitchers use
+/// mlbShowdownPitcherSalary below).
+/// Calibrated to a real DK MLB Showdown distribution (SD @ ATL,
+/// 2026-07-21, 42 batters): floor $3,000 flat for the whole bench,
+/// median $4,900, good starters $6-8K, stars $8-9.6K. The previous
+/// curve floored at $4,800 and put average starters at $7-8K — roughly
+/// $2-3K/player over DK across the middle of the pool, which made any
+/// non-minimum lineup blow through the $50K cap (the "can only afford
+/// the 6 cheapest guys" complaint).
 ///
-/// Our estimated main-slate prices run $2,200-$6,500 for batters, $6,000-$13,000 for pitchers.
-/// This function maps those directly to realistic DK showdown ranges.
+/// Our estimated main-slate batter prices run $2,200-$6,500.
 func mlbShowdownSalary(from mainSalary: Int) -> Int {
     let salary = Double(mainSalary)
 
-    // DK showdown pricing uses a non-linear curve that compresses the range:
-    // - Floor players get bumped up significantly (prevents trivial min-price stacking)
-    // - Mid-tier gets a solid 1.7-2.0x multiplier
-    // - Stars get a lower multiplier (~1.5-1.6x) since they're already expensive
-    //
-    // We model this as a piecewise linear map from main-slate → showdown salary.
     let showdown: Double
     if salary <= 2200 {
-        // Minimum salary players → $4,800-$5,200 showdown range
-        showdown = 4800.0 + (salary - 2000.0) * 2.0
+        // Bench / min-price players → DK lists the whole bottom tier flat
+        showdown = 3000.0
     } else if salary <= 3000 {
-        // Low batters ($2,200-$3,000) → $5,200-$6,600
-        // ~1.75x effective at $3,000
-        showdown = 5200.0 + (salary - 2200.0) * 1.75
+        // Fringe starters ($2,200-$3,000) → $3,000-$3,600
+        showdown = 3000.0 + (salary - 2200.0) * 0.75
     } else if salary <= 4000 {
-        // Average batters ($3,000-$4,000) → $6,600-$8,200
-        // ~1.72x effective
-        showdown = 6600.0 + (salary - 3000.0) * 1.60
+        // Average starters ($3,000-$4,000) → $3,600-$5,400 (median zone)
+        showdown = 3600.0 + (salary - 3000.0) * 1.80
     } else if salary <= 5000 {
-        // Good batters ($4,000-$5,000) → $8,200-$9,600
-        // Approaching star territory
-        showdown = 8200.0 + (salary - 4000.0) * 1.40
+        // Good starters ($4,000-$5,000) → $5,400-$7,200
+        showdown = 5400.0 + (salary - 4000.0) * 1.80
     } else if salary <= 6500 {
-        // Elite/MVP batters ($5,000-$6,500) → $9,600-$11,400
-        showdown = 9600.0 + (salary - 5000.0) * 1.20
-    } else if salary <= 9000 {
-        // Mid-tier pitchers ($6,500-$9,000) → $11,400-$14,200
-        showdown = 11400.0 + (salary - 6500.0) * 1.12
+        // Elite/MVP bats ($5,000-$6,500) → $7,200-$9,600 (Tatis/Acuna tier)
+        showdown = 7200.0 + (salary - 5000.0) * 1.60
     } else {
-        // Ace pitchers ($9,000+) → $14,200-$16,000
-        showdown = 14200.0 + (salary - 9000.0) * 0.90
+        // Beyond the usual batter range — extend gently
+        showdown = 9600.0 + (salary - 6500.0) * 1.0
     }
 
     let rounded = (Int(showdown) / 100) * 100
-    return max(4500, min(16000, rounded))
+    return max(3000, min(11000, rounded))
 }
 
 /// DK showdown price for an MLB probable starter, from their main-slate price.
@@ -2195,6 +2183,55 @@ actor RotoGrindersSalaryProvider {
 
         if !byName.isEmpty {
             print("[LineupHQ-Slate] Classic-from-master \(sport.uppercased()): \(byName.count) salaries from \(classicSlates.count) slates (range $\(byName.values.min() ?? 0)-$\(byName.values.max() ?? 0))")
+        }
+        return byName
+    }
+
+    /// Golf-only: DK salaries from the week's PRIMARY full-tournament
+    /// classic slate. The aggregate players.json merges EVERY golf slate
+    /// keeping the max price per player — during tournament weekends DK
+    /// posts single-round and "Late Round" captain slates on a whole
+    /// different scale ($15K+ mid-tier golfers), which contaminated the
+    /// pool and made prices drift day to day. RG names the primary slate
+    /// "(PGA TOUR)" or "(PGA)" depending on the week, so select classic
+    /// slates by EXCLUDING the specialty variants instead.
+    func fetchGolfPrimaryClassicSalaries(date: Date = Date()) async -> [String: Int] {
+        let master = await fetchSlateMaster(sport: "golf", date: date)
+        guard !master.isEmpty else { return [:] }
+
+        let excluded = ["weekend", "round", "alternate", "tiers", "showdown", "captain"]
+        let primarySlates = master.values.filter { slate in
+            guard slate.type == "classic", slate.slate_path != nil else { return false }
+            let name = (slate.name ?? "").lowercased()
+            return !excluded.contains(where: { name.contains($0) })
+        }
+        guard !primarySlates.isEmpty else {
+            print("[LineupHQ-Slate] No primary golf classic slate for \(Self.dateKeyStatic(for: date))")
+            return [:]
+        }
+
+        let allRecords = await withTaskGroup(of: [RGSlateDetailRecord].self, returning: [RGSlateDetailRecord].self) { group in
+            for slate in primarySlates {
+                guard let path = slate.slate_path else { continue }
+                group.addTask { await self.fetchSlateDetail(slatePath: path) }
+            }
+            var merged: [RGSlateDetailRecord] = []
+            for await chunk in group { merged.append(contentsOf: chunk) }
+            return merged
+        }
+
+        var byName: [String: Int] = [:]
+        for record in allRecords {
+            guard let first = record.player?.first_name,
+                  let last = record.player?.last_name,
+                  let salary = record.schedule?.salaries?.first?.salary, salary > 0 else { continue }
+            let name = "\(first) \(last)".trimmingCharacters(in: .whitespaces)
+            let key = Self.normalizeName(name)
+            if let existing = byName[key], existing >= salary { continue }
+            byName[key] = salary
+        }
+        if !byName.isEmpty {
+            print("[LineupHQ-Slate] Golf primary classic: \(byName.count) salaries (range $\(byName.values.min() ?? 0)-$\(byName.values.max() ?? 0))")
         }
         return byName
     }
