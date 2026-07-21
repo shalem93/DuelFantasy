@@ -513,13 +513,13 @@ struct DFSLiveContestView: View {
                                         .font(.caption2.weight(.medium))
                                         .foregroundStyle(.secondary)
                                 }
-                                if isPGA, let stats = liveStats, !stats.minutes.isEmpty, stats.minutes != "999" {
+                                if isPGA || isNASCAR, let stats = liveStats, !stats.minutes.isEmpty, stats.minutes != "999" {
                                     Text(stats.minutes)
                                         .font(.system(size: 9, weight: .bold))
                                         .foregroundStyle(.white)
                                         .padding(.horizontal, 5)
                                         .padding(.vertical, 2)
-                                        .background(Color(red: 0.0, green: 0.5, blue: 0.2))
+                                        .background(isNASCAR ? Color(red: 0.85, green: 0.15, blue: 0.10) : Color(red: 0.0, green: 0.5, blue: 0.2))
                                         .clipShape(Capsule())
                                 }
                                 // Ownership % only once this player's game has
@@ -539,6 +539,8 @@ struct DFSLiveContestView: View {
                             if let stats = liveStats {
                                 if isPGA {
                                     pgaStatLine(stats: stats)
+                                } else if isNASCAR {
+                                    nascarStatLine(stats: stats)
                                 } else if isMLB {
                                     mlbStatLine(stats: stats, position: player.position)
                                 } else if isNHL {
@@ -1099,6 +1101,21 @@ struct DFSLiveContestView: View {
         viewModel.sport == "EPL" || viewModel.sport == "UCL" || viewModel.sport == "WC"
     }
 
+    private var isNASCAR: Bool {
+        viewModel.sport == "NASCAR"
+    }
+
+    /// NASCAR stat line from the repurposed live-stat fields:
+    /// points = position, rebounds = laps led, assists = laps completed,
+    /// ftm = start position.
+    private func nascarStatLine(stats: DFSPlayerLiveStats) -> some View {
+        let diff = stats.ftm >= 1 && stats.points >= 1 ? stats.ftm - stats.points : 0
+        return Text("P\(stats.points)  \(diff >= 0 ? "+" : "")\(diff) POS  \(stats.rebounds) LL  \(stats.assists) LAPS")
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+    }
+
     private func expandedBoxScore(fieldEntry: DFSFieldEntry) -> some View {
         VStack(spacing: 0) {
             // Box score header — sport-aware
@@ -1143,6 +1160,15 @@ struct DFSLiveContestView: View {
                         .frame(width: 28, alignment: .trailing)
                     Text("CTRL")
                         .frame(width: 32, alignment: .trailing)
+                } else if isNASCAR {
+                    Text("POS")
+                        .frame(width: 28, alignment: .trailing)
+                    Text("ST")
+                        .frame(width: 24, alignment: .trailing)
+                    Text("+/-")
+                        .frame(width: 28, alignment: .trailing)
+                    Text("LL")
+                        .frame(width: 28, alignment: .trailing)
                 } else {
                     Text("PTS")
                         .frame(width: 28, alignment: .trailing)
@@ -1352,6 +1378,18 @@ struct DFSLiveContestView: View {
                             let ctrlSec = stats.blocks % 60
                             Text("\(ctrlMin):\(String(format: "%02d", ctrlSec))")
                                 .frame(width: 32, alignment: .trailing)
+                        } else if isNASCAR {
+                            // NASCAR: POS, ST, +/-, LL (repurposed fields)
+                            let diff = stats.ftm >= 1 && stats.points >= 1 ? stats.ftm - stats.points : 0
+                            Text("P\(stats.points)")
+                                .frame(width: 28, alignment: .trailing)
+                            Text(stats.ftm >= 1 ? "\(stats.ftm)" : "-")
+                                .frame(width: 24, alignment: .trailing)
+                            Text("\(diff >= 0 ? "+" : "")\(diff)")
+                                .foregroundStyle(diff > 0 ? .green : (diff < 0 ? .red : .secondary))
+                                .frame(width: 28, alignment: .trailing)
+                            Text("\(stats.rebounds)")
+                                .frame(width: 28, alignment: .trailing)
                         } else {
                             Text("\(stats.points)")
                                 .frame(width: 28, alignment: .trailing)
@@ -1402,6 +1440,11 @@ struct DFSLiveContestView: View {
                             Text("-").frame(width: 28, alignment: .trailing)
                             Text("-").frame(width: 32, alignment: .trailing)
                         }
+                    } else if isNASCAR {
+                        Text("-").frame(width: 28, alignment: .trailing)
+                        Text("-").frame(width: 24, alignment: .trailing)
+                        Text("-").frame(width: 28, alignment: .trailing)
+                        Text("-").frame(width: 28, alignment: .trailing)
                     } else if gameStartedOrDone {
                         Text("0").frame(width: 28, alignment: .trailing)
                         Text("0").frame(width: 28, alignment: .trailing)

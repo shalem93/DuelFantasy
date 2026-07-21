@@ -457,6 +457,13 @@ final class DFSViewModel {
             guard let game = slateGames.first else { return 300 }
             return game.state == "in" ? 300 : 1800
         }
+        if sport == "NASCAR" {
+            // Each snapshot is ~80 small core-API fetches (per-driver
+            // startOrder + stats), so poll gently: 60s during the race,
+            // 10min otherwise.
+            guard let game = slateGames.first else { return 600 }
+            return game.state == "in" ? 60 : 600
+        }
         return 35
     }
 
@@ -6858,6 +6865,31 @@ final class DFSViewModel {
         } else if tournamentId.hasPrefix("cfb-") {
             sportPrefix = "cfb"
             dateString = String(tournamentId.dropFirst(4).prefix(8))
+        } else if tournamentId.hasPrefix("nascar-") {
+            // NASCAR mirrors PGA: "nascar-{eventID}-{fieldSize}" — the live
+            // scoring provider re-fetches the race by event ID (the event ID
+            // embeds the date, so the date-fallback query inside works too).
+            let afterPrefix = tournamentId.replacingOccurrences(of: "nascar-", with: "")
+            let eventID = afterPrefix.components(separatedBy: "-").first ?? afterPrefix
+            let serverTournament = try? await SupabaseService.shared.fetchTournament(
+                tournamentID: tournamentId, accessToken: accessToken ?? ""
+            )
+            let eventDate = serverTournament?.lockTime ?? pastTournamentResultRecords.compactMap(\.createdAt).min() ?? Date()
+            let slateGame = DFSSlateGame(
+                id: eventID, awayTeam: "", homeTeam: "NASCAR",
+                startTime: eventDate, state: "post"
+            )
+            let scoringProvider = ESPNNASCARDFSLiveScoringProvider()
+            if let snapshot = try? await scoringProvider.fetchScoreSnapshot(for: [slateGame]),
+               !snapshot.playerLiveStats.isEmpty {
+                for (pid, stats) in snapshot.playerLiveStats {
+                    pastTournamentPlayerStats[pid] = stats
+                }
+                pastTournamentStatsLoaded = tournamentId
+            } else {
+                print("[DFS-NASCAR] Box scores: ESPN returned empty stats for event \(eventID)")
+            }
+            return
         } else if tournamentId.hasPrefix("pga-") {
             // For golf, fetch the ESPN PGA scoreboard to get round-by-round scores
             // Tournament ID is "pga-{eventID}-{fieldSize}" — extract just the ESPN event ID
@@ -8121,11 +8153,16 @@ final class DFSViewModel {
                 let now = Date()
                 let tidEventDate: Date? = {
                     let comps = tid.components(separatedBy: "-")
-                    guard comps.count >= 2, comps[1].count == 8 else { return nil }
+                    guard comps.count >= 2 else { return nil }
+                    // NASCAR event IDs are 12 digits with the date up front
+                    // ("202607260012") — take the leading 8. Non-date tokens
+                    // (e.g. PGA's "401811950") fail the strict parse below.
+                    let token = comps[1].count == 8 ? comps[1] : String(comps[1].prefix(8))
+                    guard token.count == 8 else { return nil }
                     let f = DateFormatter()
                     f.locale = Locale(identifier: "en_US_POSIX")
                     f.dateFormat = "yyyyMMdd"
-                    return f.date(from: comps[1])
+                    return f.date(from: token)
                 }()
                 let serverLock = serverTournament?.lockTime
                 let startToday = Calendar.current.startOfDay(for: now)
@@ -8283,6 +8320,31 @@ final class DFSViewModel {
         return games
     }
 
+    /// Fetches one specific past NASCAR race by date as a single slate game.
+    /// The generic helper is unusable for racing (athlete competitors, no
+    /// `team.abbreviation`), mirroring the UFC situation above.
+    private func fetchNASCARSlateGamesForDate(_ dateKey: String) async -> [DFSSlateGame] {
+        let urlString = "https://site.api.espn.com/apis/site/v2/sports/racing/nascar-premier/scoreboard?dates=\(dateKey)"
+        guard let url = URL(string: urlString),
+              let (data, response) = try? await URLSession.shared.data(from: url),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let events = json["events"] as? [[String: Any]] else {
+            return []
+        }
+        return events.compactMap { event in
+            guard let id = event["id"] as? String else { return nil }
+            let name = event["name"] as? String ?? "NASCAR"
+            let state = (((event["status"] as? [String: Any])?["type"] as? [String: Any])?["state"] as? String) ?? "pre"
+            let dateStr = event["date"] as? String ?? ""
+            let fmt = ISO8601DateFormatter()
+            return DFSSlateGame(
+                id: id, awayTeam: "", homeTeam: name,
+                startTime: fmt.date(from: dateStr) ?? Date(), state: state
+            )
+        }
+    }
+
     /// builds a full simulated field with real player lineups, and persists everything to server.
     /// Returns the generated result records on success so callers can use them directly
     /// without needing to re-fetch from the server (which may still have stale data if DELETE failed).
@@ -8332,6 +8394,7 @@ final class DFSViewModel {
         case "ufc": espnSport = "mma/ufc"
         case "nfl": espnSport = "football/nfl"
         case "cfb": espnSport = "football/college-football"
+        case "nascar": espnSport = "racing/nascar-premier"
         default: espnSport = "basketball/nba"
         }
 
@@ -8343,9 +8406,12 @@ final class DFSViewModel {
         // per-fight slate games. The UFC slate provider can't be reused
         // here because it returns the "best" upcoming/live card — for
         // settlement we need the specific past card by date.
+        // NASCAR is athlete-based too (one race event, ~40 drivers).
         let allPastSlateGames: [DFSSlateGame]
         if sportPrefix == "ufc" {
             allPastSlateGames = await fetchUFCSlateGamesForDate(dateString)
+        } else if sportPrefix == "nascar" {
+            allPastSlateGames = await fetchNASCARSlateGamesForDate(dateString)
         } else {
             allPastSlateGames = await fetchSlateGamesForDate(dateString, espnSport: espnSport)
         }
@@ -8447,6 +8513,7 @@ final class DFSViewModel {
         case "ufc": settlementScoringProvider = ESPNUFCDFSLiveScoringProvider()
         case "nfl": settlementScoringProvider = ESPNNFLDFSLiveScoringProvider()
         case "cfb": settlementScoringProvider = ESPNNCAAFBDFSLiveScoringProvider()
+        case "nascar": settlementScoringProvider = ESPNNASCARDFSLiveScoringProvider()
         default: settlementScoringProvider = scoringProvider
         }
 
@@ -8960,7 +9027,7 @@ final class DFSViewModel {
         // multi-game, non-single-game, excluding UFC/PGA. Where the settlement
         // position derivation is coarse (NHL skater-vs-goalie; football all-UTIL),
         // matching falls back to "any appeared player" so DNP slots still upgrade.
-        let isLateSwapSettle = !isSingleGame && !["ufc", "pga"].contains(sportPrefix)
+        let isLateSwapSettle = !isSingleGame && !["ufc", "pga", "nascar"].contains(sportPrefix)
         let appearedIDs = Set(allPlayers.map(\.id))
         // Deterministic salary for ranking/budget (NEVER Int.random — every device
         // must agree): canonical tournament price, else a stable id-hash estimate.

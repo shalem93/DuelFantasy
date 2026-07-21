@@ -13,6 +13,7 @@ import SwiftUI
         case cfb = "CFB"
         case wnba = "WNBA"
         case ncaam = "NCAAM"
+        case nascar = "NASCAR"
 
         /// In-season check by today's date. Sports out-of-season are pushed
         /// to the end of the pill row so the user always sees active leagues
@@ -47,6 +48,8 @@ import SwiftUI
                 return mmdd >= 515 && mmdd <= 1020       // regular season → Finals
             case .ncaam:
                 return mmdd >= 1103 || mmdd <= 408       // Nov tip-off → April championship
+            case .nascar:
+                return mmdd >= 201 && mmdd <= 1110       // Clash/Daytona → championship
             }
         }
 
@@ -69,6 +72,7 @@ import SwiftUI
             case .ucl: return 9
             case .wnba: return 10
             case .ncaam: return 11
+            case .nascar: return 12
             }
         }
 
@@ -95,6 +99,7 @@ struct DFSContestView: View {
     @Bindable var cfbViewModel: DFSViewModel
     @Bindable var ncaamViewModel: DFSViewModel
     @Bindable var wnbaViewModel: DFSViewModel
+    @Bindable var nascarViewModel: DFSViewModel
     /// ADMIN ONLY. Permanently delete a past contest and claw back its RR.
     var onDeletePastContest: (String) -> Void
     /// ADMIN ONLY. Re-grade a past contest (regen bots + re-score) instead of deleting.
@@ -140,6 +145,7 @@ struct DFSContestView: View {
         case .cfb: return cfbViewModel
         case .ncaam: return ncaamViewModel
         case .wnba: return wnbaViewModel
+        case .nascar: return nascarViewModel
         }
     }
 
@@ -224,6 +230,8 @@ struct DFSContestView: View {
                         basketballTodayContent(viewModel: ncaamViewModel)
                     } else if selectedSport == .wnba {
                         basketballTodayContent(viewModel: wnbaViewModel)
+                    } else if selectedSport == .nascar {
+                        nascarTodayContent
                     } else {
                         basketballTodayContent(viewModel: viewModel)
                     }
@@ -277,6 +285,9 @@ struct DFSContestView: View {
                             case .wnba:
                                 await wnbaViewModel.loadSlate(force: true)
                                 await wnbaViewModel.refreshLive()
+                            case .nascar:
+                                await nascarViewModel.loadSlate(force: true)
+                                await nascarViewModel.refreshLive()
                             }
                             // Retry settlement for ended-but-unsettled contests
                             // across ALL sports. Settlement otherwise only runs
@@ -288,7 +299,8 @@ struct DFSContestView: View {
                             // responsive; settlement skips already-settled tids.
                             for vm in [viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
                                        eplViewModel, uclViewModel, wcViewModel, ufcViewModel,
-                                       nflViewModel, cfbViewModel, ncaamViewModel, wnbaViewModel] {
+                                       nflViewModel, cfbViewModel, ncaamViewModel, wnbaViewModel,
+                                       nascarViewModel] {
                                 Task.detached { [vm] in await vm.checkAndSettleUnsettledTournaments() }
                             }
                         }
@@ -315,7 +327,7 @@ struct DFSContestView: View {
             for vm in [viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
                        eplViewModel, uclViewModel, wcViewModel,
                        ufcViewModel, nflViewModel, cfbViewModel,
-                       ncaamViewModel, wnbaViewModel] {
+                       ncaamViewModel, wnbaViewModel, nascarViewModel] {
                 vm.loadCachedPrivateContests()
             }
 
@@ -333,7 +345,7 @@ struct DFSContestView: View {
                 viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
                 eplViewModel, uclViewModel, wcViewModel,
                 ufcViewModel, nflViewModel, cfbViewModel,
-                ncaamViewModel, wnbaViewModel
+                ncaamViewModel, wnbaViewModel, nascarViewModel
             ]
             if let userID = viewModel.userID, let token = viewModel.accessToken {
                 await DFSViewModel.syncAllSportsHistoryFromServer(
@@ -464,6 +476,17 @@ struct DFSContestView: View {
                 await wnbaViewModel.refreshLive()
             }
         }
+        .task(id: "nascar-polling") {
+            while !Task.isCancelled {
+                // NASCAR polls on its own cadence (each snapshot fans out
+                // ~80 per-driver core-API fetches, so 35s would be abusive).
+                let interval = UInt64(nascarViewModel.pollingInterval * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: interval)
+                guard scenePhase == .active, selectedSport == .nascar else { continue }
+                await refreshAuthAndSync()
+                await nascarViewModel.refreshLive()
+            }
+        }
         // Immediate refresh on sport switch — the active polling loop
         // won't fire for up to 35s after the switch, so kick off a one-shot
         // refresh right away so the new tab's data feels fresh.
@@ -483,6 +506,7 @@ struct DFSContestView: View {
                 case .cfb: await cfbViewModel.refreshLive()
                 case .ncaam: await ncaamViewModel.refreshLive()
                 case .wnba: await wnbaViewModel.refreshLive()
+                case .nascar: await nascarViewModel.refreshLive()
                 }
             }
         }
@@ -584,6 +608,96 @@ struct DFSContestView: View {
             Button {
                 Task {
                     await pgaViewModel.loadSlate(force: true)
+                }
+            } label: {
+                Text("Try Again")
+                    .font(.headline)
+                    .padding(.horizontal, 32)
+                    .padding(.vertical, 12)
+                    .background(brandPurple)
+                    .foregroundStyle(.white)
+                    .clipShape(Capsule())
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            LinearGradient(
+                colors: [
+                    Color(red: 0.93, green: 0.97, blue: 0.93),
+                    Color(red: 0.95, green: 0.97, blue: 1.00),
+                    Color(red: 0.98, green: 0.99, blue: 1.00)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+        )
+    }
+
+    // MARK: - NASCAR Today Content
+
+    private var nascarTodayContent: some View {
+        Group {
+            if nascarViewModel.tournament == nil && (nascarViewModel.isLoading || !nascarViewModel.hasAttemptedLoad) {
+                nascarLoadingView
+            } else if nascarViewModel.noActiveEvent {
+                nascarEmptyStateView
+            } else if nascarViewModel.isFullyLocked {
+                lockedContestList(viewModel: nascarViewModel)
+            } else if nascarViewModel.isPartiallyLocked {
+                partiallyLockedView(viewModel: nascarViewModel)
+            } else {
+                DFSLobbyView(viewModel: nascarViewModel)
+            }
+        }
+        // Same rationale as PGA: fire refreshLive on tab appear so past-race
+        // self-heal doesn't wait out the pre-race polling interval.
+        .task {
+            await nascarViewModel.refreshLive()
+        }
+    }
+
+    private var nascarLoadingView: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .scaleEffect(1.2)
+            Text("Loading NASCAR race...")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            LinearGradient(
+                colors: [
+                    Color(red: 0.93, green: 0.97, blue: 0.93),
+                    Color(red: 0.95, green: 0.97, blue: 1.00),
+                    Color(red: 0.98, green: 0.99, blue: 1.00)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+        )
+    }
+
+    private var nascarEmptyStateView: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "flag.checkered")
+                .font(.system(size: 48))
+                .foregroundStyle(.secondary)
+
+            Text("No Cup Race This Week")
+                .font(.title3.weight(.semibold))
+
+            Text("There's no NASCAR Cup Series race available right now. Check back closer to race day!")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+
+            Button {
+                Task {
+                    await nascarViewModel.loadSlate(force: true)
                 }
             } label: {
                 Text("Try Again")
@@ -1748,6 +1862,8 @@ struct DFSContestView: View {
 
             Text(vm.sport == "PGA"
                  ? "This week's PGA tournament has locked.\nCheck back for next week's event!"
+                 : vm.sport == "NASCAR"
+                 ? "This week's Cup race has locked.\nCheck back for next week's race!"
                  : "Today's \(vm.sport) games have locked.\nCheck back for tomorrow's slate!")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
@@ -2207,13 +2323,14 @@ struct DFSContestView: View {
     private var cfbActiveEntries: [DFSEntryRecord] { activeEntries(for: cfbViewModel) }
     private var ncaamActiveEntries: [DFSEntryRecord] { activeEntries(for: ncaamViewModel) }
     private var wnbaActiveEntries: [DFSEntryRecord] { activeEntries(for: wnbaViewModel) }
+    private var nascarActiveEntries: [DFSEntryRecord] { activeEntries(for: nascarViewModel) }
 
     /// All active DFS entries across all sports (one per entered tournament, excluding settled).
     private var allActiveEntries: [DFSEntryRecord] {
         nbaActiveEntries + nhlActiveEntries + mlbActiveEntries + pgaActiveEntries
         + eplActiveEntries + uclActiveEntries + wcActiveEntries
         + ufcActiveEntries + nflActiveEntries + cfbActiveEntries
-        + ncaamActiveEntries + wnbaActiveEntries
+        + ncaamActiveEntries + wnbaActiveEntries + nascarActiveEntries
     }
 
     private var hasAnyActiveEntry: Bool {
@@ -2258,6 +2375,7 @@ struct DFSContestView: View {
     private func viewModelForContest(_ contest: DFSPrivateContest) -> DFSViewModel {
         let id = contest.parentTournamentID.lowercased()
         if id.hasPrefix("nhl-") { return nhlViewModel }
+        if id.hasPrefix("nascar-") { return nascarViewModel }
         if id.hasPrefix("mlb-") { return mlbViewModel }
         if id.hasPrefix("pga-") { return pgaViewModel }
         if id.hasPrefix("epl-") { return eplViewModel }
@@ -2356,7 +2474,7 @@ struct DFSContestView: View {
                 viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
                 eplViewModel, uclViewModel, wcViewModel,
                 ufcViewModel, nflViewModel, cfbViewModel,
-                ncaamViewModel, wnbaViewModel
+                ncaamViewModel, wnbaViewModel, nascarViewModel
             ]
             // Each tournament has a canonical owner — the sport VM whose
             // prefix matches the tournament ID (e.g. PGA tournaments belong
@@ -2368,6 +2486,7 @@ struct DFSContestView: View {
             // accept rows from that VM.
             func canonicalVM(for tid: String) -> DFSViewModel? {
                 if tid.hasPrefix("pga-") { return pgaViewModel }
+                if tid.hasPrefix("nascar-") { return nascarViewModel }
                 if tid.hasPrefix("nhl-") { return nhlViewModel }
                 if tid.hasPrefix("ncaam-") { return ncaamViewModel }
                 if tid.hasPrefix("wnba-") { return wnbaViewModel }
@@ -2595,7 +2714,7 @@ struct DFSContestView: View {
                 for vm in [viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
                            eplViewModel, uclViewModel, wcViewModel,
                            ufcViewModel, nflViewModel, cfbViewModel,
-                           ncaamViewModel, wnbaViewModel] {
+                           ncaamViewModel, wnbaViewModel, nascarViewModel] {
                     group.addTask { await vm.loadAllPrivateContestFinalScores() }
                 }
             }
@@ -2637,6 +2756,7 @@ struct DFSContestView: View {
             if tournamentID.hasPrefix("nhl-") { return nhlViewModel }
             if tournamentID.hasPrefix("ncaam-") { return ncaamViewModel }
             if tournamentID.hasPrefix("wnba-") { return wnbaViewModel }
+            if tournamentID.hasPrefix("nascar-") { return nascarViewModel }
             if tournamentID.hasPrefix("mlb-") { return mlbViewModel }
             if tournamentID.hasPrefix("pga-") { return pgaViewModel }
             if tournamentID.hasPrefix("epl-") { return eplViewModel }
@@ -2657,6 +2777,7 @@ struct DFSContestView: View {
         if tid.hasPrefix("nhl-") { return "NHL" }
         if tid.hasPrefix("ncaam-") { return "NCAAM" }
         if tid.hasPrefix("wnba-") { return "WNBA" }
+        if tid.hasPrefix("nascar-") { return "NASCAR" }
         if tid.hasPrefix("mlb-") { return "MLB" }
         if tid.hasPrefix("pga-") { return "PGA" }
         if tid.hasPrefix("epl-") { return "EPL" }
@@ -2670,6 +2791,7 @@ struct DFSContestView: View {
 
     private func sportColor(for result: DFSResult) -> Color {
         guard let tid = result.tournamentId else { return brandPurple }
+        if tid.hasPrefix("nascar-") { return Color(red: 0.85, green: 0.15, blue: 0.10) }
         if tid.hasPrefix("nhl-") { return Color(red: 0.1, green: 0.3, blue: 0.6) }
         if tid.hasPrefix("ncaam-") { return Color(red: 0.1, green: 0.3, blue: 0.6) }
         if tid.hasPrefix("wnba-") { return Color(red: 0.90, green: 0.35, blue: 0.10) }
@@ -3176,6 +3298,7 @@ struct DFSContestView: View {
             if tid.hasPrefix("nhl-") { return nhlViewModel }
             if tid.hasPrefix("ncaam-") { return ncaamViewModel }
             if tid.hasPrefix("wnba-") { return wnbaViewModel }
+            if tid.hasPrefix("nascar-") { return nascarViewModel }
             if tid.hasPrefix("mlb-") { return mlbViewModel }
             if tid.hasPrefix("pga-") { return pgaViewModel }
             if tid.hasPrefix("epl-") { return eplViewModel }
@@ -3226,6 +3349,9 @@ struct DFSContestView: View {
         wnbaViewModel.accessToken = auth.accessToken
         wnbaViewModel.userID = auth.userID
         wnbaViewModel.userEmail = auth.userEmail
+        nascarViewModel.accessToken = auth.accessToken
+        nascarViewModel.userID = auth.userID
+        nascarViewModel.userEmail = auth.userEmail
     }
 
     /// Fetch the user's recent entries and keep only those for tournaments not currently
@@ -3249,6 +3375,7 @@ struct DFSContestView: View {
                 .union(cfbViewModel.enteredTournamentIDs)
                 .union(ncaamViewModel.enteredTournamentIDs)
                 .union(wnbaViewModel.enteredTournamentIDs)
+                .union(nascarViewModel.enteredTournamentIDs)
 
             // Only show entries from the last 3 days to avoid stale cards
             let staleThreshold = Date().addingTimeInterval(-3 * 24 * 3600)
@@ -3276,6 +3403,7 @@ struct DFSContestView: View {
         if tournamentID.hasPrefix("nhl-") { return "NHL" }
         if tournamentID.hasPrefix("ncaam-") { return "NCAAM" }
         if tournamentID.hasPrefix("wnba-") { return "WNBA" }
+        if tournamentID.hasPrefix("nascar-") { return "NASCAR" }
         if tournamentID.hasPrefix("mlb-") { return "MLB" }
         if tournamentID.hasPrefix("pga-") { return "PGA" }
         if tournamentID.hasPrefix("epl-") { return "EPL" }
@@ -3291,6 +3419,7 @@ struct DFSContestView: View {
         if tournamentID.hasPrefix("nhl-") { return Color(red: 0.1, green: 0.3, blue: 0.6) }
         if tournamentID.hasPrefix("ncaam-") { return Color(red: 0.1, green: 0.3, blue: 0.6) }
         if tournamentID.hasPrefix("wnba-") { return Color(red: 0.90, green: 0.35, blue: 0.10) }
+        if tournamentID.hasPrefix("nascar-") { return Color(red: 0.85, green: 0.15, blue: 0.10) }
         if tournamentID.hasPrefix("mlb-") { return Color(red: 0.0, green: 0.2, blue: 0.5) }
         if tournamentID.hasPrefix("pga-") { return Color(red: 0.0, green: 0.5, blue: 0.2) }
         if tournamentID.hasPrefix("epl-") { return Color(red: 0.3, green: 0.0, blue: 0.5) }
@@ -3369,6 +3498,12 @@ struct DFSContestView: View {
                 startPoint: .topLeading, endPoint: .bottomTrailing
             )
         }
+        if tournamentID.hasPrefix("nascar-") {
+            return LinearGradient(
+                colors: [Color(red: 0.45, green: 0.05, blue: 0.05), Color(red: 0.70, green: 0.12, blue: 0.08)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            )
+        }
         return LinearGradient(
             colors: [Color(red: 0.10, green: 0.12, blue: 0.22), Color(red: 0.15, green: 0.20, blue: 0.35)],
             startPoint: .topLeading, endPoint: .bottomTrailing
@@ -3404,7 +3539,8 @@ struct DFSContestView: View {
         // LIVE 0.0 hours before the games actually started.
         let lockTime: Date? = [viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
                                eplViewModel, uclViewModel, wcViewModel, ufcViewModel,
-                               nflViewModel, cfbViewModel, ncaamViewModel, wnbaViewModel].lazy.compactMap { vm in
+                               nflViewModel, cfbViewModel, ncaamViewModel, wnbaViewModel,
+                               nascarViewModel].lazy.compactMap { vm in
             vm.tournaments.first(where: { $0.id == tid }).map { vm.lockTimeForTournament($0) }
         }.first
         if let lt = lockTime {
@@ -3436,6 +3572,7 @@ struct DFSContestView: View {
         if tournamentID.hasPrefix("nba-") { return viewModel }
         if tournamentID.hasPrefix("ncaam-") { return ncaamViewModel }
         if tournamentID.hasPrefix("wnba-") { return wnbaViewModel }
+        if tournamentID.hasPrefix("nascar-") { return nascarViewModel }
         if tournamentID.hasPrefix("nhl-") { return nhlViewModel }
         if tournamentID.hasPrefix("mlb-") { return mlbViewModel }
         if tournamentID.hasPrefix("pga-") { return pgaViewModel }

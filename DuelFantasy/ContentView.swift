@@ -251,6 +251,7 @@ private struct ExtraSettledSyncModifier: ViewModifier {
     @Bindable var cfb: DFSViewModel
     @Bindable var ncaam: DFSViewModel
     @Bindable var wnba: DFSViewModel
+    @Bindable var nascar: DFSViewModel
     var syncSettled: (Data) -> Void
 
     func body(content: Content) -> some View {
@@ -263,6 +264,7 @@ private struct ExtraSettledSyncModifier: ViewModifier {
             .onChange(of: cfb.settledTournamentData) { _, v in syncSettled(v) }
             .onChange(of: ncaam.settledTournamentData) { _, v in syncSettled(v) }
             .onChange(of: wnba.settledTournamentData) { _, v in syncSettled(v) }
+            .onChange(of: nascar.settledTournamentData) { _, v in syncSettled(v) }
     }
 }
 
@@ -383,6 +385,11 @@ struct ContentView: View {
         slateProvider: ESPNWNBADFSSlateProvider(),
         scoringProvider: ESPNWNBADFSLiveScoringProvider()
     )
+    @State private var nascarDFSViewModel = DFSViewModel(
+        sport: "NASCAR",
+        slateProvider: ESPNNASCARDFSSlateProvider(),
+        scoringProvider: ESPNNASCARDFSLiveScoringProvider()
+    )
     @State private var bestBallViewModel = BestBallViewModel()
     @State private var playoffTiersViewModel = PlayoffTiersViewModel()
     @State private var tennisBracketViewModel = TennisBracketViewModel()
@@ -468,10 +475,11 @@ struct ContentView: View {
             dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
             eplDFSViewModel, uclDFSViewModel, wcDFSViewModel,
             ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel,
-            ncaamDFSViewModel, wnbaDFSViewModel
+            ncaamDFSViewModel, wnbaDFSViewModel, nascarDFSViewModel
         ]
         func canonicalVM(for tid: String) -> DFSViewModel? {
             if tid.hasPrefix("pga-") { return pgaDFSViewModel }
+            if tid.hasPrefix("nascar-") { return nascarDFSViewModel }
             if tid.hasPrefix("nhl-") { return nhlDFSViewModel }
             if tid.hasPrefix("ncaam-") { return ncaamDFSViewModel }
             if tid.hasPrefix("wnba-") { return wnbaDFSViewModel }
@@ -544,7 +552,8 @@ struct ContentView: View {
             ("nba", dfsViewModel), ("nhl", nhlDFSViewModel), ("mlb", mlbDFSViewModel),
             ("pga", pgaDFSViewModel), ("epl", eplDFSViewModel), ("ucl", uclDFSViewModel),
             ("wc", wcDFSViewModel), ("ufc", ufcDFSViewModel), ("nfl", nflDFSViewModel),
-            ("cfb", cfbDFSViewModel), ("ncaam", ncaamDFSViewModel), ("wnba", wnbaDFSViewModel)
+            ("cfb", cfbDFSViewModel), ("ncaam", ncaamDFSViewModel), ("wnba", wnbaDFSViewModel),
+            ("nascar", nascarDFSViewModel)
         ]
         print("=== [RR-DEBUG \(context)] dfsRRDelta=\(dfsRRDelta) pickem=\(pickemRRDelta) displayed=\(displayedRR) ===")
         for (name, vm) in vms {
@@ -623,6 +632,7 @@ struct ContentView: View {
                 epl: eplDFSViewModel, ucl: uclDFSViewModel, wc: wcDFSViewModel,
                 ufc: ufcDFSViewModel, nfl: nflDFSViewModel, cfb: cfbDFSViewModel,
                 ncaam: ncaamDFSViewModel, wnba: wnbaDFSViewModel,
+                nascar: nascarDFSViewModel,
                 syncSettled: syncSettledData
             ))
             .onChange(of: dfsHistoryData) { _, v in syncHistoryData(v) }
@@ -649,7 +659,7 @@ struct ContentView: View {
                 }
                 .tag(0)
 
-            DFSContestView(viewModel: dfsViewModel, nhlViewModel: nhlDFSViewModel, mlbViewModel: mlbDFSViewModel, pgaViewModel: pgaDFSViewModel, eplViewModel: eplDFSViewModel, uclViewModel: uclDFSViewModel, wcViewModel: wcDFSViewModel, ufcViewModel: ufcDFSViewModel, nflViewModel: nflDFSViewModel, cfbViewModel: cfbDFSViewModel, ncaamViewModel: ncaamDFSViewModel, wnbaViewModel: wnbaDFSViewModel, onDeletePastContest: { tid in deletePastDFSContest(tournamentID: tid) }, onRegradePastContest: { tid in regradePastDFSContest(tournamentID: tid) })
+            DFSContestView(viewModel: dfsViewModel, nhlViewModel: nhlDFSViewModel, mlbViewModel: mlbDFSViewModel, pgaViewModel: pgaDFSViewModel, eplViewModel: eplDFSViewModel, uclViewModel: uclDFSViewModel, wcViewModel: wcDFSViewModel, ufcViewModel: ufcDFSViewModel, nflViewModel: nflDFSViewModel, cfbViewModel: cfbDFSViewModel, ncaamViewModel: ncaamDFSViewModel, wnbaViewModel: wnbaDFSViewModel, nascarViewModel: nascarDFSViewModel, onDeletePastContest: { tid in deletePastDFSContest(tournamentID: tid) }, onRegradePastContest: { tid in regradePastDFSContest(tournamentID: tid) })
                 .tabItem {
                     Label("DFS", systemImage: "person.3")
                 }
@@ -695,7 +705,7 @@ struct ContentView: View {
                 dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
                 eplDFSViewModel, uclDFSViewModel, wcDFSViewModel,
                 ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel,
-                ncaamDFSViewModel, wnbaDFSViewModel
+                ncaamDFSViewModel, wnbaDFSViewModel, nascarDFSViewModel
             ]
             await DFSViewModel.syncAllSportsHistoryFromServer(
                 vms: allVMs, userID: userID, accessToken: token,
@@ -755,7 +765,7 @@ struct ContentView: View {
                     dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
                     eplDFSViewModel, uclDFSViewModel, wcDFSViewModel,
                     ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel,
-                    ncaamDFSViewModel, wnbaDFSViewModel
+                    ncaamDFSViewModel, wnbaDFSViewModel, nascarDFSViewModel
                 ]
                 if let userID = auth.userID, let token = auth.accessToken {
                     await DFSViewModel.syncAllSportsHistoryFromServer(
@@ -874,7 +884,8 @@ struct ContentView: View {
                 await withTaskGroup(of: Void.self) { group in
                     for vm in [dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
                                eplDFSViewModel, uclDFSViewModel, wcDFSViewModel, ufcDFSViewModel,
-                               nflDFSViewModel, cfbDFSViewModel, ncaamDFSViewModel, wnbaDFSViewModel] {
+                               nflDFSViewModel, cfbDFSViewModel, ncaamDFSViewModel, wnbaDFSViewModel,
+                               nascarDFSViewModel] {
                         group.addTask { await vm.checkAndSettleUnsettledTournaments() }
                     }
                 }
@@ -904,6 +915,7 @@ struct ContentView: View {
                 await wcDFSViewModel.loadSlateIfNeeded()
                 await ncaamDFSViewModel.loadSlateIfNeeded()
                 await wnbaDFSViewModel.loadSlateIfNeeded()
+                await nascarDFSViewModel.loadSlateIfNeeded()
                 if dfsViewModel.tournament != nil && !dfsViewModel.fieldEntries.isEmpty {
                     await dfsViewModel.refreshLive()
                 }
@@ -940,6 +952,9 @@ struct ContentView: View {
                 if wnbaDFSViewModel.tournament != nil && !wnbaDFSViewModel.fieldEntries.isEmpty {
                     await wnbaDFSViewModel.refreshLive()
                 }
+                if nascarDFSViewModel.tournament != nil && !nascarDFSViewModel.fieldEntries.isEmpty {
+                    await nascarDFSViewModel.refreshLive()
+                }
                 try? await Task.sleep(nanoseconds: 60_000_000_000)
             }
         }
@@ -967,7 +982,7 @@ struct ContentView: View {
                         dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
                         eplDFSViewModel, uclDFSViewModel, wcDFSViewModel,
                         ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel,
-                        ncaamDFSViewModel, wnbaDFSViewModel
+                        ncaamDFSViewModel, wnbaDFSViewModel, nascarDFSViewModel
                     ]
                     if let userID = auth.userID, let token = auth.accessToken {
                         didFireTokenHistorySync = true
@@ -994,6 +1009,7 @@ struct ContentView: View {
             cfbDFSViewModel.profileName = newValue
             ncaamDFSViewModel.profileName = newValue
             wnbaDFSViewModel.profileName = newValue
+            nascarDFSViewModel.profileName = newValue
             bestBallViewModel.profileName = newValue
             playoffTiersViewModel.profileName = newValue
             tennisBracketViewModel.profileName = newValue
@@ -1010,7 +1026,8 @@ struct ContentView: View {
             Task {
                 for vm in [dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
                            eplDFSViewModel, uclDFSViewModel, wcDFSViewModel, ufcDFSViewModel,
-                           nflDFSViewModel, cfbDFSViewModel, ncaamDFSViewModel, wnbaDFSViewModel] {
+                           nflDFSViewModel, cfbDFSViewModel, ncaamDFSViewModel, wnbaDFSViewModel,
+                           nascarDFSViewModel] {
                     if vm.tournament != nil && !vm.fieldEntries.isEmpty {
                         await vm.refreshLive()
                     }
@@ -1053,6 +1070,9 @@ struct ContentView: View {
         wnbaDFSViewModel.accessToken = auth.accessToken
         wnbaDFSViewModel.userID = auth.userID
         wnbaDFSViewModel.userEmail = auth.userEmail
+        nascarDFSViewModel.accessToken = auth.accessToken
+        nascarDFSViewModel.userID = auth.userID
+        nascarDFSViewModel.userEmail = auth.userEmail
         bestBallViewModel.accessToken = auth.accessToken
         bestBallViewModel.userID = auth.userID
         bestBallViewModel.profileName = profileName
@@ -1122,6 +1142,10 @@ struct ContentView: View {
         wnbaDFSViewModel.settledTournamentData = settledTournamentData
         wnbaDFSViewModel.rrScore = rrScore
         wnbaDFSViewModel.profileName = profileName
+        nascarDFSViewModel.dfsHistoryData = dfsHistoryData
+        nascarDFSViewModel.settledTournamentData = settledTournamentData
+        nascarDFSViewModel.rrScore = rrScore
+        nascarDFSViewModel.profileName = profileName
         playoffTiersViewModel.dfsHistoryData = dfsHistoryData
         playoffTiersViewModel.settledTournamentData = settledTournamentData
         playoffTiersViewModel.rrScore = rrScore
@@ -1165,6 +1189,7 @@ struct ContentView: View {
         cfbDFSViewModel.rrScore = value
         ncaamDFSViewModel.rrScore = value
         wnbaDFSViewModel.rrScore = value
+        nascarDFSViewModel.rrScore = value
         playoffTiersViewModel.rrScore = value
         tennisBracketViewModel.rrScore = value
         golfTiersViewModel.rrScore = value
@@ -1188,6 +1213,7 @@ struct ContentView: View {
         cfbDFSViewModel.dfsHistoryData = value
         ncaamDFSViewModel.dfsHistoryData = value
         wnbaDFSViewModel.dfsHistoryData = value
+        nascarDFSViewModel.dfsHistoryData = value
         playoffTiersViewModel.dfsHistoryData = value
         tennisBracketViewModel.dfsHistoryData = value
         golfTiersViewModel.dfsHistoryData = value
@@ -1207,6 +1233,7 @@ struct ContentView: View {
         cfbDFSViewModel.settledTournamentData = value
         ncaamDFSViewModel.settledTournamentData = value
         wnbaDFSViewModel.settledTournamentData = value
+        nascarDFSViewModel.settledTournamentData = value
         playoffTiersViewModel.settledTournamentData = value
         tennisBracketViewModel.settledTournamentData = value
         golfTiersViewModel.settledTournamentData = value
@@ -1990,7 +2017,7 @@ struct ContentView: View {
                     dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
                     eplDFSViewModel, uclDFSViewModel, wcDFSViewModel,
                     ufcDFSViewModel, nflDFSViewModel, cfbDFSViewModel,
-                    ncaamDFSViewModel, wnbaDFSViewModel
+                    ncaamDFSViewModel, wnbaDFSViewModel, nascarDFSViewModel
                 ]
                 if let userID = auth.userID, let token = auth.accessToken {
                     await DFSViewModel.syncAllSportsHistoryFromServer(
@@ -3723,6 +3750,7 @@ struct ContentView: View {
             if tid.hasPrefix("nhl-") { return nhlDFSViewModel }
             if tid.hasPrefix("ncaam-") { return ncaamDFSViewModel }
             if tid.hasPrefix("wnba-") { return wnbaDFSViewModel }
+            if tid.hasPrefix("nascar-") { return nascarDFSViewModel }
             if tid.hasPrefix("mlb-") { return mlbDFSViewModel }
             if tid.hasPrefix("pga-") { return pgaDFSViewModel }
             if tid.hasPrefix("epl-") { return eplDFSViewModel }

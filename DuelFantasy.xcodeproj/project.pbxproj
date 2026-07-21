@@ -32,6 +32,7 @@
 		04E02D1D2F5885F6009A4D3A /* supabase_schema.sql in Resources */ = {isa = PBXBuildFile; fileRef = 04E02D1C2F5885F6009A4D3A /* supabase_schema.sql */; };
 		04E02DC32F5BD7A9009A4D3A /* BestBallData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E02DC22F5BD7A9009A4D3A /* BestBallData.swift */; };
 		04E02E722F611884009A4D3A /* GolfDFSData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E02E712F611884009A4D3A /* GolfDFSData.swift */; };
+		04D4E5F62FD1234500861B2F /* NASCARDFSData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04D4E5F52FD1234500861B2E /* NASCARDFSData.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -80,6 +81,7 @@
 		04E02D1C2F5885F6009A4D3A /* supabase_schema.sql */ = {isa = PBXFileReference; lastKnownFileType = text; path = supabase_schema.sql; sourceTree = "<group>"; };
 		04E02DC22F5BD7A9009A4D3A /* BestBallData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BestBallData.swift; sourceTree = "<group>"; };
 		04E02E712F611884009A4D3A /* GolfDFSData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GolfDFSData.swift; sourceTree = "<group>"; };
+		04D4E5F52FD1234500861B2E /* NASCARDFSData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NASCARDFSData.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -153,6 +155,7 @@
 				04E02D1C2F5885F6009A4D3A /* supabase_schema.sql */,
 				04E02DC22F5BD7A9009A4D3A /* BestBallData.swift */,
 				04E02E712F611884009A4D3A /* GolfDFSData.swift */,
+				04D4E5F52FD1234500861B2E /* NASCARDFSData.swift */,
 				042F01692F69DCC30087BDC2 /* GolfPlayerDetailView.swift */,
 				042F016B2F6C99910087BDC2 /* FullHistoryView.swift */,
 				0469ADCD2F7E61E60035C895 /* AnalyticsView.swift */,
@@ -340,6 +343,7 @@
 				04E02D112F579627009A4D3A /* DFSData.swift in Sources */,
 				04E02D0F2F579009009A4D3A /* SportsData.swift in Sources */,
 				04E02E722F611884009A4D3A /* GolfDFSData.swift in Sources */,
+				04D4E5F62FD1234500861B2F /* NASCARDFSData.swift in Sources */,
 				0469AF212F8CC1E00035C895 /* PlayoffTiersData.swift in Sources */,
 				048067DC2FC1785400861A1E /* UFCDFSData.swift in Sources */,
 				0469ADCE2F7E61E60035C895 /* AnalyticsView.swift in Sources */,
@@ -507,7 +511,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 13;
 				DEVELOPMENT_TEAM = D9WFQ2TQD9;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -531,7 +535,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
-				MARKETING_VERSION = 1.1.0;
+				MARKETING_VERSION = 1.1.2;
 				PRODUCT_BUNDLE_IDENTIFIER = GameOn.GameOn7;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -554,7 +558,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 13;
 				DEVELOPMENT_TEAM = D9WFQ2TQD9;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -578,7 +582,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
-				MARKETING_VERSION = 1.1.0;
+				MARKETING_VERSION = 1.1.2;
 				PRODUCT_BUNDLE_IDENTIFIER = GameOn.GameOn7;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;

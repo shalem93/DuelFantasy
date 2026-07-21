@@ -15,10 +15,10 @@ struct DFSLineupBuilderView: View {
         VStack(spacing: 0) {
             salaryBar
             lineupSlots
-            if viewModel.tournament?.isSingleGame != true && viewModel.sport != "PGA" && viewModel.sport != "UFC" {
+            if viewModel.tournament?.isSingleGame != true && viewModel.sport != "PGA" && viewModel.sport != "UFC" && viewModel.sport != "NASCAR" {
                 positionFilters
             }
-            if !viewModel.gameMatchupLabels.isEmpty && viewModel.tournament?.isSingleGame != true && viewModel.sport != "PGA" {
+            if !viewModel.gameMatchupLabels.isEmpty && viewModel.tournament?.isSingleGame != true && viewModel.sport != "PGA" && viewModel.sport != "NASCAR" {
                 gameFilters
             }
 
@@ -597,6 +597,8 @@ struct DFSLineupBuilderView: View {
                                 HStack(spacing: 0) {
                                     if viewModel.sport == "PGA" {
                                         Text(player.team)  // country only for golf
+                                    } else if viewModel.sport == "NASCAR" {
+                                        Text("Driver")     // no team concept for drivers
                                     } else {
                                         Text("\(player.team) · \(player.position)")
                                         if let opp = viewModel.opponentLabel(for: player) {

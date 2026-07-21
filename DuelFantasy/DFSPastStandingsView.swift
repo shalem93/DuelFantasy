@@ -64,6 +64,7 @@ struct DFSPastStandingsView: View {
         if isMLB { return "MLB" }
         if isNHL { return "NHL" }
         if isUFC { return "UFC" }
+        if result.tournamentId?.hasPrefix("nascar-") == true { return "NASCAR" }
         if result.tournamentId?.hasPrefix("ncaam-") == true { return "NCAAM" }
         if result.tournamentId?.hasPrefix("wnba-") == true { return "WNBA" }
         if result.tournamentId?.hasPrefix("epl-") == true { return "EPL" }

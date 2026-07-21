@@ -122,6 +122,8 @@ struct DFSLobbyView: View {
 
             Text(viewModel.sport == "PGA"
                  ? "This week's PGA tournament has locked.\nCheck back for next week's event!"
+                 : viewModel.sport == "NASCAR"
+                 ? "This week's Cup race has locked.\nCheck back for next week's race!"
                  : "Today's \(viewModel.sport) games have locked.\nCheck back for tomorrow's slate!")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
@@ -275,6 +277,7 @@ struct DFSLobbyView: View {
         case "MLB": return "First pitch"
         case "NHL": return "Puck drop"
         case "NBA", "NCAAM", "WNBA": return "Tip-off"
+        case "NASCAR": return "Green flag"
         default: return "Starts"
         }
     }
@@ -823,7 +826,8 @@ struct DFSLobbyView: View {
                     .foregroundStyle(brandPurple)
                 if let eventDate = viewModel.slateGames.first?.startTime,
                    !Calendar.current.isDateInToday(eventDate) {
-                    let noun = viewModel.sport == "UFC" ? "Fights" : "Games"
+                    let noun = viewModel.sport == "UFC" ? "Fights"
+                        : viewModel.sport == "NASCAR" ? "Races" : "Games"
                     Text("Upcoming \(noun) (\(viewModel.slateGames.count)) — \(eventDate.formatted(.dateTime.month(.abbreviated).day()))")
                         .font(.headline)
                 } else {
@@ -988,6 +992,22 @@ struct DFSLobbyView: View {
                     scoringRow(label: "Win", value: "+30 FPTS")
                     scoringRow(label: "KO/TKO Finish", value: "+30 FPTS")
                     scoringRow(label: "Submission Finish", value: "+20 FPTS")
+                case "NASCAR":
+                    Text("Race Finish")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    scoringRow(label: "Win", value: "+46 FPTS")
+                    scoringRow(label: "2nd Place", value: "+42 FPTS")
+                    scoringRow(label: "3rd–43rd", value: "+41…+1 FPTS")
+                    Divider()
+                    Text("During the Race")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    scoringRow(label: "Position Gained", value: "+1 FPTS")
+                    scoringRow(label: "Position Lost", value: "-1 FPTS")
+                    scoringRow(label: "Lap Led", value: "+0.25 FPTS")
                 default:
                     scoringRow(label: "Point", value: "+1 FPTS")
                     scoringRow(label: "Rebound", value: "+1.25 FPTS")
