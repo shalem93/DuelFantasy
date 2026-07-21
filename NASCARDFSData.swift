@@ -162,7 +162,7 @@ struct ESPNNASCARDFSSlateProvider: DFSSlateProvider {
             )
         }
         guard !dkSalaries.isEmpty else {
-            throw NSError(domain: "NASCARDFS", code: 2, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post this NASCAR slate"])
+            throw NSError(domain: "NASCARDFS", code: 2, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for this NASCAR slate"])
         }
         print("[NASCAR-DFS] Fetched \(dkSalaries.count) DK Cup salaries for \(event.name)")
 

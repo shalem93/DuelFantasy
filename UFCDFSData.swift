@@ -240,7 +240,7 @@ struct ESPNUFCDFSSlateProvider: DFSSlateProvider {
         // real DraftKings/LineupHQ prices, the card hasn't been posted yet —
         // wait and show nothing rather than ship estimated salaries.
         guard !rgSalaries.isEmpty || !ufcShowdownSalaries.isEmpty else {
-            throw NSError(domain: "UFCDFS", code: 3, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post this UFC slate"])
+            throw NSError(domain: "UFCDFS", code: 3, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for this UFC slate"])
         }
 
         let (tournaments, sgPlayers) = buildMultiTournamentSlate(

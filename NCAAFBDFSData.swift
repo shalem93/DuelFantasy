@@ -157,10 +157,10 @@ struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
                 }
                 print("[CFB-DFS] sameSlate=true (\(matchCount)/\(deduped.count)), applied=\(applied), calibrated=\(calibrated), range=$\(rgMin)-$\(rgMax)")
             } else {
-                throw NSError(domain: "CFBDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's CFB slate"])
+                throw NSError(domain: "CFBDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for today's CFB slate"])
             }
         } else {
-            throw NSError(domain: "CFBDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's CFB slate"])
+            throw NSError(domain: "CFBDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for today's CFB slate"])
         }
 
         let sortedPlayers = finalPlayers.sorted(by: { $0.salary > $1.salary })

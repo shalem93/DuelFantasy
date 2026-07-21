@@ -206,7 +206,7 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
     /// one, otherwise fetch the week's primary classic slate (today's
     /// master, then yesterday's) and freeze the first non-empty result.
     /// Returns empty when DK hasn't posted the slate yet — the caller
-    /// shows "Waiting for DraftKings" rather than estimated prices.
+    /// shows "Waiting for salary data" rather than estimated prices.
     static func weeklyClassicSalaries(eventID: String) async -> [String: Int] {
         struct Snapshot: Codable {
             let eventID: String
@@ -354,7 +354,7 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
         // priced entirely off OWGR estimates. (Individual golfers DK omits still
         // fall back to OWGR below; this only blocks a fully-estimated slate.)
         guard !dkSalaries.isEmpty else {
-            throw NSError(domain: "GolfDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post this PGA slate"])
+            throw NSError(domain: "GolfDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for this PGA slate"])
         }
         print("[GolfDFS] Fetched \(dkSalaries.count) DraftKings golf salaries")
 

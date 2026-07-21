@@ -899,10 +899,10 @@ struct ESPNNBADFSSlateProvider: DFSSlateProvider {
             } else {
                 // RG data is for a different slate — no real prices for today's
                 // games yet. Don't offer a slate built on estimated salaries.
-                throw NSError(domain: "NBADFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's NBA slate"])
+                throw NSError(domain: "NBADFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for today's NBA slate"])
             }
         } else {
-            throw NSError(domain: "NBADFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's NBA slate"])
+            throw NSError(domain: "NBADFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for today's NBA slate"])
         }
 
         let slateDate = events.first?.date ?? Date()
@@ -3276,7 +3276,7 @@ struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
             if !salaryRange.isEmpty { logMsg += " (range $\(salaryRange.min() ?? 0)-$\(salaryRange.max() ?? 0))" }
             print(logMsg)
         } else {
-            throw NSError(domain: "MLBDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's MLB slate"])
+            throw NSError(domain: "MLBDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for today's MLB slate"])
         }
 
         let slateDate = events.first?.date ?? Date()
@@ -4160,7 +4160,7 @@ struct ESPNNCAAMDFSSlateProvider: DFSSlateProvider {
             return p
         }
         guard dkApplied > 0 else {
-            throw NSError(domain: "NCAAMDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's NCAAM slate"])
+            throw NSError(domain: "NCAAMDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for today's NCAAM slate"])
         }
 
         let slateDate = events.first?.date ?? Date()
@@ -4973,10 +4973,10 @@ struct ESPNNHLDFSSlateProvider: DFSSlateProvider {
                 print("[NHL-DFS] sameSlate=true (\(matchCount)/\(deduped.count)), applied=\(applied), calibrated=\(calibrated), skater=$\(skaterMin)-$\(skaterMax), goalie=$\(goalieMin)-$\(goalieMax)")
                 useRealSalaries = true
             } else {
-                throw NSError(domain: "NHLDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's NHL slate"])
+                throw NSError(domain: "NHLDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for today's NHL slate"])
             }
         } else {
-            throw NSError(domain: "NHLDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's NHL slate"])
+            throw NSError(domain: "NHLDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for today's NHL slate"])
         }
 
         // Mark confirmed starting goalies from scoreboard probables. Probables
@@ -8574,7 +8574,7 @@ struct ESPNWNBADFSSlateProvider: DFSSlateProvider {
             salarySource = showdownUtilSalaries
             pricingMode = "showdown"
         } else {
-            throw NSError(domain: "WNBADFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's WNBA slate"])
+            throw NSError(domain: "WNBADFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for today's WNBA slate"])
         }
 
         let rgMin = salarySource.values.min() ?? 3500

@@ -380,7 +380,7 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
         } else {
             // No LineupHQ/DraftKings prices for this soccer slate yet — don't
             // offer a slate built on synthetic salaries. Wait until DK posts it.
-            throw NSError(domain: "SoccerDFS", code: 4, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post the \(league.displayName) slate"])
+            throw NSError(domain: "SoccerDFS", code: 4, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for the \(league.displayName) slate"])
         }
         let sortedPlayers = playersWithRealSalaries.sorted(by: { $0.salary > $1.salary })
 

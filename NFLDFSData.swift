@@ -179,10 +179,10 @@ struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
                 }
                 print("[NFL-DFS] sameSlate=true (\(matchCount)/\(allPlayers.count)), applied=\(applied), calibrated=\(calibrated), range=$\(rgMin)-$\(rgMax)")
             } else {
-                throw NSError(domain: "NFLDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's NFL slate"])
+                throw NSError(domain: "NFLDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for today's NFL slate"])
             }
         } else {
-            throw NSError(domain: "NFLDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for DraftKings/LineupHQ to post today's NFL slate"])
+            throw NSError(domain: "NFLDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for today's NFL slate"])
         }
 
         let sortedPlayers = finalPlayers.sorted(by: { $0.salary > $1.salary })
