@@ -493,15 +493,22 @@ final class DFSViewModel {
         return slateGames.first?.homeTeam ?? tournament?.title ?? ""
     }
 
-    /// Whether there is no active PGA event (between-weeks)
+    /// Whether there is no active event (between-weeks). PGA and NASCAR
+    /// are the one-event-per-week sports whose today-tab needs a stable
+    /// empty state instead of a lobby + error banner: without it, every
+    /// watchdog retry flipped isLoading and the NASCAR tab visibly
+    /// flashed loading ↔ error while waiting for the week's salary data.
     var noActiveEvent: Bool {
-        guard sport == "PGA" else { return false }
+        guard sport == "PGA" || sport == "NASCAR" else { return false }
         // Dropping the `error != nil` requirement: after Memorial
         // settles on Monday, ESPN's slate may legitimately be empty
         // (no event yet for this week) without throwing an error.
         // The view needs the "No PGA Event This Week" empty state in
         // that case, not the loading view forever.
-        guard !isLoading, hasAttemptedLoad else { return false }
+        // No `!isLoading` guard: once a first attempt has completed with
+        // no tournament, background retries must keep the empty state on
+        // screen — toggling it off during each retry is the flash.
+        guard hasAttemptedLoad else { return false }
         return tournament == nil
     }
 
@@ -2524,7 +2531,21 @@ final class DFSViewModel {
         } catch {
             // Only show error if we don't already have a tournament loaded
             if tournament == nil {
-                self.error = "Unable to load DFS slate."
+                // Our own providers throw curated, user-presentable messages
+                // ("Waiting for salary data for this NASCAR slate", "No WC
+                // fixtures found today") — surface those as-is. Anything
+                // else (URLError, decode failures) gets the generic copy.
+                let ns = error as NSError
+                let ownDomains: Set<String> = [
+                    "DFS", "NBADFS", "MLBDFS", "NHLDFS", "NCAAMDFS", "WNBADFS",
+                    "SoccerDFS", "GolfDFS", "UFCDFS", "NFLDFS", "CFBDFS", "NASCARDFS"
+                ]
+                if ownDomains.contains(ns.domain), !ns.localizedDescription.isEmpty,
+                   ns.localizedDescription != "The operation couldn’t be completed. (\(ns.domain) error \(ns.code).)" {
+                    self.error = ns.localizedDescription
+                } else {
+                    self.error = "Unable to load DFS slate."
+                }
             }
         }
         isLoading = false

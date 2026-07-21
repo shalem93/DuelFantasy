@@ -638,7 +638,11 @@ struct DFSContestView: View {
 
     private var nascarTodayContent: some View {
         Group {
-            if nascarViewModel.tournament == nil && (nascarViewModel.isLoading || !nascarViewModel.hasAttemptedLoad) {
+            // Loading view only before the FIRST attempt. Retries (the
+            // sport watchdog re-fires every 2s while the slate is missing)
+            // run behind the stable empty state — gating on isLoading here
+            // made the tab flash loading ↔ empty on every retry.
+            if nascarViewModel.tournament == nil && !nascarViewModel.hasAttemptedLoad {
                 nascarLoadingView
             } else if nascarViewModel.noActiveEvent {
                 nascarEmptyStateView
@@ -686,10 +690,10 @@ struct DFSContestView: View {
                 .font(.system(size: 48))
                 .foregroundStyle(.secondary)
 
-            Text("No Cup Race This Week")
+            Text("Race Not Open Yet")
                 .font(.title3.weight(.semibold))
 
-            Text("There's no NASCAR Cup Series race available right now. Check back closer to race day!")
+            Text("The next Cup race opens once salary data posts — usually a few days before the green flag. Check back soon!")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
