@@ -28,6 +28,7 @@ struct DFSPlayerDetailView: View {
     private var isUFC: Bool { player.id.hasPrefix("ufc-") }
 
     private var isSoccer: Bool { player.id.hasPrefix("epl-") || player.id.hasPrefix("ucl-") || player.id.hasPrefix("wc-") }
+    private var isNASCAR: Bool { player.id.hasPrefix("nascar-") }
     private var isSoccerGK: Bool {
         isSoccer && player.position.uppercased() == "GK"
     }
@@ -71,6 +72,11 @@ struct DFSPlayerDetailView: View {
                             ufcAveragesCard(avgs)
                         }
                         ufcGameLogSection
+                    } else if isNASCAR {
+                        if let avgs = averages {
+                            nascarAveragesCard(avgs)
+                        }
+                        nascarGameLogSection
                     } else {
                         if let avgs = averages {
                             averagesCard(avgs)
@@ -1185,6 +1191,114 @@ struct DFSPlayerDetailView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(log.fantasyPoints >= 80 ? brandPurple.opacity(0.06) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    // MARK: - NASCAR Race Log
+
+    private func nascarAveragesCard(_ avgs: (pts: Double, reb: Double, ast: Double, fpts: Double)) -> some View {
+        // pts=finish position, reb=laps led
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Last \(gameLogs.count) Races Avg")
+                .font(.headline)
+
+            HStack(spacing: 0) {
+                avgStat(label: "AVG FIN", value: String(format: "%.1f", avgs.pts))
+                Spacer()
+                avgStat(label: "LAPS LED", value: String(format: "%.1f", avgs.reb))
+                Spacer()
+                avgStat(label: "FPTS", value: String(format: "%.1f", avgs.fpts), highlight: true)
+            }
+        }
+        .padding(16)
+        .background(.white)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
+    }
+
+    private var nascarGameLogSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Race Log")
+                .font(.headline)
+
+            if isLoading {
+                HStack {
+                    Spacer()
+                    VStack(spacing: 8) {
+                        ProgressView()
+                        Text("Loading races...")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(.vertical, 20)
+            } else if let errorMessage {
+                Text(errorMessage)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 12)
+            } else if gameLogs.isEmpty {
+                Text("No recent race data available.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 12)
+            } else {
+                HStack(spacing: 0) {
+                    Text("DATE")
+                        .frame(width: 40, alignment: .leading)
+                    Text("RACE")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text("ST")
+                        .frame(width: 30, alignment: .trailing)
+                    Text("FIN")
+                        .frame(width: 34, alignment: .trailing)
+                    Text("LL")
+                        .frame(width: 34, alignment: .trailing)
+                    Text("FPTS")
+                        .frame(width: 44, alignment: .trailing)
+                }
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+
+                ForEach(gameLogs) { log in
+                    nascarGameLogRow(log)
+                }
+            }
+        }
+        .padding(16)
+        .background(.white)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
+    }
+
+    private func nascarGameLogRow(_ log: DFSPlayerGameLog) -> some View {
+        // points=finish, ftm=start, rebounds=laps led
+        let podium = log.points <= 3
+        return HStack(spacing: 0) {
+            Text(log.date)
+                .frame(width: 40, alignment: .leading)
+            Text(log.opponent)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(log.ftm >= 1 ? "\(log.ftm)" : "-")
+                .frame(width: 30, alignment: .trailing)
+            Text("P\(log.points)")
+                .frame(width: 34, alignment: .trailing)
+                .fontWeight(podium ? .bold : .regular)
+                .foregroundStyle(podium ? brandPurple : .primary)
+            Text("\(log.rebounds)")
+                .frame(width: 34, alignment: .trailing)
+            Text(String(format: "%.1f", log.fantasyPoints))
+                .frame(width: 44, alignment: .trailing)
+                .foregroundStyle(log.fantasyPoints >= 50 ? brandPurple : .primary)
+                .fontWeight(log.fantasyPoints >= 50 ? .semibold : .regular)
+        }
+        .font(.caption.monospacedDigit())
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(log.fantasyPoints >= 60 ? brandPurple.opacity(0.06) : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 

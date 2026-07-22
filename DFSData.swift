@@ -6715,6 +6715,7 @@ struct ESPNPlayerGameLogProvider {
         let isNHL = cleanedID.hasPrefix("nhl-")
         let isSoccer = cleanedID.hasPrefix("epl-") || cleanedID.hasPrefix("ucl-") || cleanedID.hasPrefix("wc-")
         let isUFC = cleanedID.hasPrefix("ufc-")
+        let isNASCAR = cleanedID.hasPrefix("nascar-")
 
         // Soccer uses a different approach — ESPN's soccer gamelog endpoint doesn't return game data.
         // Instead, fetch team schedule → recent match summaries → extract player stats.
@@ -6725,6 +6726,12 @@ struct ESPNPlayerGameLogProvider {
         // UFC: fetch fight history from ESPN MMA athlete event log
         if isUFC {
             return try await fetchUFCFightLog(espnID: espnID, limit: limit)
+        }
+
+        // NASCAR: the common-v3 racing gamelog returns an empty shell
+        // (filters only) — walk the core-API eventlog like UFC instead.
+        if isNASCAR {
+            return await fetchNASCARRaceLog(espnID: espnID, limit: min(limit, 10))
         }
 
         // MLB/NHL require a category parameter
@@ -6850,6 +6857,8 @@ struct ESPNPlayerGameLogProvider {
             return (String(playerID.dropFirst(4)), "football/nfl")
         } else if playerID.hasPrefix("cfb-") {
             return (String(playerID.dropFirst(4)), "football/college-football")
+        } else if playerID.hasPrefix("nascar-") {
+            return (String(playerID.dropFirst(7)), "racing/nascar-premier")
         }
         // Fallback: assume NBA
         return (playerID, "basketball/nba")
@@ -6860,6 +6869,122 @@ struct ESPNPlayerGameLogProvider {
     /// Fetches fight history for a UFC fighter by scanning past UFC events from the scoreboard.
     /// ESPN MMA doesn't have a traditional athlete gamelog endpoint, so we iterate through
     /// recent weekly scoreboards to find completed fights involving this fighter.
+    /// NASCAR race log via the core-API season eventlog. Each played event
+    /// needs three small fetches (event name/date, competitor startOrder,
+    /// statistics place/lapsLead) — run concurrently per race.
+    /// Repurposed DFSPlayerGameLog fields: points = finish, ftm = start,
+    /// rebounds = laps led, assists = laps completed, minutes = "P{fin}".
+    private func fetchNASCARRaceLog(espnID: String, limit: Int = 10) async -> [DFSPlayerGameLog] {
+        func fetchJSON(_ urlString: String) async -> [String: Any]? {
+            guard let url = URL(string: urlString),
+                  let (data, response) = try? await session.data(from: url),
+                  let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                return nil
+            }
+            return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        }
+
+        // Season eventlog: current year, falling back one year early in
+        // the season (January, before the Clash).
+        let year = Calendar.current.component(.year, from: Date())
+        var items: [[String: Any]] = []
+        for seasonYear in [year, year - 1] {
+            let logURL = "https://sports.core.api.espn.com/v2/sports/racing/leagues/nascar-premier/seasons/\(seasonYear)/athletes/\(espnID)/eventlog?limit=100"
+            if let json = await fetchJSON(logURL),
+               let events = json["events"] as? [String: Any],
+               let list = events["items"] as? [[String: Any]], !list.isEmpty {
+                items = list
+                break
+            }
+        }
+        guard !items.isEmpty else { return [] }
+
+        // Eventlog is chronological (opener first) — take the most recent
+        // played races.
+        let played = items.filter { ($0["played"] as? Bool) == true }
+        let recent = played.suffix(limit)
+
+        let logs: [DFSPlayerGameLog] = await withTaskGroup(of: DFSPlayerGameLog?.self, returning: [DFSPlayerGameLog].self) { group in
+            for item in recent {
+                guard let eventID = item["eventId"] as? String,
+                      let competitionID = item["competitionId"] as? String else { continue }
+                group.addTask {
+                    let base = "https://sports.core.api.espn.com/v2/sports/racing/leagues/nascar-premier/events/\(eventID)"
+                    async let eventJSONTask = fetchJSON(base)
+                    async let competitorJSONTask = fetchJSON("\(base)/competitions/\(competitionID)/competitors/\(espnID)")
+                    async let statsJSONTask = fetchJSON("\(base)/competitions/\(competitionID)/competitors/\(espnID)/statistics")
+                    let eventJSON = await eventJSONTask
+                    let competitorJSON = await competitorJSONTask
+                    let statsJSON = await statsJSONTask
+
+                    var place = 0, lapsLed = 0, lapsCompleted = 0
+                    if let splits = statsJSON?["splits"] as? [String: Any],
+                       let categories = splits["categories"] as? [[String: Any]] {
+                        for category in categories {
+                            for stat in category["stats"] as? [[String: Any]] ?? [] {
+                                guard let name = stat["name"] as? String,
+                                      let value = stat["value"] as? Double else { continue }
+                                switch name {
+                                case "place": place = Int(value)
+                                case "lapsLead": lapsLed = Int(value)
+                                case "lapsCompleted": lapsCompleted = Int(value)
+                                default: break
+                                }
+                            }
+                        }
+                    }
+                    // Fall back to the competitor's finishing order if the
+                    // stats block is missing a place.
+                    if place == 0 { place = competitorJSON?["order"] as? Int ?? 0 }
+                    guard place >= 1 else { return nil }   // DNS / no result
+                    let start = competitorJSON?["startOrder"] as? Int ?? 0
+
+                    let rawName = (eventJSON?["name"] as? String) ?? "Race"
+                    // "NASCAR Cup Series at Indianapolis" → "Indianapolis";
+                    // one-off names ("Daytona 500") pass through whole.
+                    let raceName = rawName.components(separatedBy: " at ").count > 1
+                        ? rawName.components(separatedBy: " at ").dropFirst().joined(separator: " at ")
+                        : rawName
+
+                    let dateString = (eventJSON?["date"] as? String) ?? ""
+                    let raceDate: Date = {
+                        let fmt = DateFormatter()
+                        fmt.locale = Locale(identifier: "en_US_POSIX")
+                        fmt.timeZone = TimeZone(secondsFromGMT: 0)
+                        for format in ["yyyy-MM-dd'T'HH:mm'Z'", "yyyy-MM-dd'T'HH:mm:ss'Z'"] {
+                            fmt.dateFormat = format
+                            if let d = fmt.date(from: dateString) { return d }
+                        }
+                        return ISO8601DateFormatter().date(from: dateString) ?? .distantPast
+                    }()
+                    let displayFmt = DateFormatter()
+                    displayFmt.dateFormat = "M/d"
+
+                    return DFSPlayerGameLog(
+                        id: eventID,
+                        date: raceDate == .distantPast ? "-" : displayFmt.string(from: raceDate),
+                        sortDate: raceDate,
+                        opponent: raceName,
+                        minutes: "P\(place)",
+                        points: place,
+                        rebounds: lapsLed,
+                        assists: lapsCompleted,
+                        steals: 0, blocks: 0, turnovers: 0,
+                        fgm: 0, fga: 0, threePM: 0, threePA: 0,
+                        ftm: start, fta: 0,
+                        fantasyPoints: nascarFantasyPoints(place: place, startPosition: start, lapsLed: lapsLed)
+                    )
+                }
+            }
+            var results: [DFSPlayerGameLog] = []
+            for await log in group {
+                if let log { results.append(log) }
+            }
+            return results
+        }
+        return logs.sorted { $0.sortDate > $1.sortDate }
+    }
+
     private func fetchUFCFightLog(espnID: String, limit: Int = 10) async throws -> [DFSPlayerGameLog] {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
