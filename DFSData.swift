@@ -937,7 +937,8 @@ struct ESPNNBADFSSlateProvider: DFSSlateProvider {
                 let slate = await RotoGrindersSalaryProvider.shared.fetchShowdownPlayersForGame(
                     sport: "nba",
                     awayHashtag: firstGame.awayTeam,
-                    homeHashtag: firstGame.homeTeam
+                    homeHashtag: firstGame.homeTeam,
+                    startTime: firstGame.startTime
                 )
                 if !slate.isEmpty {
                     nbaSlatePlayers = slate
@@ -2059,10 +2060,48 @@ actor RotoGrindersSalaryProvider {
     ///      ANY game's hashtags match). NHL Finals tonight is exactly this
     ///      shape — only the series showdown is published (`games.count==7`,
     ///      slate 148804), no per-game variant.
+    /// Picks the best single-game showdown slate among team-tag matches.
+    /// MLB doubleheaders publish TWO slates with identical team tags —
+    /// dictionary order picked one arbitrarily, so the nightcap could get
+    /// the matinee's prices (and vice versa). When several match and a
+    /// start time is known, take the slate whose game time is closest.
+    private func pickSingleGameShowdownSlate(
+        master: [String: RGSlateMasterEntry],
+        teamsMatch: (RGSlateGame) -> Bool,
+        startTime: Date?,
+        label: String
+    ) -> (key: String, value: RGSlateMasterEntry)? {
+        let matches = master.filter { (_, slate) -> Bool in
+            guard slate.type == "showdown",
+                  let games = slate.games, games.count == 1,
+                  let g = games.first else { return false }
+            return teamsMatch(g)
+        }
+        guard matches.count > 1, let target = startTime else {
+            return matches.first.map { (key: $0.key, value: $0.value) }
+        }
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        fmt.timeZone = TimeZone(secondsFromGMT: 0)
+        let best = matches.min { a, b in
+            func distance(_ entry: RGSlateMasterEntry) -> TimeInterval {
+                guard let ds = entry.games?.first?.date, let d = fmt.date(from: ds) else {
+                    return .greatestFiniteMagnitude
+                }
+                return abs(d.timeIntervalSince(target))
+            }
+            return distance(a.value) < distance(b.value)
+        }
+        print("[LineupHQ-Slate] \(matches.count) showdown slates match \(label) (doubleheader) — picked \(best?.value.name ?? "?") by start time")
+        return best.map { (key: $0.key, value: $0.value) }
+    }
+
     func fetchShowdownSalariesForGame(
         sport: String,
         awayHashtag: String,
-        homeHashtag: String
+        homeHashtag: String,
+        startTime: Date? = nil
     ) async -> [String: Int] {
         let master = await fetchSlateMaster(sport: sport, date: Date())
         guard !master.isEmpty else { return [:] }
@@ -2089,18 +2128,16 @@ actor RotoGrindersSalaryProvider {
                 || (codesMatch(a, homeN) && codesMatch(h, awayN))
         }
 
-        let single = master.first { (_, slate) -> Bool in
-            guard slate.type == "showdown",
-                  let games = slate.games, games.count == 1,
-                  let g = games.first else { return false }
-            return teamsMatch(g)
-        }
+        let single = pickSingleGameShowdownSlate(
+            master: master, teamsMatch: teamsMatch,
+            startTime: startTime, label: "\(sport.uppercased()) \(awayHashtag)@\(homeHashtag)"
+        )
         let series = master.first { (_, slate) -> Bool in
             guard slate.type == "showdown",
                   let games = slate.games, games.count > 1 else { return false }
             return games.contains(where: teamsMatch)
         }
-        let candidate = single ?? series
+        let candidate = single.map { ($0.key, $0.value) } ?? series
         guard let (slateID, slate) = candidate, let path = slate.slate_path else {
             print("[LineupHQ-Slate] No showdown slate found for \(sport.uppercased()) \(awayHashtag) @ \(homeHashtag)")
             return [:]
@@ -2371,7 +2408,8 @@ actor RotoGrindersSalaryProvider {
     func fetchShowdownPlayersForGame(
         sport: String,
         awayHashtag: String,
-        homeHashtag: String
+        homeHashtag: String,
+        startTime: Date? = nil
     ) async -> [LineupHQSlatePlayer] {
         let master = await fetchSlateMaster(sport: sport, date: Date())
         guard !master.isEmpty else {
@@ -2400,18 +2438,16 @@ actor RotoGrindersSalaryProvider {
             return (codesMatch(a, awayN) && codesMatch(h, homeN))
                 || (codesMatch(a, homeN) && codesMatch(h, awayN))
         }
-        let single = master.first { (_, slate) -> Bool in
-            guard slate.type == "showdown",
-                  let games = slate.games, games.count == 1,
-                  let g = games.first else { return false }
-            return teamsMatch(g)
-        }
+        let single = pickSingleGameShowdownSlate(
+            master: master, teamsMatch: teamsMatch,
+            startTime: startTime, label: "\(sport.uppercased()) \(awayHashtag)@\(homeHashtag)"
+        )
         let series = master.first { (_, slate) -> Bool in
             guard slate.type == "showdown",
                   let games = slate.games, games.count > 1 else { return false }
             return games.contains(where: teamsMatch)
         }
-        let candidate = single ?? series
+        let candidate = single.map { ($0.key, $0.value) } ?? series
         guard let (slateID, slate) = candidate, let path = slate.slate_path else {
             print("[LineupHQ-Slate] fetchShowdownPlayersForGame: no matching slate for \(sport.uppercased()) \(awayHashtag)@\(homeHashtag) (master had \(master.count) slates)")
             return []
@@ -2744,17 +2780,38 @@ struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
             throw NSError(domain: "DFS", code: 1, userInfo: [NSLocalizedDescriptionKey: "No MLB games found"])
         }
 
-        // Build team abbreviation → event ID mapping
+        // Build team abbreviation → event ID mapping.
+        // Doubleheader-aware: the same two teams can play TWICE in one day.
+        // The old blind overwrite pointed every roster player at whichever
+        // event iterated last, so one game's showdown pool held BOTH games'
+        // probables (three SPs on the BAL@BOS nightcap) with the other
+        // game's prices bleeding in. Map each team to its earliest game
+        // that hasn't started; once game 1 goes live/final, slate rebuilds
+        // remap the roster to the nightcap.
         var teamToGameID: [String: String] = [:]
-        for event in events {
+        let eventsByStart = events.sorted { $0.date < $1.date }
+        for event in eventsByStart {
             guard let competition = event.competitions.first else { continue }
             for competitor in competition.competitors {
-                teamToGameID[competitor.team.abbreviation] = event.id
+                let abbrev = competitor.team.abbreviation
+                if let existingID = teamToGameID[abbrev] {
+                    let existingState = eventsByStart.first(where: { $0.id == existingID })?
+                        .competitions.first?.status.type.state ?? "pre"
+                    // Keep the earlier game while it's still upcoming;
+                    // advance to this one once it's underway or finished.
+                    if existingState == "pre" { continue }
+                    print("[MLB-DFS] Doubleheader: remapping \(abbrev) to later game \(event.id) (earlier game is \(existingState))")
+                }
+                teamToGameID[abbrev] = event.id
             }
         }
 
-        // Collect probable pitcher IDs from the scoreboard
+        // Collect probable pitcher IDs from the scoreboard, remembering
+        // WHICH event each probable belongs to — in a doubleheader the
+        // team-level map above can only point at one of the two games,
+        // but a probable is announced for a specific game.
         var probablePitcherIDs = Set<String>()
+        var probableEventByAthleteID: [String: String] = [:]
         for event in events {
             guard let competition = event.competitions.first else { continue }
             for competitor in competition.competitors {
@@ -2762,6 +2819,7 @@ struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
                     for probable in probables {
                         if let id = probable.athlete?.id {
                             probablePitcherIDs.insert(id)
+                            probableEventByAthleteID[id] = event.id
                         }
                     }
                 }
@@ -2915,17 +2973,20 @@ struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
             return allPlayers
         }
 
-        // Fetch batting orders from game summaries in parallel
+        // Fetch batting orders from game summaries in parallel, keyed PER
+        // EVENT. A flat cross-game merge stamped doubleheader players with
+        // GAME 1's posted lineup while their pool entry belonged to the
+        // nightcap — orders showed for a game whose lineups weren't out.
         let gameIDs = Set(events.map { $0.id })
-        let battingOrders: [String: Int] = await withTaskGroup(of: [String: Int].self) { group in
+        let battingOrdersByGame: [String: [String: Int]] = await withTaskGroup(of: (String, [String: Int]).self) { group in
             for gameID in gameIDs {
                 group.addTask { @Sendable in
-                    guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/summary?event=\(gameID)") else { return [:] }
+                    guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/summary?event=\(gameID)") else { return (gameID, [:]) }
                     guard let (data, response) = try? await URLSession.shared.data(from: url),
                           let http = response as? HTTPURLResponse,
-                          (200..<300).contains(http.statusCode) else { return [:] }
+                          (200..<300).contains(http.statusCode) else { return (gameID, [:]) }
                     guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                          let rosters = json["rosters"] as? [[String: Any]] else { return [:] }
+                          let rosters = json["rosters"] as? [[String: Any]] else { return (gameID, [:]) }
 
                     var orders: [String: Int] = [:]
                     for teamRoster in rosters {
@@ -2940,20 +3001,21 @@ struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
                             }
                         }
                     }
-                    return orders
+                    return (gameID, orders)
                 }
             }
-            var result: [String: Int] = [:]
-            for await orders in group {
-                result.merge(orders) { existing, _ in existing }
+            var result: [String: [String: Int]] = [:]
+            for await (gameID, orders) in group where !orders.isEmpty {
+                result[gameID] = orders
             }
             return result
         }
 
-        // Apply batting orders to players
+        // Apply batting orders to players — only from the player's OWN game.
         let playersWithOrders: [DFSPlayer] = allRosterPlayers.map { player in
             let espnID = String(player.id.dropFirst(4)) // remove "mlb-"
-            guard let order = battingOrders[espnID] else { return player }
+            guard let gid = player.gameID,
+                  let order = battingOrdersByGame[gid]?[espnID] else { return player }
             var updated = player
             updated.battingOrder = order
             return updated
@@ -3320,12 +3382,28 @@ struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
 
         // Also remove players from postponed games so they don't inflate the main-slate pool
         let validGameIDs = Set(includedGames.map(\.id))
-        let sortedPlayersFiltered = sortedPlayers.filter { p in
+        var sortedPlayersFiltered = sortedPlayers.filter { p in
             guard let gid = p.gameID else { return true } // keep players without gameID
             return validGameIDs.contains(gid)
         }
         if sortedPlayersFiltered.count < sortedPlayers.count {
             print("[MLB-DFS] Removed \(sortedPlayers.count - sortedPlayersFiltered.count) players from postponed/excluded games")
+        }
+
+        // Doubleheader: stamp each probable SP with HIS game's event ID.
+        // The team-level map assigns the whole roster to one of the two
+        // games, which put both games' starters in the same showdown pool.
+        sortedPlayersFiltered = sortedPlayersFiltered.map { player in
+            guard player.position == "SP" else { return player }
+            let rawID = String(player.id.dropFirst(4))                 // strip "mlb-"
+            let athleteID = rawID.hasSuffix("-sp") ? String(rawID.dropLast(3)) : rawID
+            guard let eventID = probableEventByAthleteID[athleteID],
+                  validGameIDs.contains(eventID),
+                  player.gameID != eventID else { return player }
+            var updated = player
+            updated.gameID = eventID
+            print("[MLB-DFS] Doubleheader: \(player.name) assigned to his own game \(eventID)")
+            return updated
         }
 
         // Phase 2: pull showdown salaries from RG's slate-specific JSON,
@@ -3343,7 +3421,8 @@ struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
                         let salaries = await RotoGrindersSalaryProvider.shared.fetchShowdownSalariesForGame(
                             sport: "mlb",
                             awayHashtag: game.awayTeam,
-                            homeHashtag: game.homeTeam
+                            homeHashtag: game.homeTeam,
+                            startTime: game.startTime
                         )
                         return (game.id, salaries)
                     }
@@ -5054,7 +5133,8 @@ struct ESPNNHLDFSSlateProvider: DFSSlateProvider {
                 let slatePlayers = await RotoGrindersSalaryProvider.shared.fetchShowdownPlayersForGame(
                     sport: "nhl",
                     awayHashtag: firstGame.awayTeam,
-                    homeHashtag: firstGame.homeTeam
+                    homeHashtag: firstGame.homeTeam,
+                    startTime: firstGame.startTime
                 )
                 if !slatePlayers.isEmpty {
                     nhlSlatePlayers = slatePlayers
@@ -5065,7 +5145,8 @@ struct ESPNNHLDFSSlateProvider: DFSSlateProvider {
                 let slateSpecific = await RotoGrindersSalaryProvider.shared.fetchShowdownSalariesForGame(
                     sport: "nhl",
                     awayHashtag: firstGame.awayTeam,
-                    homeHashtag: firstGame.homeTeam
+                    homeHashtag: firstGame.homeTeam,
+                    startTime: firstGame.startTime
                 )
                 if !slateSpecific.isEmpty { return slateSpecific }
             }
@@ -8550,7 +8631,8 @@ struct ESPNWNBADFSSlateProvider: DFSSlateProvider {
         var showdownUtilSalaries: [String: Int] = [:]
         if isSingleGame, let firstGame = includedGames.first {
             let slatePlayers = await RotoGrindersSalaryProvider.shared.fetchShowdownPlayersForGame(
-                sport: "wnba", awayHashtag: firstGame.awayTeam, homeHashtag: firstGame.homeTeam
+                sport: "wnba", awayHashtag: firstGame.awayTeam, homeHashtag: firstGame.homeTeam,
+                startTime: firstGame.startTime
             )
             if !slatePlayers.isEmpty {
                 wnbaSlatePlayers = slatePlayers
