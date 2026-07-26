@@ -1763,3 +1763,89 @@ private enum ESPNDateParsers {
         return formatter
     }()
 }
+
+// MARK: - MLB Probable Pitchers (Pick'em cards)
+
+/// Probable starting pitchers for MLB Pick'em match cards. Fetched from
+/// ESPN's MLB scoreboard (`competitors[].probables`) and matched to
+/// Odds-API-sourced matches by team name + closest start time (the time
+/// tiebreak keeps doubleheader games from swapping pitchers).
+struct MLBProbablePitcherProvider {
+    struct GameProbables {
+        let awayTeam: String
+        let homeTeam: String
+        let startsAt: Date
+        let awayPitcher: String?
+        let homePitcher: String?
+    }
+
+    /// Fetches probables for the given ET date keys ("yyyyMMdd").
+    static func fetch(dateKeys: [String]) async -> [GameProbables] {
+        await withTaskGroup(of: [GameProbables].self, returning: [GameProbables].self) { group in
+            for dateKey in Set(dateKeys) {
+                group.addTask {
+                    guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard?dates=\(dateKey)"),
+                          let (data, response) = try? await URLSession.shared.data(from: url),
+                          let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let events = json["events"] as? [[String: Any]] else {
+                        return []
+                    }
+                    let iso = ISO8601DateFormatter()
+                    var out: [GameProbables] = []
+                    for event in events {
+                        guard let competitions = event["competitions"] as? [[String: Any]],
+                              let competition = competitions.first,
+                              let competitors = competition["competitors"] as? [[String: Any]] else { continue }
+                        var awayName = "", homeName = ""
+                        var awayPitcher: String?, homePitcher: String?
+                        for competitor in competitors {
+                            let side = competitor["homeAway"] as? String ?? ""
+                            let name = (competitor["team"] as? [String: Any])?["displayName"] as? String ?? ""
+                            let probable = (competitor["probables"] as? [[String: Any]])?.first
+                            let athlete = probable?["athlete"] as? [String: Any]
+                            let pitcher = athlete?["shortName"] as? String ?? athlete?["displayName"] as? String
+                            if side == "away" { awayName = name; awayPitcher = pitcher }
+                            else if side == "home" { homeName = name; homePitcher = pitcher }
+                        }
+                        guard !awayName.isEmpty, !homeName.isEmpty else { continue }
+                        let dateStr = event["date"] as? String ?? ""
+                        let startsAt = iso.date(from: dateStr)
+                            ?? iso.date(from: dateStr.replacingOccurrences(of: "Z", with: ":00Z"))
+                            ?? .distantPast
+                        out.append(GameProbables(
+                            awayTeam: awayName, homeTeam: homeName,
+                            startsAt: startsAt,
+                            awayPitcher: awayPitcher, homePitcher: homePitcher
+                        ))
+                    }
+                    return out
+                }
+            }
+            var all: [GameProbables] = []
+            for await batch in group { all.append(contentsOf: batch) }
+            return all
+        }
+    }
+
+    /// Odds-API names and ESPN displayNames mostly agree ("Baltimore
+    /// Orioles"), but stay defensive: equality or containment either way.
+    static func teamsMatch(_ a: String, _ b: String) -> Bool {
+        let x = a.lowercased(), y = b.lowercased()
+        return x == y || x.contains(y) || y.contains(x)
+    }
+
+    /// Best game for a match: both team names match, closest start time.
+    static func probables(awayTeam: String, homeTeam: String, startsAt: Date, in games: [GameProbables]) -> (away: String?, home: String?)? {
+        let candidates = games.filter {
+            teamsMatch($0.awayTeam, awayTeam) && teamsMatch($0.homeTeam, homeTeam)
+        }
+        guard let best = candidates.min(by: {
+            abs($0.startsAt.timeIntervalSince(startsAt)) < abs($1.startsAt.timeIntervalSince(startsAt))
+        }) else { return nil }
+        // Only trust the pairing within a few hours — a name match from the
+        // wrong day shouldn't stamp pitchers on tomorrow's card.
+        guard abs(best.startsAt.timeIntervalSince(startsAt)) < 4 * 3600 else { return nil }
+        return (best.awayPitcher, best.homePitcher)
+    }
+}

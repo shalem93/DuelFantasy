@@ -452,6 +452,9 @@ struct ContentView: View {
     private let resultProvider: MatchResultProvider = ESPNMatchResultProvider()
 
     @State private var predictionHistory: [PredictionRecord] = []
+    /// Probable pitchers for MLB Pick'em cards: match ID → (away, home).
+    @State private var mlbProbablesByMatchID: [String: (away: String?, home: String?)] = [:]
+    @State private var lastProbablesFetch: Date = .distantPast
 
     private var winRate: Int {
         let total = wins + losses
@@ -2859,6 +2862,14 @@ struct ContentView: View {
                     Text(match.awayTeam)
                         .font(.subheadline.weight(.bold))
                         .foregroundStyle(match.isFinal ? .secondary : .primary)
+                    // Probable starter (MLB only) — informs the pick.
+                    if match.league == "MLB", !match.isFinal,
+                       let probables = mlbProbablesByMatchID[match.id] {
+                        Text(probables.away ?? "TBD")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                     if (match.isLive || match.isFinal), let score = match.awayScore {
                         Text("\(score)")
                             .font(.title3.weight(.bold).monospacedDigit())
@@ -2876,6 +2887,13 @@ struct ContentView: View {
                     Text(match.homeTeam)
                         .font(.subheadline.weight(.bold))
                         .foregroundStyle(match.isFinal ? .secondary : .primary)
+                    if match.league == "MLB", !match.isFinal,
+                       let probables = mlbProbablesByMatchID[match.id] {
+                        Text(probables.home ?? "TBD")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                     if (match.isLive || match.isFinal), let score = match.homeScore {
                         Text("\(score)")
                             .font(.title3.weight(.bold).monospacedDigit())
@@ -3770,6 +3788,36 @@ struct ContentView: View {
         }
     }
 
+    /// Probable starting pitchers for the MLB Pick'em cards, keyed by match
+    /// ID. Matched by team names + closest start time (doubleheader-safe).
+    private func loadMLBProbablePitchers() async {
+        let mlbMatches = matches.filter { $0.league == "MLB" && !$0.isFinal }
+        guard !mlbMatches.isEmpty else { return }
+        // Throttle: probables barely change; 15 min is plenty.
+        if Date().timeIntervalSince(lastProbablesFetch) < 900, !mlbProbablesByMatchID.isEmpty { return }
+
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyyMMdd"
+        fmt.timeZone = TimeZone(identifier: "America/New_York")
+        let dateKeys = Array(Set(mlbMatches.map { fmt.string(from: $0.startsAt) }))
+        let games = await MLBProbablePitcherProvider.fetch(dateKeys: dateKeys)
+        guard !games.isEmpty else { return }
+
+        var map: [String: (away: String?, home: String?)] = [:]
+        for match in mlbMatches {
+            if let probables = MLBProbablePitcherProvider.probables(
+                awayTeam: match.awayTeam, homeTeam: match.homeTeam,
+                startsAt: match.startsAt, in: games
+            ) {
+                map[match.id] = probables
+            }
+        }
+        await MainActor.run {
+            mlbProbablesByMatchID = map
+            lastProbablesFetch = Date()
+        }
+    }
+
     private func loadMatches(force: Bool) async {
         if isLoadingMatches {
             return
@@ -3903,6 +3951,10 @@ struct ContentView: View {
                 // picks that were migrated to incorrect future matches.
 
                 matches = mergedByID.values.sorted(by: { $0.startsAt < $1.startsAt })
+
+                // Probable pitchers for MLB cards (fire-and-forget; cards
+                // render without them until the fetch lands).
+                Task { await loadMLBProbablePitchers() }
 
                 // Backfill pickDetails for existing picks that don't have details yet
                 for match in fetchedMatches {
