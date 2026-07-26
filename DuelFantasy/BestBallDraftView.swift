@@ -98,6 +98,13 @@ struct BestBallDraftView: View {
                         Text(isMe ? "YOUR PICK" : "\(name) is picking...")
                             .font(.caption.weight(.bold))
                             .foregroundStyle(isMe ? brandPurple : .orange)
+                        // Countdown to the user's next turn so the snake
+                        // order isn't a mystery mid-round.
+                        if !isMe, let untilMe = picksUntilMyTurn(state) {
+                            Text(untilMe == 1 ? "You're up next!" : "You're up in \(untilMe) picks")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(untilMe <= 2 ? brandPurple : .secondary)
+                        }
                     }
                 }
 
@@ -386,37 +393,92 @@ struct BestBallDraftView: View {
 
     // MARK: - Roster Sheet
 
+    /// Fills the league's lineup slots with drafted players (dedicated
+    /// slots first, FLEX-style slots after — the constraints array is
+    /// already in that order) and returns the leftovers as bench. Earlier
+    /// picks fill first, so slot assignment mirrors draft priority.
+    private func slotAssignments(
+        _ state: BestBallDraftState, roster: [BestBallPick]
+    ) -> (starters: [(slot: String, pick: BestBallPick?)], bench: [BestBallPick]) {
+        let (_, constraints) = BestBallLineupConfig.requirements(for: state.league)
+        var remaining = roster.sorted { $0.pickNumber < $1.pickNumber }
+        var starters: [(String, BestBallPick?)] = []
+        for requirement in constraints {
+            for _ in 0..<requirement.count {
+                if let idx = remaining.firstIndex(where: { requirement.eligible.contains($0.playerPosition) }) {
+                    starters.append((requirement.label, remaining.remove(at: idx)))
+                } else {
+                    starters.append((requirement.label, nil))
+                }
+            }
+        }
+        return (starters, remaining)
+    }
+
+    /// "1/3 WR"-style chips: drafted count vs the league's draft minimum
+    /// for each constrained position.
+    private func positionCountChips(_ state: BestBallDraftState, roster: [BestBallPick]) -> some View {
+        let league = state.league
+        let minimums = BestBallLineupConfig.draftMinimums(
+            for: league.sport,
+            pitcherSlots: league.pitcherSlots, batterSlots: league.batterSlots,
+            nflQB: league.nflQbStarters, nflRB: league.nflRbStarters,
+            nflWR: league.nflWrStarters, nflTE: league.nflTeStarters
+        )
+        let counts = Dictionary(grouping: roster, by: \.playerPosition).mapValues { $0.count }
+        let ordered = minimums.sorted { a, b in
+            let order = ["QB", "RB", "WR", "TE", "SP", "PG", "SG", "SF", "PF", "C"]
+            return (order.firstIndex(of: a.key) ?? 99) < (order.firstIndex(of: b.key) ?? 99)
+        }
+        return HStack(spacing: 8) {
+            ForEach(ordered, id: \.key) { position, need in
+                let have = counts[position] ?? 0
+                let met = have >= need
+                Text("\(have)/\(need) \(position)")
+                    .font(.caption.weight(.bold).monospacedDigit())
+                    .foregroundStyle(met ? Color.green : Color.orange)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background((met ? Color.green : Color.orange).opacity(0.12))
+                    .clipShape(Capsule())
+            }
+            Spacer()
+            Text("\(roster.count)/\(league.rosterSize) drafted")
+                .font(.caption.weight(.semibold).monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+    }
+
     private var rosterSheet: some View {
         NavigationStack {
             Group {
                 if let state, let myID = viewModel.myMemberID {
                     let roster = state.roster(for: myID)
-                    if roster.isEmpty {
-                        VStack(spacing: 8) {
-                            Image(systemName: "person.3")
-                                .font(.largeTitle)
-                                .foregroundStyle(.secondary)
-                            Text("No picks yet")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                    } else {
-                        List(roster) { pick in
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(pick.playerName)
-                                        .font(.subheadline.weight(.medium))
-                                    Text("\(pick.playerPosition) • \(pick.playerTeam)")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Text("R\(pick.round)")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.secondary)
+                    let (starters, bench) = slotAssignments(state, roster: roster)
+                    let benchSlots = max(0, state.league.rosterSize - starters.count)
+                    List {
+                        Section("Starters") {
+                            ForEach(Array(starters.enumerated()), id: \.offset) { _, entry in
+                                rosterSlotRow(slot: entry.slot, pick: entry.pick)
                             }
                         }
-                        .listStyle(.plain)
+                        Section("Bench") {
+                            ForEach(bench) { pick in
+                                rosterSlotRow(slot: "BN", pick: pick)
+                            }
+                            ForEach(0..<max(0, benchSlots - bench.count), id: \.self) { _ in
+                                rosterSlotRow(slot: "BN", pick: nil)
+                            }
+                        }
+                    }
+                    .listStyle(.insetGrouped)
+                    .safeAreaInset(edge: .bottom) {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            positionCountChips(state, roster: roster)
+                                .padding(.horizontal, 16)
+                        }
+                        .padding(.vertical, 10)
+                        .background(.thinMaterial)
                     }
                 } else {
                     Text("Loading...")
@@ -432,7 +494,62 @@ struct BestBallDraftView: View {
         }
     }
 
+    private func rosterSlotRow(slot: String, pick: BestBallPick?) -> some View {
+        HStack(spacing: 12) {
+            Text(slot)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(pick == nil ? Color.secondary : .white)
+                .frame(width: 46, height: 24)
+                .background(pick == nil ? Color(.systemGray5) : brandPurple)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            if let pick {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(pick.playerName)
+                        .font(.subheadline.weight(.medium))
+                    Text("\(pick.playerPosition) • \(pick.playerTeam)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("R\(pick.round)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Empty")
+                    .font(.subheadline)
+                    .foregroundStyle(.tertiary)
+                Spacer()
+            }
+        }
+    }
+
     // MARK: - Helpers
+
+    /// Number of picks before the user's next turn (1 = up next). nil when
+    /// the user has no remaining pick. Walks the snake order forward from
+    /// the current pick using the same order logic as onTheClockMemberID.
+    private func picksUntilMyTurn(_ state: BestBallDraftState) -> Int? {
+        guard let myID = viewModel.myMemberID, !state.isDraftComplete else { return nil }
+        let memberCount = state.members.count
+        guard memberCount > 0 else { return nil }
+        func memberID(forPick pickNumber: Int) -> String? {
+            let round = ((pickNumber - 1) / memberCount) + 1
+            let indexInRound = (pickNumber - 1) % memberCount
+            let position = (round % 2 == 0) ? (memberCount - 1 - indexInRound) : indexInRound
+            if !state.league.draftOrder.isEmpty, position < state.league.draftOrder.count {
+                return state.league.draftOrder[position]
+            }
+            return state.members.first(where: { $0.slotIndex == position })?.id
+        }
+        // A full snake cycle (there and back) is the farthest a next turn
+        // can be; scanning two rounds' worth covers it.
+        for offset in 0..<(2 * memberCount) {
+            let pick = state.currentPickNumber + offset
+            guard pick <= state.totalPicks else { return nil }
+            if memberID(forPick: pick) == myID { return offset }
+        }
+        return nil
+    }
 
     private var positionsForSport: [String] {
         guard let league = viewModel.currentLeague else { return [] }
