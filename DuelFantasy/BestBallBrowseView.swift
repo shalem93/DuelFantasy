@@ -5,7 +5,7 @@ struct BestBallBrowseView: View {
     @State private var showCreateSheet: Bool = false
     @State private var showJoinByCode: Bool = false
     @State private var newLeagueTitle: String = ""
-    @State private var newLeagueSport: String = "MLB"
+    @State private var newLeagueSport: String = "NFL"
     @State private var newLeaguePrivate: Bool = false
     @State private var newLeagueSize: Int = 12
     @State private var newLeagueRosterSize: Int = 12
@@ -29,7 +29,131 @@ struct BestBallBrowseView: View {
     // NBA is hidden during the off-season (Apr–Sep) — the league wrapped
     // in June and there's no live data to score against until tip-off in
     // mid-October. Re-add once the 2026-27 season is on the schedule.
-    private let sports = ["MLB", "NFL"]
+    // NFL leads (kickoff is next up), CFB alongside it, MLB in-season.
+    private let sports = ["NFL", "CFB", "MLB"]
+
+    /// Display metadata for the create-sheet sport cards.
+    private struct SportOption {
+        let name: String
+        let icon: String
+        let tagline: String
+        let seasonNote: String
+        let gradient: [Color]
+    }
+
+    private func sportOption(for sport: String) -> SportOption {
+        switch sport {
+        case "NFL":
+            return SportOption(
+                name: "NFL", icon: "football.fill",
+                tagline: "Sundays are back",
+                seasonNote: "Kicks off September · 18 wks",
+                gradient: [Color(red: 0.00, green: 0.15, blue: 0.40), Color(red: 0.05, green: 0.32, blue: 0.65)]
+            )
+        case "CFB":
+            return SportOption(
+                name: "CFB", icon: "football.fill",
+                tagline: "Saturdays all fall",
+                seasonNote: "Week 1 late August · 15 wks",
+                gradient: [Color(red: 0.45, green: 0.10, blue: 0.08), Color(red: 0.75, green: 0.28, blue: 0.10)]
+            )
+        case "NBA":
+            return SportOption(
+                name: "NBA", icon: "basketball.fill",
+                tagline: "Nightly buckets",
+                seasonNote: "Tips off October · 24 wks",
+                gradient: [Color(red: 0.30, green: 0.08, blue: 0.35), Color(red: 0.55, green: 0.18, blue: 0.55)]
+            )
+        default:
+            return SportOption(
+                name: "MLB", icon: "figure.baseball",
+                tagline: "Bats & arms daily",
+                seasonNote: "Season live now · 26 wks",
+                gradient: [Color(red: 0.05, green: 0.28, blue: 0.14), Color(red: 0.10, green: 0.48, blue: 0.24)]
+            )
+        }
+    }
+
+    /// Tappable sport cards for the create sheet — replaces the old
+    /// segmented picker with something that actually sells each sport.
+    private var sportCardPicker: some View {
+        HStack(spacing: 10) {
+            ForEach(sports, id: \.self) { sport in
+                SportPickerCard(
+                    option: sportOption(for: sport),
+                    isSelected: newLeagueSport == sport,
+                    brandPurple: brandPurple
+                ) {
+                    Haptics.light()
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        newLeagueSport = sport
+                    }
+                }
+            }
+        }
+    }
+
+    private struct SportPickerCard: View {
+        let option: SportOption
+        let isSelected: Bool
+        let brandPurple: Color
+        let action: () -> Void
+
+        private var cardBackground: AnyShapeStyle {
+            if isSelected {
+                return AnyShapeStyle(LinearGradient(colors: option.gradient, startPoint: .topLeading, endPoint: .bottomTrailing))
+            }
+            return AnyShapeStyle(Color(.systemGray6))
+        }
+
+        private var iconCircleColor: Color {
+            isSelected ? Color.white.opacity(0.22) : brandPurple.opacity(0.10)
+        }
+
+        private var shadowColor: Color {
+            isSelected ? (option.gradient.last ?? brandPurple).opacity(0.35) : .clear
+        }
+
+        var body: some View {
+            Button(action: action) {
+                VStack(spacing: 6) {
+                    ZStack {
+                        Circle()
+                            .fill(iconCircleColor)
+                            .frame(width: 42, height: 42)
+                        Image(systemName: option.icon)
+                            .font(.system(size: 19, weight: .semibold))
+                            .foregroundStyle(isSelected ? Color.white : brandPurple)
+                    }
+                    Text(option.name)
+                        .font(.subheadline.weight(.heavy))
+                        .foregroundStyle(isSelected ? Color.white : Color.primary)
+                    Text(option.tagline)
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                    Text(option.seasonNote)
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(isSelected ? Color.white.opacity(0.7) : Color(.tertiaryLabel))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .padding(.horizontal, 4)
+                .background(cardBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(isSelected ? Color.white.opacity(0.35) : Color.clear, lineWidth: 1)
+                )
+                .shadow(color: shadowColor, radius: 6, y: 3)
+                .scaleEffect(isSelected ? 1.0 : 0.97)
+            }
+            .buttonStyle(.plain)
+        }
+    }
 
     /// Bump the roster-size stepper up to the configured starting-lineup
     /// total when the commissioner adds another starter slot. Mirrors
@@ -211,12 +335,9 @@ struct BestBallBrowseView: View {
                 }
 
                 Section("Sport") {
-                    Picker("Sport", selection: $newLeagueSport) {
-                        ForEach(sports, id: \.self) { sport in
-                            Text(sport).tag(sport)
-                        }
-                    }
-                    .pickerStyle(.segmented)
+                    sportCardPicker
+                        .listRowInsets(EdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8))
+                        .listRowBackground(Color.clear)
                 }
 
                 Section("League Settings") {
@@ -227,7 +348,7 @@ struct BestBallBrowseView: View {
                         // count, otherwise the bot drafter and lineup
                         // optimizer can't fill all the slots.
                         let minRoster: Int = {
-                            if newLeagueSport == "NFL" {
+                            if newLeagueSport == "NFL" || newLeagueSport == "CFB" {
                                 return newNflQB + newNflRB + newNflWR + newNflTE + newNflFLEX + newNflSFLEX
                             }
                             return newPitcherSlots + newBatterSlots
@@ -292,7 +413,7 @@ struct BestBallBrowseView: View {
                             }
                         ), in: 6...12)
                     }
-                } else if newLeagueSport == "NFL" {
+                } else if newLeagueSport == "NFL" || newLeagueSport == "CFB" {
                     Section("Starting Lineup") {
                         Stepper("QB: \(newNflQB)", value: $newNflQB, in: 0...2)
                             .onChange(of: newNflQB) { _, _ in floorRosterSizeForNFL() }
@@ -328,7 +449,13 @@ struct BestBallBrowseView: View {
                         Label("\(newLeagueSize)-person league", systemImage: "person.3")
                         let draftRounds = (newScoringMode == .dingersOnly && newLeagueSport == "MLB") ? newBatterSlots : newLeagueRosterSize
                         Label("\(draftRounds)-round snake draft", systemImage: "arrow.triangle.swap")
-                        let starters = newLeagueSport == "MLB" ? (newScoringMode == .dingersOnly ? newBatterSlots : newPitcherSlots + newBatterSlots) : (newLeagueSport == "NBA" ? newPitcherSlots + newBatterSlots : 8)
+                        let starters: Int = {
+                            switch newLeagueSport {
+                            case "MLB": return newScoringMode == .dingersOnly ? newBatterSlots : newPitcherSlots + newBatterSlots
+                            case "NBA": return newPitcherSlots + newBatterSlots
+                            default: return newNflQB + newNflRB + newNflWR + newNflTE + newNflFLEX + newNflSFLEX
+                            }
+                        }()
                         if newScoringMode == .dingersOnly && newLeagueSport == "MLB" {
                             Label("All \(starters) batters score · HR leaderboard", systemImage: "star")
                         } else {
@@ -361,7 +488,7 @@ struct BestBallBrowseView: View {
                             // starting lineup.
                             let nflStarters = newNflQB + newNflRB + newNflWR + newNflTE + newNflFLEX + newNflSFLEX
                             let effectiveRoster: Int
-                            if newLeagueSport == "NFL" {
+                            if newLeagueSport == "NFL" || newLeagueSport == "CFB" {
                                 effectiveRoster = max(newLeagueRosterSize, nflStarters)
                             } else if newScoringMode == .dingersOnly {
                                 effectiveRoster = newBatterSlots

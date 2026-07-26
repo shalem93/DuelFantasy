@@ -390,7 +390,7 @@ struct BestBallStandingsView: View {
         switch sport {
         case "NBA": return "basketball"
         case "MLB": return "baseball"
-        case "NFL": return "football"
+        case "NFL", "CFB": return "football"
         default: return "sportscourt"
         }
     }

@@ -1458,3 +1458,12 @@ create index if not exists idx_dfs_tournaments_lock_time
 create index if not exists idx_pickem_picks_settled_notnull
   on public.pickem_picks (settled_at asc, id asc)
   where result is not null;
+
+-- ============================================================
+-- CFB Best Ball: allow 'CFB' as a bestball sport
+-- ============================================================
+alter table public.bestball_leagues drop constraint if exists bestball_leagues_sport_check;
+alter table public.bestball_leagues add constraint bestball_leagues_sport_check
+  check (sport in ('NBA', 'MLB', 'NFL', 'CFB'));
+
+select pg_notify('pgrst', 'reload schema');

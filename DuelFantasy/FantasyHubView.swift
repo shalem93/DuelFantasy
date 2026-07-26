@@ -448,7 +448,7 @@ struct FantasyHubView: View {
             } label: {
                 gameTypeCard(
                     title: "Best Ball Fantasy",
-                    subtitle: "Season-long: draft a roster across MLB, NFL, or NBA and the best lineup auto-sets each week",
+                    subtitle: "Season-long: draft a roster in NFL, CFB, or MLB and the best lineup auto-sets each week",
                     icon: "figure.baseball",
                     gradient: [Color(red: 0.12, green: 0.28, blue: 0.12), Color(red: 0.18, green: 0.42, blue: 0.18)],
                     status: .open,

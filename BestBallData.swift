@@ -231,7 +231,7 @@ enum BestBallLineupConfig {
                 BestBallPositionRequirement(label: "P",    count: pitcherSlots, eligible: ["SP", "P"]),
                 BestBallPositionRequirement(label: "UTIL", count: batterSlots, eligible: ["C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "OF", "DH"]),
             ])
-        case "NFL":
+        case "NFL", "CFB":
             // Commissioner-configurable lineup. Standard FLEX = RB/WR/TE
             // (no QB); Superflex (SFLEX) = QB/RB/WR/TE for leagues that
             // want a second-QB-eligible flex slot.
@@ -270,7 +270,7 @@ enum BestBallLineupConfig {
         switch sport {
         case "NBA": return ["PG": 1, "SG": 1, "SF": 1, "PF": 1, "C": 1]
         case "MLB": return ["SP": pitcherSlots]  // Must fill pitcher starter slots; batters handled by balanced pick logic
-        case "NFL":
+        case "NFL", "CFB":
             var mins: [String: Int] = [:]
             if nflQB > 0 { mins["QB"] = nflQB }
             if nflRB > 0 { mins["RB"] = nflRB }
@@ -287,7 +287,7 @@ enum BestBallLineupConfig {
         case "NBA": return ["PTS", "REB", "AST", "STL", "BLK", "TO"]
         case "MLB" where isPitcher: return ["IP", "K", "ER", "W", "SV"]
         case "MLB": return ["H", "AB", "HR", "RBI", "R", "BB", "K", "SB"]
-        case "NFL": return ["PYDS", "PTD", "INT", "RYDS", "RTD", "REC", "RECYDS", "RECTD"]
+        case "NFL", "CFB": return ["PYDS", "PTD", "INT", "RYDS", "RTD", "REC", "RECYDS", "RECTD"]
         default: return []
         }
     }
@@ -371,9 +371,9 @@ enum BestBallLineupConfig {
             MLB Pitcher Points:
             IP ×3 · K ×2 · W ×5 · ER ×−2 · SV ×5
             """
-        case "NFL":
+        case "NFL", "CFB":
             return """
-            NFL Fantasy Points:
+            Football Fantasy Points:
             Pass YDS ×0.04 · Pass TD ×4 · INT ×−1
             Rush YDS ×0.1 · Rush TD ×6
             REC ×1 · Rec YDS ×0.1 · Rec TD ×6 · FUM ×−2
@@ -699,7 +699,7 @@ enum BestBallBotDrafter {
         // grabbing the next-best RB/WR. Two phases:
         //   1. Fill any unmet starter minimum first.
         //   2. Pick the best available respecting per-position caps.
-        if sport == "NFL" {
+        if sport == "NFL" || sport == "CFB" {
             // Phase 1: are we still missing starters?
             if !neededPositions.isEmpty {
                 // Pick the highest-ranked player at ANY unmet position.
@@ -791,6 +791,7 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
         case "NBA": return try await fetchSportPlayers(sport: "basketball", league: "nba", sportName: "NBA", teamLimit: 30)
         case "MLB": return try await fetchSportPlayers(sport: "baseball", league: "mlb", sportName: "MLB", teamLimit: 30)
         case "NFL": return try await fetchSportPlayers(sport: "football", league: "nfl", sportName: "NFL", teamLimit: 32)
+        case "CFB": return try await fetchSportPlayers(sport: "football", league: "college-football", sportName: "CFB", teamLimit: 80)
         default: return []
         }
     }
@@ -811,7 +812,56 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
     }
 
     private func fetchAllTeams(sport: String, league: String) async throws -> [BBTeamRef] {
-        guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/\(sport)/\(league)/teams?limit=50") else { return [] }
+        // CFB: ~755 programs across all divisions is far too many rosters
+        // to pull (and the long tail has no fantasy relevance). Take the
+        // power conferences + independents (~69 teams) from the core API's
+        // season group membership — the site API's `groups` query param is
+        // silently ignored (it returns D3 schools).
+        if league == "college-football" {
+            let ids = await fetchCFBPowerConferenceTeamIDs()
+            guard !ids.isEmpty else { return [] }
+            // One site-API call maps every team ID → abbreviation.
+            let allTeams = try await fetchTeamsPage(sport: sport, league: league, query: "limit=1000")
+            return allTeams.filter { ids.contains($0.id) }
+        }
+        return try await fetchTeamsPage(sport: sport, league: league, query: "limit=50")
+    }
+
+    /// Team IDs for the power conferences + FBS independents from the core
+    /// API (ESPN group IDs: ACC 1, Big 12 4, Big Ten 5, SEC 8, Indep 18).
+    /// Tries the current season year first, then the prior year (the new
+    /// season's group memberships publish over the summer).
+    private func fetchCFBPowerConferenceTeamIDs() async -> Set<String> {
+        let year = Calendar.current.component(.year, from: Date())
+        for seasonYear in [year, year - 1] {
+            var ids = Set<String>()
+            await withTaskGroup(of: [String].self) { group in
+                for groupID in [1, 4, 5, 8, 18] {
+                    group.addTask {
+                        let urlString = "https://sports.core.api.espn.com/v2/sports/football/leagues/college-football/seasons/\(seasonYear)/types/2/groups/\(groupID)/teams?limit=40"
+                        guard let url = URL(string: urlString),
+                              let (data, response) = try? await self.session.data(from: url),
+                              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                              let items = json["items"] as? [[String: Any]] else { return [] }
+                        return items.compactMap { item in
+                            guard let ref = item["$ref"] as? String,
+                                  let idPart = ref.split(separator: "?").first?.split(separator: "/").last else { return nil }
+                            return String(idPart)
+                        }
+                    }
+                }
+                for await batch in group {
+                    ids.formUnion(batch)
+                }
+            }
+            if !ids.isEmpty { return ids }
+        }
+        return []
+    }
+
+    private func fetchTeamsPage(sport: String, league: String, query: String) async throws -> [BBTeamRef] {
+        guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/\(sport)/\(league)/teams?\(query)") else { return [] }
         let (data, response) = try await session.data(from: url)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return [] }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -862,7 +912,7 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
             // projection ranking because their raw stat totals (FG made,
             // points scored, etc.) parse out higher than any skill
             // player's per-game fantasy projection.
-            if sportName == "NFL" {
+            if sportName == "NFL" || sportName == "CFB" {
                 let skillPositions: Set<String> = ["QB", "RB", "FB", "WR", "TE"]
                 if !skillPositions.contains(positionAbbr) { continue }
             }
@@ -940,8 +990,8 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
 
         if sportName == "NBA" {
             parseNBALeaders(categories: categories)
-        } else if sportName == "NFL" {
-            // NFL: SUM each category's fantasy-point contribution across
+        } else if sportName == "NFL" || sportName == "CFB" {
+            // NFL/CFB: SUM each category's fantasy-point contribution across
             // the player's appearances in different leaderboards. The
             // earlier "first category wins" logic produced nonsense
             // rankings (a kicker's points-scored total beat a QB's
@@ -1166,7 +1216,7 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
             } else {
                 return parseMLBSeasonProjection(statLine)
             }
-        case "NFL": return parseNFLSeasonProjection(statLine)
+        case "NFL", "CFB": return parseNFLSeasonProjection(statLine)
         default: return 0
         }
     }
@@ -1314,7 +1364,7 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
         switch sport {
         case "NBA":
             return month >= 7 ? year + 1 : year
-        case "NFL":
+        case "NFL", "CFB":
             if month >= 7 { return year }
             if month <= 2 { return year - 1 }
             return year                       // Mar–Jun off-season → upcoming season
@@ -1380,7 +1430,7 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
             // Non-leaders: low-end regulars and bench bats
             // Leader batters bottom out ~31, so cap fallback below that
             floor = 2.0; ceiling = 30.0
-        case "NFL":
+        case "NFL", "CFB":
             // Non-leaders: low-tier starters / backups
             floor = 2.0; ceiling = 10.0
         default:
@@ -1730,6 +1780,7 @@ struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvider {
         case "NBA": return ("basketball", "nba")
         case "MLB": return ("baseball", "mlb")
         case "NFL": return ("football", "nfl")
+        case "CFB": return ("football", "college-football")
         default: return ("", "")
         }
     }
@@ -1766,7 +1817,7 @@ struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvider {
                     k: Int(lookup["K"] ?? lookup["SO"] ?? 0)
                 )
             }
-        case "NFL":
+        case "NFL", "CFB":
             return BestBallScoringEngine.nflFantasyPoints(
                 passYds: Int(lookup["YDS"] ?? 0), passTD: Int(lookup["TD"] ?? 0),
                 interceptions: Int(lookup["INT"] ?? 0),
@@ -1788,6 +1839,7 @@ enum BestBallSeasonHelper {
         case "NBA": return 24
         case "MLB": return 26
         case "NFL": return 18
+        case "CFB": return 15   // Week 1 (Labor Day weekend) → conference championships
         default: return 20
         }
     }
@@ -1800,7 +1852,7 @@ enum BestBallSeasonHelper {
         let year = Calendar.current.component(.year, from: Date())
         let month = Calendar.current.component(.month, from: Date())
         switch sport {
-        case "NFL":
+        case "NFL", "CFB":
             // Sep–Dec: current `year` season. Jan–Feb: prior season
             // playoffs (still labeled with last fall's start year).
             // Mar–Aug: pivot to upcoming `year` kickoff.
@@ -1891,6 +1943,21 @@ enum BestBallSeasonHelper {
                 startYear = year                  // Mar–Jun: upcoming season starts Sep `year`
             }
             return thursdayOnOrAfter(calendar.date(from: DateComponents(year: startYear, month: 9, day: 4)) ?? Date(), calendar: calendar)
+        case "CFB":
+            // CFB runs late Aug→early Dec. Weeks are the default Mon–Sun
+            // window (games land Tue–Sat), anchored to the Monday before
+            // the Labor-Day-weekend Saturday slate — Week 0's handful of
+            // games is deliberately left out. Same forward pivot as NFL
+            // for off-season league creation.
+            let startYear: Int
+            if month >= 7 {
+                startYear = year
+            } else if month <= 1 {
+                startYear = year - 1
+            } else {
+                startYear = year
+            }
+            return mondayOnOrAfter(calendar.date(from: DateComponents(year: startYear, month: 8, day: 28)) ?? Date(), calendar: calendar)
         default:
             return Date()
         }

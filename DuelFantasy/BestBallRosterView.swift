@@ -85,7 +85,7 @@ struct BestBallRosterView: View {
     private func positionSortRank(_ position: String, sport: String) -> Int {
         let order: [String]
         switch sport {
-        case "NFL": order = ["QB", "RB", "FB", "WR", "TE", "K"]
+        case "NFL", "CFB": order = ["QB", "RB", "FB", "WR", "TE", "K"]
         case "NBA": order = ["PG", "SG", "SF", "PF", "C"]
         case "MLB": order = ["SP", "RP", "P", "C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "OF", "DH"]
         default:    order = []
@@ -521,7 +521,7 @@ struct BestBallRosterView: View {
     /// position-rank sort with no override label.
     private func sportSpecificStarterEntries() -> [(pick: BestBallPick, slotLabel: String?)] {
         let scoringStarters = sortedRoster.filter { scoringPlayerIDs.contains($0.playerID) }
-        guard sport == "NFL", let league = viewModel.currentLeague else {
+        guard sport == "NFL" || sport == "CFB", let league = viewModel.currentLeague else {
             return scoringStarters.map { ($0, nil) }
         }
         let constraints = BestBallLineupConfig.requirements(for: league).constraints

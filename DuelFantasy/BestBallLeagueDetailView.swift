@@ -455,7 +455,7 @@ struct BestBallLeagueDetailView: View {
         switch sport {
         case "NBA": return "basketball"
         case "MLB": return "baseball"
-        case "NFL": return "football"
+        case "NFL", "CFB": return "football"
         default: return "sportscourt"
         }
     }
@@ -695,7 +695,7 @@ private struct CommishSettingsSheet: View {
                                 }
                             }
                         }
-                    } else if league.sport == "NFL" {
+                    } else if league.sport == "NFL" || league.sport == "CFB" {
                         settingsCard(title: "Starting Lineup") {
                             // NFL config is only editable before the
                             // draft starts — once it's drafting/active
@@ -755,7 +755,7 @@ private struct CommishSettingsSheet: View {
                                 // Make sure the roster can still hold
                                 // the configured NFL lineup.
                                 var effectiveRoster = editRosterSize
-                                if league.sport == "NFL" {
+                                if league.sport == "NFL" || league.sport == "CFB" {
                                     let starters = editNflQB + editNflRB + editNflWR + editNflTE + editNflFLEX + editNflSFLEX
                                     effectiveRoster = max(effectiveRoster, starters)
                                 }

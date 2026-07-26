@@ -211,7 +211,7 @@ struct BestBallMatchupView: View {
                 mlbMatchupSection(title: "PITCHERS", badge: "P", slots1: pitchers1, slots2: pitchers2)
                 mlbMatchupSection(title: "BATTERS", badge: "UTIL", slots1: batters1, slots2: batters2)
                     .padding(.top, 12)
-            } else if sport == "NFL", let league = viewModel.currentLeague {
+            } else if sport == "NFL" || sport == "CFB", let league = viewModel.currentLeague {
                 // For NFL we render starters by their lineup slot
                 // (QB → RB → WR → TE → FLEX) so the matchup reads like a
                 // standard fantasy box score rather than a flat FLEX list.

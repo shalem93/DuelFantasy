@@ -295,6 +295,7 @@ struct BestBallDraftView: View {
                                     let gamesPerSeason: Double = {
                                         switch player.sport {
                                         case "NFL": return 17
+                                        case "CFB": return 12
                                         case "NBA": return 82
                                         case "MLB": return 162
                                         default: return 17
@@ -332,7 +333,7 @@ struct BestBallDraftView: View {
             let sport = viewModel.currentLeague?.sport ?? "NFL"
             let sortOrder: [String] = {
                 switch sport {
-                case "NFL": return ["QB", "RB", "FB", "WR", "TE", "K"]
+                case "NFL", "CFB": return ["QB", "RB", "FB", "WR", "TE", "K"]
                 case "NBA": return ["PG", "SG", "SF", "PF", "C"]
                 case "MLB": return ["SP", "RP", "P", "C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "OF", "DH"]
                 default:    return []
@@ -446,7 +447,7 @@ struct BestBallDraftView: View {
         // the filter dropdown. The player pool already filters them out
         // upstream — the dropdown is the only place a leftover "K"
         // option could appear.
-        case "NFL": return ["QB", "RB", "WR", "TE"]
+        case "NFL", "CFB": return ["QB", "RB", "WR", "TE"]
         default: return []
         }
     }
