@@ -471,7 +471,8 @@ struct FantasyHubView: View {
             }
             .buttonStyle(.plain)
 
-            // Golf Major Tiers
+            // Golf Major Tiers — hidden during the long offseason
+            if showGolfTiersGameTypeCard {
             NavigationLink {
                 GolfTiersLobbyView(viewModel: golfTiersViewModel)
             } label: {
@@ -484,8 +485,10 @@ struct FantasyHubView: View {
                 )
             }
             .buttonStyle(.plain)
+            }
 
-            // World Cup Tiers
+            // World Cup Tiers — hidden unless a joinable tournament exists
+            if showSoccerTiersGameTypeCard {
             NavigationLink {
                 SoccerTiersLobbyView(viewModel: soccerTiersViewModel)
             } label: {
@@ -498,6 +501,7 @@ struct FantasyHubView: View {
                 )
             }
             .buttonStyle(.plain)
+            }
         }
     }
 
@@ -552,6 +556,32 @@ struct FantasyHubView: View {
     /// a finished one via PAST RESULTS.
     private var showPlayoffTiersGameTypeCard: Bool {
         playoffTiersViewModel.tournament?.status == "open"
+    }
+
+    /// Golf Major Tiers: majors run April–July, then a ~7-month offseason —
+    /// keep the card off outside the window. The old always-shown card also
+    /// FLASHED "OPEN" → "FINAL" on every launch (status read .open until the
+    /// settled tournament loaded). An unsettled tournament overrides the
+    /// window so a live major never disappears mid-event.
+    private var showGolfTiersGameTypeCard: Bool {
+        if let tournament = golfTiersViewModel.tournament, tournament.status != "settled" {
+            return true
+        }
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
+        let comps = cal.dateComponents([.month, .day], from: Date())
+        let mmdd = (comps.month ?? 1) * 100 + (comps.day ?? 1)
+        // Masters lead-up (mid-March) through the Open Championship (~Jul 20)
+        return mmdd >= 315 && mmdd <= 720 && golfTiersViewModel.tournament == nil
+    }
+
+    /// World Cup Tiers: the 2026 Cup is settled and the next is 2030 — show
+    /// the launcher card only when a joinable (non-settled) tournament
+    /// actually exists on the server. nil-while-loading stays hidden, which
+    /// also kills the launch flash.
+    private var showSoccerTiersGameTypeCard: Bool {
+        guard let tournament = soccerTiersViewModel.tournament else { return false }
+        return tournament.status != "settled"
     }
 
     private var golfTiersCardStatus: GameStatus {
