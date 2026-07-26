@@ -739,14 +739,33 @@ final class BestBallViewModel {
         let schedule = BestBallScheduleGenerator.generateSchedule(
             memberIDs: memberIDs, totalWeeks: league.totalWeeks
         )
+        // NEVER persist an empty schedule — an empty write poisons the
+        // league (the Matchup tab reads [] forever and the auto-heal keeps
+        // regenerating the same emptiness). With bye support in the
+        // generator, empty here means inputs were genuinely broken.
+        guard !schedule.isEmpty else {
+            print("[BestBall] Schedule generation produced 0 weeks for \(leagueID) (members=\(memberIDs.count), totalWeeks=\(league.totalWeeks)) — not persisting")
+            return
+        }
         let weekStructure = league.sport == "NFL" ? "thu_mon" : "mon_sun"
-        do {
-            try await SupabaseService.shared.updateLeagueSchedule(
-                leagueID: leagueID, schedule: schedule,
-                weekStructure: weekStructure, accessToken: token
-            )
-        } catch {
-            self.error = error.localizedDescription
+        // Retry the write: a cancelled/failed PATCH here used to strand the
+        // league schedule-less until the next full league open.
+        for attempt in 1...3 {
+            do {
+                try await SupabaseService.shared.updateLeagueSchedule(
+                    leagueID: leagueID, schedule: schedule,
+                    weekStructure: weekStructure, accessToken: token
+                )
+                // Reflect locally so the Matchup tab works immediately.
+                currentLeague?.schedule = schedule
+                return
+            } catch {
+                if attempt == 3 {
+                    self.error = error.localizedDescription
+                } else {
+                    try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
+                }
+            }
         }
     }
 

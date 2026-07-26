@@ -387,19 +387,27 @@ enum BestBallLineupConfig {
 // MARK: - Schedule Generator
 
 enum BestBallScheduleGenerator {
-    /// Round-robin schedule for 12 teams. Returns [week][ [memberA, memberB], ... ]
+    /// Round-robin schedule. Returns [week][ [memberA, memberB], ... ].
+    /// Odd member counts get a rotating bye (that member simply has no
+    /// matchup that week) — the old even-only guard returned [] for odd
+    /// leagues, which then got PERSISTED as an empty schedule and left
+    /// the Matchup tab on "No matchup found" forever.
     static func generateSchedule(memberIDs: [String], totalWeeks: Int) -> [[[String]]] {
-        let n = memberIDs.count
-        guard n >= 2, n % 2 == 0 else { return [] }
+        guard memberIDs.count >= 2, totalWeeks > 0 else { return [] }
 
+        let bye = "__bye__"
         var ids = memberIDs
+        if ids.count % 2 != 0 { ids.append(bye) }
+        let n = ids.count
         var rounds: [[[String]]] = []
 
         // Circle method: fix first element, rotate the rest
         for _ in 0..<(n - 1) {
             var weekMatchups: [[String]] = []
             for i in 0..<(n / 2) {
-                weekMatchups.append([ids[i], ids[n - 1 - i]])
+                let a = ids[i], b = ids[n - 1 - i]
+                if a == bye || b == bye { continue }
+                weekMatchups.append([a, b])
             }
             rounds.append(weekMatchups)
             // Rotate: keep first, shift rest
