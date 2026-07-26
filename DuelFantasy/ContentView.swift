@@ -328,6 +328,9 @@ struct ContentView: View {
     @State private var matchesError: String?
     @State private var selectedLeagueFilter: String? = nil
     @State private var lastGlobalSettlement: Date = .distantPast
+    /// Throttle for the Profile tab's heavy re-sync (its .task refires on
+    /// every tab visit).
+    @State private var lastProfileHeavySync: Date = .distantPast
 
     @State private var dfsViewModel = DFSViewModel()
     @State private var nhlDFSViewModel = DFSViewModel(
@@ -1180,6 +1183,7 @@ struct ContentView: View {
     }
 
     private func syncRRScore(_ value: Int) {
+        guard value != rrScore else { return }
         rrScore = value
         dfsViewModel.rrScore = value
         nhlDFSViewModel.rrScore = value
@@ -1204,6 +1208,11 @@ struct ContentView: View {
         // and re-set every VM, which retriggered onChange(of: vm.dfsHistoryData)
         // → syncHistory → syncHistoryData in a feedback loop that could spin
         // forever and crash the app. Keep this a simple idempotent fan-out.)
+        // No-op when nothing changed: with the merge blob now byte-stable,
+        // an unchanged sync must not invalidate 13 observable VMs (every
+        // assignment fires observation regardless of equality — that was
+        // half the post-sync UI churn).
+        guard value != dfsHistoryData else { return }
         dfsHistoryData = value
         dfsViewModel.dfsHistoryData = value
         nhlDFSViewModel.dfsHistoryData = value
@@ -1224,6 +1233,7 @@ struct ContentView: View {
     }
 
     private func syncSettledData(_ value: Data) {
+        guard value != settledTournamentData else { return }
         settledTournamentData = value
         dfsViewModel.settledTournamentData = value
         nhlDFSViewModel.settledTournamentData = value
@@ -2001,6 +2011,14 @@ struct ContentView: View {
             }
             .task {
                 await loadLeaderboardAndFriends()
+                // This .task refires on EVERY Profile tab visit; the heavy
+                // work below (stale-probe + full 13-sport history fetch +
+                // settlement) was re-running each time — server load plus
+                // minutes of visible RR/history churn after tab-hopping.
+                // In-memory state is already current between passes, so
+                // once per 3 minutes is plenty.
+                guard Date().timeIntervalSince(lastProfileHeavySync) >= 180 else { return }
+                lastProfileHeavySync = Date()
                 // Quick check: if this user has zero server DFS results but local
                 // history has entries, wipe the stale data (from a previous account).
                 await cleanStaleLocalDFSHistory()
@@ -4205,7 +4223,20 @@ struct ContentView: View {
                     !serverSettledNames2.contains(record.matchName)
                 }
                 let mergedHistory = restoredHistory + unsyncedLocalHistory
-                historyData = (try? JSONEncoder().encode(Array(mergedHistory.prefix(500)))) ?? Data()
+                // Content-stable write: restored records are minted with
+                // FRESH UUIDs on every sync, so re-encoding always produced
+                // different bytes and rewrote historyData every leaderboard
+                // pass even when nothing actually changed — churning the
+                // home history list and the RR pill. Compare content (not
+                // IDs) and skip the rewrite when equal.
+                func historyContentKey(_ record: PredictionRecord) -> String {
+                    "\(record.matchName)|\(record.pickedTeam)|\(record.winnerTeam ?? "")|\(record.rrDelta)|\(Int(record.loggedAt.timeIntervalSince1970))"
+                }
+                let newKeys = mergedHistory.prefix(500).map(historyContentKey).sorted()
+                let oldKeys = predictionHistory.prefix(500).map(historyContentKey).sorted()
+                if newKeys != oldKeys {
+                    historyData = (try? JSONEncoder().encode(Array(mergedHistory.prefix(500)))) ?? Data()
+                }
             }
 
             // Clean up stale duplicate IDs: if a pick's display name matches a

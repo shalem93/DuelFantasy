@@ -10345,8 +10345,19 @@ final class DFSViewModel {
                     }
                 }
             }
-            let merged = byKey.values.sorted { $0.loggedAt > $1.loggedAt }
-            let blob = (try? JSONEncoder().encode(Array(merged.prefix(500)))) ?? Data()
+            // Deterministic output: tie-break equal timestamps by key and
+            // sort encoder keys. Without this the blob's BYTES differed on
+            // every sync even when the content was identical (dictionary
+            // iteration order + unordered JSON keys), so every sync looked
+            // like a change, fanned out to all VMs, and re-ran the RR merge
+            // — the visible "RR ratchets in batches" churn.
+            let merged = byKey.sorted { a, b in
+                if a.value.loggedAt != b.value.loggedAt { return a.value.loggedAt > b.value.loggedAt }
+                return a.key < b.key
+            }.map { $0.value }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let blob = (try? encoder.encode(Array(merged.prefix(500)))) ?? Data()
             print("[DFS-SharedSync] merged history: \(merged.count) rows across \(vms.count) VMs (canonical-owner filter applied)")
             onMergedHistory(blob)
         }
