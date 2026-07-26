@@ -272,7 +272,11 @@ struct BestBallLeagueDetailView: View {
                         }
 
                         VStack(spacing: 4) {
-                            Text("\(league.isDingersOnly ? league.batterSlots : league.pitcherSlots + league.batterSlots)")
+                            // Derive from the league's actual lineup config —
+                            // reading pitcher+batter slots showed NFL/CFB
+                            // leagues a hardcoded 8 regardless of their
+                            // configured QB/RB/WR/TE/FLEX/SFLEX total.
+                            Text("\(BestBallLineupConfig.requirements(for: league).starters)")
                                 .font(.title2.weight(.bold))
                                 .foregroundStyle(brandPurple)
                             Text(league.isDingersOnly ? "Batters" : "Starters")
@@ -577,10 +581,25 @@ private struct CommishSettingsSheet: View {
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
                                 Spacer()
-                                let minRoster = editPitcherSlots + editBatterSlots
+                                // Sport-aware floor: the roster can never be
+                                // smaller than the configured starting lineup
+                                // (the old MLB-only min let an NFL/CFB league
+                                // set roster 8 under a 9-man lineup).
+                                let minRoster: Int = {
+                                    if league.sport == "NFL" || league.sport == "CFB" {
+                                        return editNflQB + editNflRB + editNflWR + editNflTE + editNflFLEX + editNflSFLEX
+                                    }
+                                    return editPitcherSlots + editBatterSlots
+                                }()
                                 Stepper("\(editRosterSize)", value: $editRosterSize, in: minRoster...20)
                                     .font(.subheadline.weight(.semibold))
                                     .frame(maxWidth: 140)
+                                    .onChange(of: minRoster) { _, newMin in
+                                        if editRosterSize < newMin { editRosterSize = newMin }
+                                    }
+                                    .onAppear {
+                                        if editRosterSize < minRoster { editRosterSize = minRoster }
+                                    }
                             }
                             Divider()
                             HStack {
