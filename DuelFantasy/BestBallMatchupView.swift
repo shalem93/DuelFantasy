@@ -322,9 +322,29 @@ struct BestBallMatchupView: View {
 
     // MARK: - Bench Comparison
 
+    /// IDs actually rendered in the starters section above. Before a week
+    /// has scores, `scoringSet` is EMPTY — the old bench filter
+    /// (roster minus scoring set) therefore excluded nobody and the bench
+    /// listed the entire roster under the projected lineup.
+    private func displayedStarterIDs(
+        roster: [BestBallPick], scoringSet: Set<String>, weekScore: BestBallWeeklyScore?
+    ) -> Set<String> {
+        if !scoringSet.isEmpty { return scoringSet }
+        let slots = buildScoringSlots(roster: roster, scoringSet: scoringSet, weekScore: weekScore)
+        if sport == "NFL" || sport == "CFB", let league = viewModel.currentLeague {
+            let constraints = BestBallLineupConfig.requirements(for: league).constraints
+            return Set(orderedSlots(team: slots, constraints: constraints).map { $0.entry.pick.playerID })
+        }
+        // Other sports display the full pre-score pool as "starters" —
+        // mirror that so the bench is empty rather than a duplicate list.
+        return Set(slots.map { $0.pick.playerID })
+    }
+
     private var benchComparison: some View {
-        let bench1 = roster1.filter { !scoringSet1.contains($0.playerID) }
-        let bench2 = roster2.filter { !scoringSet2.contains($0.playerID) }
+        let starterIDs1 = displayedStarterIDs(roster: roster1, scoringSet: scoringSet1, weekScore: weekScore1)
+        let starterIDs2 = displayedStarterIDs(roster: roster2, scoringSet: scoringSet2, weekScore: weekScore2)
+        let bench1 = roster1.filter { !starterIDs1.contains($0.playerID) }
+        let bench2 = roster2.filter { !starterIDs2.contains($0.playerID) }
         let maxBench = max(bench1.count, bench2.count)
 
         return VStack(spacing: 0) {

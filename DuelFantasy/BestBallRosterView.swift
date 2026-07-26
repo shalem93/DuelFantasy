@@ -115,8 +115,12 @@ struct BestBallRosterView: View {
                 // Week navigator
                 weekNavigator
 
-                // Date selector
-                dateSelector
+                // Date selector — daily granularity only makes sense for
+                // sports that play every day (MLB/NBA). Football is one
+                // slate a week, so the MON–SUN strip was just noise.
+                if sport != "NFL" && sport != "CFB" {
+                    dateSelector
+                }
             }
 
             ScrollView {
@@ -160,7 +164,11 @@ struct BestBallRosterView: View {
                             // than "RB" again. Other sports keep the existing
                             // position-rank sort.
                             let starterEntries = sportSpecificStarterEntries()
-                            let bench = sortedRoster.filter { !scoringPlayerIDs.contains($0.playerID) }
+                            // Bench = whatever isn't shown in the starter
+                            // slots above (scoringPlayerIDs is empty before
+                            // the week scores, which used to bench everyone).
+                            let starterIDs = Set(starterEntries.map { $0.pick.playerID })
+                            let bench = sortedRoster.filter { !starterIDs.contains($0.playerID) }
 
                             ForEach(starterEntries, id: \.pick.id) { entry in
                                 playerRow(pick: entry.pick, isScoring: true, isPitcher: false, slotLabel: entry.slotLabel)
@@ -520,16 +528,23 @@ struct BestBallRosterView: View {
     /// assignment; for other sports it falls back to the existing
     /// position-rank sort with no override label.
     private func sportSpecificStarterEntries() -> [(pick: BestBallPick, slotLabel: String?)] {
-        let scoringStarters = sortedRoster.filter { scoringPlayerIDs.contains($0.playerID) }
+        let hasScores = !scoringPlayerIDs.isEmpty
+        // Before the week has scores, football projects a starting lineup
+        // from the WHOLE roster (draft-priority order) so the screen shows
+        // slotted starters + bench instead of one flat unslotted list.
+        let candidates = hasScores
+            ? sortedRoster.filter { scoringPlayerIDs.contains($0.playerID) }
+            : sortedRoster
         guard sport == "NFL" || sport == "CFB", let league = viewModel.currentLeague else {
-            return scoringStarters.map { ($0, nil) }
+            // Non-football keeps the old behavior: no starters until scored.
+            return hasScores ? candidates.map { ($0, nil) } : []
         }
         let constraints = BestBallLineupConfig.requirements(for: league).constraints
-        let positions = Dictionary(uniqueKeysWithValues: scoringStarters.map { ($0.playerID, $0.playerPosition) })
-        let points = Dictionary(uniqueKeysWithValues: scoringStarters.map { ($0.playerID, weeklyPlayerPoints[$0.playerID] ?? 0) })
-        let pickByID = Dictionary(uniqueKeysWithValues: scoringStarters.map { ($0.playerID, $0) })
+        let positions = Dictionary(uniqueKeysWithValues: candidates.map { ($0.playerID, $0.playerPosition) })
+        let points = Dictionary(uniqueKeysWithValues: candidates.map { ($0.playerID, weeklyPlayerPoints[$0.playerID] ?? 0) })
+        let pickByID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.playerID, $0) })
         let assigned = BestBallLineupConfig.assignStartersToSlots(
-            scoringIDs: scoringStarters.map { $0.playerID },
+            scoringIDs: candidates.map { $0.playerID },
             positions: positions,
             points: points,
             constraints: constraints
