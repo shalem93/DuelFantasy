@@ -632,14 +632,14 @@ struct ContentView: View {
                 tennisBracket: tennisBracketViewModel,
                 golfTiers: golfTiersViewModel,
                 soccerTiers: soccerTiersViewModel,
-                syncRR: syncRRScore, syncHistory: syncHistoryData, syncSettled: syncSettledData
+                syncRR: syncRRScore, syncHistory: absorbHistoryBlob, syncSettled: absorbSettledBlob
             ))
             .modifier(ExtraSettledSyncModifier(
                 epl: eplDFSViewModel, ucl: uclDFSViewModel, wc: wcDFSViewModel,
                 ufc: ufcDFSViewModel, nfl: nflDFSViewModel, cfb: cfbDFSViewModel,
                 ncaam: ncaamDFSViewModel, wnba: wnbaDFSViewModel,
                 nascar: nascarDFSViewModel,
-                syncSettled: syncSettledData
+                syncSettled: absorbSettledBlob
             ))
             .onChange(of: dfsHistoryData) { _, v in syncHistoryData(v) }
             .onChange(of: settledTournamentData) { _, v in syncSettledData(v) }
@@ -1183,74 +1183,109 @@ struct ContentView: View {
     }
 
     private func syncRRScore(_ value: Int) {
-        guard value != rrScore else { return }
-        rrScore = value
-        dfsViewModel.rrScore = value
-        nhlDFSViewModel.rrScore = value
-        mlbDFSViewModel.rrScore = value
-        pgaDFSViewModel.rrScore = value
-        eplDFSViewModel.rrScore = value
-        uclDFSViewModel.rrScore = value
-        ufcDFSViewModel.rrScore = value
-        nflDFSViewModel.rrScore = value
-        cfbDFSViewModel.rrScore = value
-        ncaamDFSViewModel.rrScore = value
-        wnbaDFSViewModel.rrScore = value
-        nascarDFSViewModel.rrScore = value
-        playoffTiersViewModel.rrScore = value
-        tennisBracketViewModel.rrScore = value
-        golfTiersViewModel.rrScore = value
-        soccerTiersViewModel.rrScore = value
+        if rrScore != value { rrScore = value }
+        for vm in [dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
+                   eplDFSViewModel, uclDFSViewModel, wcDFSViewModel, ufcDFSViewModel,
+                   nflDFSViewModel, cfbDFSViewModel, ncaamDFSViewModel, wnbaDFSViewModel,
+                   nascarDFSViewModel] where vm.rrScore != value {
+            vm.rrScore = value
+        }
+        if playoffTiersViewModel.rrScore != value { playoffTiersViewModel.rrScore = value }
+        if tennisBracketViewModel.rrScore != value { tennisBracketViewModel.rrScore = value }
+        if golfTiersViewModel.rrScore != value { golfTiersViewModel.rrScore = value }
+        if soccerTiersViewModel.rrScore != value { soccerTiersViewModel.rrScore = value }
+    }
+
+    /// Write-back path for the per-VM history observers. Each observed VM
+    /// holds a PARTIAL view of history (its own sport's rows after
+    /// applyServerHistory prunes), so broadcasting its blob verbatim as the
+    /// shared source of truth clobbered every other sport's rows — the
+    /// "Played climbs 136 → 277 one sport at a time, then snaps back"
+    /// oscillation: an MLB settle pass broadcast MLB's ~135-row blob, then
+    /// each sport's next sync re-contributed its rows incrementally until
+    /// the next partial broadcast. Absorb instead: union-by-key with the
+    /// incoming rows winning (they carry fresh settles), stable encoding,
+    /// no-op at the fixed point. Deliberate row REMOVAL still flows through
+    /// the direct syncHistoryData overwrite (canonical merge, admin delete).
+    private func absorbHistoryBlob(_ value: Data) {
+        guard value != dfsHistoryData else { return }
+        func decode(_ data: Data) -> [DFSResult] {
+            (try? JSONDecoder().decode([DFSResult].self, from: data)) ?? []
+        }
+        let existing = decode(dfsHistoryData)
+        let incoming = decode(value)
+        guard !incoming.isEmpty else { return }   // never absorb an empty blob
+        func rowKey(_ result: DFSResult) -> String {
+            "\(result.tournamentId ?? result.id.uuidString)#\(result.lineupNumber ?? 1)"
+        }
+        var byKey: [String: DFSResult] = [:]
+        for row in existing { byKey[rowKey(row)] = row }
+        for row in incoming { byKey[rowKey(row)] = row }
+        let merged = byKey.sorted { a, b in
+            if a.value.loggedAt != b.value.loggedAt { return a.value.loggedAt > b.value.loggedAt }
+            return a.key < b.key
+        }.map(\.value)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let blob = (try? encoder.encode(Array(merged.prefix(500)))) ?? Data()
+        guard !blob.isEmpty, blob != dfsHistoryData else { return }
+        syncHistoryData(blob)
     }
 
     private func syncHistoryData(_ value: Data) {
         // Plain distribution. (An earlier "union" version recomputed a new blob
         // and re-set every VM, which retriggered onChange(of: vm.dfsHistoryData)
         // → syncHistory → syncHistoryData in a feedback loop that could spin
-        // forever and crash the app. Keep this a simple idempotent fan-out.)
-        // No-op when nothing changed: with the merge blob now byte-stable,
-        // an unchanged sync must not invalidate 13 observable VMs (every
-        // assignment fires observation regardless of equality — that was
-        // half the post-sync UI churn).
-        guard value != dfsHistoryData else { return }
-        dfsHistoryData = value
-        dfsViewModel.dfsHistoryData = value
-        nhlDFSViewModel.dfsHistoryData = value
-        mlbDFSViewModel.dfsHistoryData = value
-        pgaDFSViewModel.dfsHistoryData = value
-        eplDFSViewModel.dfsHistoryData = value
-        uclDFSViewModel.dfsHistoryData = value
-        ufcDFSViewModel.dfsHistoryData = value
-        nflDFSViewModel.dfsHistoryData = value
-        cfbDFSViewModel.dfsHistoryData = value
-        ncaamDFSViewModel.dfsHistoryData = value
-        wnbaDFSViewModel.dfsHistoryData = value
-        nascarDFSViewModel.dfsHistoryData = value
-        playoffTiersViewModel.dfsHistoryData = value
-        tennisBracketViewModel.dfsHistoryData = value
-        golfTiersViewModel.dfsHistoryData = value
-        soccerTiersViewModel.dfsHistoryData = value
+        // forever and crash the app. Keep this a simple idempotent fan-out —
+        // the union lives in absorbHistoryBlob, which converges because it
+        // encodes stably and no-ops at the fixed point.)
+        //
+        // PER-ASSIGNMENT equality guards, not one top-level early-return:
+        // a blanket `value == dfsHistoryData → return` skipped realigning
+        // VMs whose own copies had diverged (each assignment invalidates
+        // observation, so equal writes are skipped individually instead).
+        if dfsHistoryData != value { dfsHistoryData = value }
+        for vm in [dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
+                   eplDFSViewModel, uclDFSViewModel, wcDFSViewModel, ufcDFSViewModel,
+                   nflDFSViewModel, cfbDFSViewModel, ncaamDFSViewModel, wnbaDFSViewModel,
+                   nascarDFSViewModel] where vm.dfsHistoryData != value {
+            vm.dfsHistoryData = value
+        }
+        if playoffTiersViewModel.dfsHistoryData != value { playoffTiersViewModel.dfsHistoryData = value }
+        if tennisBracketViewModel.dfsHistoryData != value { tennisBracketViewModel.dfsHistoryData = value }
+        if golfTiersViewModel.dfsHistoryData != value { golfTiersViewModel.dfsHistoryData = value }
+        if soccerTiersViewModel.dfsHistoryData != value { soccerTiersViewModel.dfsHistoryData = value }
+    }
+
+    /// Write-back path for the per-VM settled-set observers. Same
+    /// partial-clobber class as history: two VMs settling concurrently
+    /// each broadcast their own superset, last write drops the other's
+    /// new tid. Union instead — and encode as a SORTED array, because a
+    /// Set encodes in nondeterministic order (byte-flapping made equal
+    /// sets look changed on every broadcast).
+    private func absorbSettledBlob(_ value: Data) {
+        guard value != settledTournamentData else { return }
+        let existing = (try? JSONDecoder().decode(Set<String>.self, from: settledTournamentData)) ?? []
+        let incoming = (try? JSONDecoder().decode(Set<String>.self, from: value)) ?? []
+        guard !incoming.isEmpty else { return }   // never absorb a wipe
+        let union = existing.union(incoming)
+        let blob = (try? JSONEncoder().encode(union.sorted())) ?? Data()
+        guard !blob.isEmpty, blob != settledTournamentData else { return }
+        syncSettledData(blob)
     }
 
     private func syncSettledData(_ value: Data) {
-        guard value != settledTournamentData else { return }
-        settledTournamentData = value
-        dfsViewModel.settledTournamentData = value
-        nhlDFSViewModel.settledTournamentData = value
-        mlbDFSViewModel.settledTournamentData = value
-        pgaDFSViewModel.settledTournamentData = value
-        eplDFSViewModel.settledTournamentData = value
-        uclDFSViewModel.settledTournamentData = value
-        ufcDFSViewModel.settledTournamentData = value
-        nflDFSViewModel.settledTournamentData = value
-        cfbDFSViewModel.settledTournamentData = value
-        ncaamDFSViewModel.settledTournamentData = value
-        wnbaDFSViewModel.settledTournamentData = value
-        nascarDFSViewModel.settledTournamentData = value
-        playoffTiersViewModel.settledTournamentData = value
-        tennisBracketViewModel.settledTournamentData = value
-        golfTiersViewModel.settledTournamentData = value
-        soccerTiersViewModel.settledTournamentData = value
+        if settledTournamentData != value { settledTournamentData = value }
+        for vm in [dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
+                   eplDFSViewModel, uclDFSViewModel, wcDFSViewModel, ufcDFSViewModel,
+                   nflDFSViewModel, cfbDFSViewModel, ncaamDFSViewModel, wnbaDFSViewModel,
+                   nascarDFSViewModel] where vm.settledTournamentData != value {
+            vm.settledTournamentData = value
+        }
+        if playoffTiersViewModel.settledTournamentData != value { playoffTiersViewModel.settledTournamentData = value }
+        if tennisBracketViewModel.settledTournamentData != value { tennisBracketViewModel.settledTournamentData = value }
+        if golfTiersViewModel.settledTournamentData != value { golfTiersViewModel.settledTournamentData = value }
+        if soccerTiersViewModel.settledTournamentData != value { soccerTiersViewModel.settledTournamentData = value }
     }
 
     /// Checks whether the current user has ANY server DFS results.
