@@ -6754,6 +6754,10 @@ final class DFSViewModel {
     var pastTournamentSlateSalaries: [String: Int] = [:]  // tournament-level salary map for fallback
     private var pastTournamentStatsLoaded: String? = nil  // tournament ID for which stats were loaded
     private var settlingInProgress: Set<String> = []  // tournament IDs currently being settled (prevents races)
+    /// Contests already re-settled once this session by the quality-check
+    /// self-heal. A second failed check accepts the data instead of
+    /// re-grading forever (see the loop-breaker in checkAndSettle).
+    private var reSettleAttempted: Set<String> = []
     /// Tournaments whose saved bot field has already been judged corrupt and
     /// regenerated this session. Without this latch, every refreshLive cycle
     /// re-detects the same low coverage (the freshly regenerated save hasn't
@@ -8227,7 +8231,20 @@ final class DFSViewModel {
                         || !userResults2.contains(where: { $0.totalPoints == 0 })
                         || userResults2.allSatisfy { $0.totalPoints == 0 }  // all-zero handled separately
 
-                    if countOK && userNamesGood && hasRealScores && botsHaveScores && allUserScored {
+                    // Loop breaker: one re-settle attempt per contest per
+                    // session. A quality check that a re-settle can't
+                    // actually cure (e.g. a lineup name the resolver can't
+                    // improve) used to re-grade the same contest — DELETE +
+                    // re-INSERT of a 2000-row field — on EVERY settlement
+                    // pass, un-settling and re-settling history in a loop
+                    // (the "contests reload and RR bounces every 5s" bug).
+                    // After one failed repair, accept the data when the
+                    // substantive checks (count/scores) pass — a cosmetic
+                    // name can't be allowed to force eternal re-grades.
+                    let alreadyRetried = reSettleAttempted.contains(tid)
+                    let substantiveOK = countOK && hasRealScores && botsHaveScores && allUserScored
+                    if (countOK && userNamesGood && hasRealScores && botsHaveScores && allUserScored)
+                        || (alreadyRetried && substantiveOK) {
                         // Server has good data from a proper settlement — use it.
                         // NOTE: do NOT un-exclude here. `excludedTournamentIDs`
                         // is also how a deliberate admin delete sticks (the
@@ -8240,7 +8257,8 @@ final class DFSViewModel {
                         markTournamentSettled(tid)
                         await addServerResultToHistoryIfMissing(tournamentID: tid, token: token, userID: userID)
                     } else {
-                        print("[DFS-\(sport)] self-heal \(tid): server settled but data check FAILED (countOK=\(countOK) namesGood=\(userNamesGood) realScores=\(hasRealScores) botsHaveScores=\(botsHaveScores) allUserScored=\(allUserScored)) — re-settling")
+                        print("[DFS-\(sport)] self-heal \(tid): server settled but data check FAILED (countOK=\(countOK) namesGood=\(userNamesGood) realScores=\(hasRealScores) botsHaveScores=\(botsHaveScores) allUserScored=\(allUserScored)) — re-settling (attempt 1 this session)")
+                        reSettleAttempted.insert(tid)
                         // Server was settled with bad/incomplete/duplicated data — re-settle properly
                         if tid.hasPrefix("pga-") {
                             await settleUnsettledPastGolfTournament(
@@ -8602,6 +8620,18 @@ final class DFSViewModel {
         // For any user lineup players not in the box scores (DNP, injured, etc.),
         // try to resolve their names from the ESPN athlete endpoint
         let allUserPlayerIDs = Set(allUserEntries.flatMap(\.lineupPlayerIDs))
+        // Two-way "-sp" pitcher entries (Ohtani's SP half, "mlb-39832-sp")
+        // share the base athlete's name — resolve them from the base ID
+        // before hitting the network. Leaving the suffix on produced
+        // athletes/39832-sp → 404 → the raw ID persisted as the "name",
+        // which then failed the self-heal quality check and re-settled the
+        // contest in an infinite loop.
+        for pid in allUserPlayerIDs where pid.hasSuffix("-sp") && playerNameLookup[pid] == nil {
+            let baseID = String(pid.dropLast(3))
+            if let baseName = playerNameLookup[baseID] {
+                playerNameLookup[pid] = baseName
+            }
+        }
         let unresolvedIDs = allUserPlayerIDs.filter { playerNameLookup[$0] == nil }
         if !unresolvedIDs.isEmpty {
             let capturedPrefix = sportPrefix
@@ -8611,6 +8641,7 @@ final class DFSViewModel {
                 for pid in unresolvedIDs {
                     group.addTask {
                         let athleteID = pid.replacingOccurrences(of: "\(capturedPrefix)-", with: "")
+                            .replacingOccurrences(of: "-sp", with: "")
                         // Soccer uses v3 endpoint (v2 athlete endpoint returns 404 for soccer)
                         let urlString: String
                         if isSoccerSport {
@@ -8621,19 +8652,27 @@ final class DFSViewModel {
                         guard let url = URL(string: urlString) else {
                             return (pid, nil)
                         }
-                        guard let (data, response) = try? await URLSession.shared.data(from: url),
-                              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-                              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                            return (pid, nil)
+                        func fetchName(_ urlString: String) async -> String? {
+                            guard let url = URL(string: urlString),
+                                  let (data, response) = try? await URLSession.shared.data(from: url),
+                                  let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                                return nil
+                            }
+                            // v3 nests under "athlete", v2 is top-level
+                            return json["displayName"] as? String
+                                ?? (json["athlete"] as? [String: Any])?["displayName"] as? String
                         }
-                        // v3 nests under "athlete", v2 is top-level
-                        let name: String?
-                        if isSoccerSport {
-                            name = (json["athlete"] as? [String: Any])?["displayName"] as? String
-                        } else {
-                            name = json["displayName"] as? String
+                        if let name = await fetchName(url.absoluteString) {
+                            return (pid, name)
                         }
-                        return (pid, name)
+                        // The v2 site endpoint 404s for some athletes the v3
+                        // common endpoint still knows (e.g. mlb 33303 "Max
+                        // Muncy") — fall back before giving up, otherwise the
+                        // raw ID sticks as the display name and trips the
+                        // settlement quality check forever.
+                        let v3URL = "https://site.web.api.espn.com/apis/common/v3/sports/\(capturedESPNSport)/athletes/\(athleteID)"
+                        return (pid, await fetchName(v3URL))
                     }
                 }
                 for await (pid, name) in group {
