@@ -8209,7 +8209,7 @@ final class DFSViewModel {
                         tournamentID: tid, accessToken: token
                     )) ?? []
                     let userResultOnServer = serverResults.first(where: { $0.userID == userID })
-                    let rawIDPrefixes = ["nba-", "ncaam-", "mlb-", "nhl-", "pga-"]
+                    let rawIDPrefixes = ["nba-", "ncaam-", "mlb-", "nhl-", "pga-", "nascar-"]
                     let userNamesGood = userResultOnServer.map { r in
                         !r.lineupPlayerNames.isEmpty && !r.lineupPlayerNames.contains(where: { name in
                             rawIDPrefixes.contains(where: { name.hasPrefix($0) })
@@ -10323,6 +10323,13 @@ final class DFSViewModel {
                 if tid.hasPrefix("ufc-") { return "UFC" }
                 if tid.hasPrefix("nfl-") { return "NFL" }
                 if tid.hasPrefix("cfb-") { return "CFB" }
+                // Every merge caller passes the full VM list including the
+                // NASCAR VM, so nascar- rows get a real owner. Without one,
+                // stale copies from OTHER VMs' blobs (pre-settle, rrDelta 0)
+                // alternated with the NASCAR VM's settled row in the dedupe —
+                // the LIVE ↔ FINAL flip and the RR bouncing every few
+                // seconds after the Brickyard settled.
+                if tid.hasPrefix("nascar-") { return "NASCAR" }
                 return nil
             }
             var byKey: [String: DFSResult] = [:]
