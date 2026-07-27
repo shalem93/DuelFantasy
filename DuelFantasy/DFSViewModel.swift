@@ -5472,6 +5472,18 @@ final class DFSViewModel {
         guard snapshot.allGamesFinal else { return }
         guard !settledTournaments.contains(tournament.id) else { return }
 
+        // NEVER settle a contest the user hasn't actually entered. The
+        // lobby's default selection is the smallest contest (the -2 H2H),
+        // so when the slate went final the live path settled that
+        // UNENTERED contest with a user row fabricated from local lineup
+        // state — the phantom "#1 of 2, +10" NASCAR/NBA H2H wins that
+        // appeared in Past Results with no matching dfs_entries row.
+        guard enteredTournamentIDs.contains(tournament.id)
+            || !(userEntryRecords[tournament.id] ?? []).isEmpty else {
+            print("[DFS-\(sport)] Skipping settlement of \(tournament.id) — user has no entry in this contest")
+            return
+        }
+
         // PGA settlement safeguards: never settle before 3 days or before round 4
         if sport == "PGA" {
             let daysSinceLock = Date().timeIntervalSince(lockTime) / (24 * 3600)
