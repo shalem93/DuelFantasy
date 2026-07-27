@@ -189,7 +189,13 @@ final class SoccerTiersViewModel {
             // reverse nothing.
             if existing.isSettled || existing.status == "settled" {
                 let reallyComplete = await espnProvider.checkTournamentComplete()
-                if !reallyComplete {
+                // Un-settle ONLY on positive evidence of unplayed matches.
+                // "Can't verify the final happened" (empty/reshaped ESPN
+                // response after the tournament ended) is NOT evidence of
+                // incompleteness — treating it as such un-settled the
+                // finished World Cup on every launch.
+                let hasUnplayed = await espnProvider.hasUnplayedMatches()
+                if !reallyComplete && hasUnplayed {
                     print("[SoccerTiers] \(existing.id) settled PREMATURELY (final not played) — un-settling")
                     if let decoded = try? JSONDecoder().decode([DFSResult].self, from: dfsHistoryData) {
                         let stale = decoded.filter { $0.tournamentId == existing.id }

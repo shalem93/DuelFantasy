@@ -1085,6 +1085,29 @@ struct ESPNSoccerTiersDataProvider: Sendable {
         return false
     }
 
+    /// True only when ESPN POSITIVELY reports at least one World Cup match
+    /// still to be played. Empty/failed fetches return false — the
+    /// premature-settle heal must fire on evidence, not on absence of data.
+    /// Post-tournament, ESPN's responses can come back empty or reshaped
+    /// (the final's "final" note disappears), which made
+    /// checkTournamentComplete() read false and un-settle the FINISHED
+    /// World Cup on every launch: status bounced settled → live → locked,
+    /// the Tiers card stuck on LOCKED, and the past result vanished.
+    func hasUnplayedMatches() async -> Bool {
+        let events = await fetchWorldCupMatches()
+        guard !events.isEmpty else { return false }
+        for event in events {
+            guard let competitions = event["competitions"] as? [[String: Any]],
+                  let competition = competitions.first,
+                  let status = competition["status"] as? [String: Any],
+                  let statusType = status["type"] as? [String: Any] else { continue }
+            let completed = (statusType["completed"] as? Bool) ?? false
+            let state = (statusType["state"] as? String) ?? ""
+            if !completed && state != "post" { return true }
+        }
+        return false
+    }
+
     /// Detect which nations have been eliminated from the World Cup.
     /// Two sources:
     ///   1. **Knockout losses** — once the tournament reaches Round of 32,

@@ -10564,7 +10564,10 @@ final class DFSViewModel {
                 
                 // Use tournament metadata when available, fall back to result data
                 let title = tournament?.title ?? "Tournament"
-                let totalEntries = tournament?.totalEntries ?? 0
+                // Metadata fetch caps at 200 recent tournaments — older/small
+                // contests (the NASCAR H2H) fell out and rendered "0 entries".
+                // The tid carries the field size; parse it as the fallback.
+                let totalEntries = tournament?.totalEntries ?? Self.entryCountFromTournamentID(tournamentID)
                 let loggedAt = tournament?.lockTime ?? results.first?.createdAt ?? Date()
 
                 for (resultIdx, result) in results.enumerated() {
