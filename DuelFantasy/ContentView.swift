@@ -4146,7 +4146,11 @@ struct ContentView: View {
                 let settledWins = allSettledPicks.filter { $0.result == "win" }.count
                 let settledLosses = allSettledPicks.filter { $0.result == "loss" }.count
                 let pickemDelta = allSettledPicks.reduce(0) { $0 + $1.rrDelta }
-                let localDFSDelta = dfsViewModel.dfsHistory.reduce(0) { $0 + $1.rrDelta }
+                // Canonical cross-sport DFS delta — summing only the NBA
+                // VM's copy of the shared blob read LOW/HIGH mid-sync and
+                // pushed whipsawing RR values to the server (logs showed
+                // dfs=1514 vs the real 2451 during a settle pass).
+                let localDFSDelta = dfsRRDelta
                 let fullRR = 1000 + pickemDelta + localDFSDelta
 
                 // Safety guard: if the server fetch came back EMPTY or
