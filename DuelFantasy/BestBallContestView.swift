@@ -179,6 +179,11 @@ struct BestBallContestView: View {
                 Text(String(format: "%.1f", preview.myScore))
                     .font(.system(size: 22, weight: .bold).monospacedDigit())
                     .foregroundStyle(preview.myScore >= preview.opponentScore ? brandPurple : .primary)
+                if let record = preview.myRecord {
+                    Text(preview.myStanding.map { "\(record) · \($0)" } ?? record)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
                 Text("\(preview.myGamesPlayed) games")
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)
@@ -210,6 +215,11 @@ struct BestBallContestView: View {
                 Text(String(format: "%.1f", preview.opponentScore))
                     .font(.system(size: 22, weight: .bold).monospacedDigit())
                     .foregroundStyle(preview.opponentScore > preview.myScore ? brandPurple : .primary)
+                if let record = preview.opponentRecord {
+                    Text(record)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
                 Text("\(preview.opponentGamesPlayed) games")
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)

@@ -10,6 +10,27 @@ struct LeagueMatchupPreview {
     let myGamesPlayed: Int
     let opponentGamesPlayed: Int
     let week: Int
+    /// "3-2" style H2H records from standings (nil pre-season).
+    var myRecord: String? = nil
+    var opponentRecord: String? = nil
+    /// "4th/16" style standing for the user (nil pre-season).
+    var myStanding: String? = nil
+}
+
+/// "1st", "2nd", "3rd", "4th"… for standings display.
+func bestBallOrdinal(_ n: Int) -> String {
+    let suffix: String
+    switch n % 100 {
+    case 11, 12, 13: suffix = "th"
+    default:
+        switch n % 10 {
+        case 1: suffix = "st"
+        case 2: suffix = "nd"
+        case 3: suffix = "rd"
+        default: suffix = "th"
+        }
+    }
+    return "\(n)\(suffix)"
 }
 
 @MainActor
@@ -192,7 +213,14 @@ final class BestBallViewModel {
                     let myName = memberRecords.first(where: { $0.id == myMembership.id })?.displayName ?? "You"
                     let oppName = memberRecords.first(where: { $0.id == oppID })?.displayName ?? "Opponent"
 
-                    previews[league.id] = LeagueMatchupPreview(
+                    // Records + standing from the standings table ("3-2 · 4th/16").
+                    let standingRecords = (try? await SupabaseService.shared.fetchStandings(leagueID: league.id, accessToken: token)) ?? []
+                    let standings = standingRecords.map { $0.toModel() }
+                    let myStandingRow = standings.first(where: { $0.memberID == myMembership.id })
+                    let oppStandingRow = standings.first(where: { $0.memberID == oppID })
+                    let memberCount = max(memberRecords.count, standings.count)
+
+                    var preview = LeagueMatchupPreview(
                         myName: myName,
                         opponentName: oppName,
                         myScore: myScore?.totalPoints ?? 0,
@@ -201,6 +229,16 @@ final class BestBallViewModel {
                         opponentGamesPlayed: oppScore?.playerPoints.count ?? 0,
                         week: week
                     )
+                    if let mine = myStandingRow {
+                        preview.myRecord = "\(mine.wins)-\(mine.losses)"
+                        if mine.rank > 0, memberCount > 0 {
+                            preview.myStanding = "\(bestBallOrdinal(mine.rank))/\(memberCount)"
+                        }
+                    }
+                    if let theirs = oppStandingRow {
+                        preview.opponentRecord = "\(theirs.wins)-\(theirs.losses)"
+                    }
+                    previews[league.id] = preview
                 }
             }
             leagueMatchupPreviews = previews

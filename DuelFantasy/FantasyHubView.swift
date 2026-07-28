@@ -169,6 +169,12 @@ struct FantasyHubView: View {
                     await soccerTiersViewModel.loadTournament()
                 }
                 soccerTiersViewModel.hasAttemptedLoad = true
+                // Load Best Ball leagues (with matchup previews) so the
+                // ACTIVE CONTESTS section shows live scoreboards without the
+                // user having to open Best Ball first.
+                if bestBallViewModel.myLeagues.isEmpty {
+                    await bestBallViewModel.loadMyLeagues()
+                }
             }
             // Load past results keyed on accessToken — `.task(id:)` fires
             // both on initial appearance AND every time the id changes,
@@ -354,21 +360,99 @@ struct FantasyHubView: View {
                 }
 
                 if hasActiveBestBall {
-                    NavigationLink {
-                        BestBallContestView(viewModel: bestBallViewModel)
-                    } label: {
-                        activeContestCard(
-                            title: "Best Ball Fantasy",
-                            subtitle: "\(bestBallViewModel.myLeagues.count) active league\(bestBallViewModel.myLeagues.count == 1 ? "" : "s")",
-                            icon: bestBallIcon(for: bestBallViewModel.myLeagues),
-                            isLive: false,
-                            detail: nil
-                        )
+                    // One card per league, Yahoo-style: live matchup
+                    // scoreboard for active H2H leagues, a compact status
+                    // card otherwise. Tapping goes straight into the league.
+                    ForEach(bestBallViewModel.myLeagues, id: \.id) { league in
+                        NavigationLink {
+                            BestBallLeagueDetailView(viewModel: bestBallViewModel, leagueID: league.id)
+                        } label: {
+                            bestBallLeagueContestCard(league)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
         }
+    }
+
+    /// Yahoo-style Best Ball league card for ACTIVE CONTESTS: header with
+    /// title/sport/week, plus a live matchup scoreboard when the league is
+    /// active and its weekly preview has loaded.
+    private func bestBallLeagueContestCard(_ league: BestBallLeague) -> some View {
+        let preview = bestBallViewModel.leagueMatchupPreviews[league.id]
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: bestBallIcon(for: [league]))
+                    .font(.subheadline)
+                    .foregroundStyle(brandPurple)
+                Text(league.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Spacer()
+                Text(league.sport)
+                    .font(.caption2.weight(.bold))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(brandPurple.opacity(0.12))
+                    .foregroundStyle(brandPurple)
+                    .clipShape(Capsule())
+                if league.status == "active" {
+                    Text("Wk \(league.currentWeek)/\(league.totalWeeks)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(league.status == "drafting" ? "DRAFTING" : league.status.uppercased())
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(league.status == "drafting" ? .orange : .secondary)
+                }
+                Image(systemName: "chevron.right")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+
+            if let preview, league.status == "active" {
+                Divider()
+                HStack(spacing: 0) {
+                    VStack(spacing: 2) {
+                        Text(preview.myName)
+                            .font(.system(size: 11, weight: .semibold))
+                            .lineLimit(1)
+                        Text(String(format: "%.1f", preview.myScore))
+                            .font(.system(size: 20, weight: .bold).monospacedDigit())
+                            .foregroundStyle(preview.myScore >= preview.opponentScore ? brandPurple : .primary)
+                        if let record = preview.myRecord {
+                            Text(preview.myStanding.map { "\(record) · \($0)" } ?? record)
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    Text("vs")
+                        .font(.system(size: 9, weight: .heavy))
+                        .foregroundStyle(.quaternary)
+                    VStack(spacing: 2) {
+                        Text(preview.opponentName)
+                            .font(.system(size: 11, weight: .semibold))
+                            .lineLimit(1)
+                        Text(String(format: "%.1f", preview.opponentScore))
+                            .font(.system(size: 20, weight: .bold).monospacedDigit())
+                            .foregroundStyle(preview.opponentScore > preview.myScore ? brandPurple : .primary)
+                        if let record = preview.opponentRecord {
+                            Text(record)
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            }
+        }
+        .padding(12)
+        .background(.white)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .shadow(color: .black.opacity(0.05), radius: 4, y: 2)
     }
 
     private func activeContestCard(title: String, subtitle: String, icon: String, isLive: Bool, detail: String?) -> some View {
