@@ -707,7 +707,7 @@ struct FantasyHubView: View {
         if sports.count == 1, let only = sports.first {
             switch only {
             case "NBA": return "basketball.fill"
-            case "NFL": return "football.fill"
+            case "NFL", "CFB": return "football.fill"
             case "MLB": return "figure.baseball"
             default: return "figure.baseball"
             }

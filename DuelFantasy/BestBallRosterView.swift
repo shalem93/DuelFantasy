@@ -483,15 +483,15 @@ struct BestBallRosterView: View {
 
             if isDingersOnly {
                 Text("HR")
-                    .frame(width: 48, alignment: .trailing)
+                    .frame(width: 44, alignment: .trailing)
             } else {
                 ForEach(labels.prefix(5), id: \.self) { label in
                     Text(label)
-                        .frame(width: 32, alignment: .trailing)
+                        .frame(width: 30, alignment: .trailing)
                 }
 
                 Text("FPTS")
-                    .frame(width: 48, alignment: .trailing)
+                    .frame(width: 44, alignment: .trailing)
             }
         }
         .font(.system(size: 9, weight: .bold))
@@ -594,6 +594,7 @@ struct BestBallRosterView: View {
                     .font(.system(size: 13, weight: isScoring ? .semibold : .regular))
                     .foregroundStyle(isScoring ? .primary : .secondary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.65)
                 Text(pick.playerTeam)
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
@@ -607,12 +608,12 @@ struct BestBallRosterView: View {
                 if viewModel.isLoadingDingersHR && seasonHRTotals.isEmpty {
                     ProgressView()
                         .scaleEffect(0.6)
-                        .frame(width: 48, alignment: .trailing)
+                        .frame(width: 44, alignment: .trailing)
                 } else {
                     Text(hrCount > 0 ? "\(hrCount)" : "-")
                         .font(.system(size: 14, weight: .bold).monospacedDigit())
                         .foregroundStyle(hrCount > 0 ? brandPurple : .secondary)
-                        .frame(width: 48, alignment: .trailing)
+                        .frame(width: 44, alignment: .trailing)
                 }
             } else {
                 // Stat columns
@@ -621,7 +622,7 @@ struct BestBallRosterView: View {
                     Text(val != nil ? formatStat(val!) : "-")
                         .font(.system(size: 11, weight: .medium).monospacedDigit())
                         .foregroundStyle(val != nil ? (isScoring ? .primary : .secondary) : .quaternary)
-                        .frame(width: 32, alignment: .trailing)
+                        .frame(width: 30, alignment: .trailing)
                 }
 
                 // FPTS box
@@ -636,7 +637,7 @@ struct BestBallRosterView: View {
                             .foregroundStyle(.tertiary)
                     }
                 }
-                .frame(width: 48, alignment: .trailing)
+                .frame(width: 44, alignment: .trailing)
             }
         }
         .padding(.horizontal, 12)
