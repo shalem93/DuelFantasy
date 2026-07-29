@@ -6994,6 +6994,21 @@ final class DFSViewModel {
         }
         guard !games.isEmpty else { return }
 
+        // Single-game contests embed their ESPN event ID in the tid
+        // ("mlb-20260728-sg-401901849-2000"). On doubleheader days the
+        // date fetch returns BOTH games and the snapshot dict (keyed by
+        // athlete ID) lets the later game overwrite the earlier one — a
+        // player's stat line showed the nightcap's 0-for while his FPTS
+        // were settled from game 1. Restrict stats to the contest's game.
+        var gamesForStats = games
+        if tournamentId.contains("-sg-") {
+            let afterSG = tournamentId.components(separatedBy: "-sg-").dropFirst().first ?? ""
+            let eventID = afterSG.components(separatedBy: "-").first ?? ""
+            if !eventID.isEmpty, games.contains(where: { $0.id == eventID }) {
+                gamesForStats = games.filter { $0.id == eventID }
+            }
+        }
+
         // Use the correct sport-specific scoring provider. `self.scoringProvider`
         // is whichever sport's VM is calling this — when NBA VM calls
         // loadPastTournamentBoxScores for a UFC tournament (since the
@@ -7014,7 +7029,7 @@ final class DFSViewModel {
         default: providerForStats = scoringProvider
         }
 
-        if let snapshot = try? await providerForStats.fetchScoreSnapshot(for: games) {
+        if let snapshot = try? await providerForStats.fetchScoreSnapshot(for: gamesForStats) {
             pastTournamentPlayerStats = snapshot.playerLiveStats
             pastTournamentStatsLoaded = tournamentId
             // Box scores are keyed by ESPN athlete ID, but single-game/showdown
