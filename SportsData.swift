@@ -717,14 +717,64 @@ struct ESPNPropBoardProvider {
             var overOdds: Double?
             var underOdds: Double?
         }
+        // Home/away ESPN team ids (for team-level F5 markets) come from the
+        // main odds item we already fetched.
+        func teamID(from teamOdds: Any?) -> String? {
+            guard let ref = ((teamOdds as? [String: Any])?["team"] as? [String: Any])?["$ref"] as? String else { return nil }
+            return ref.split(separator: "?").first.flatMap { $0.split(separator: "/").last }.map(String.init)
+        }
+        let oddsItem = items.first
+        let homeTeamID = teamID(from: oddsItem?["homeTeamOdds"])
+        let awayTeamID = teamID(from: oddsItem?["awayTeamOdds"])
+
         var pairs: [String: PropPair] = [:]
         var order: [String] = []
         // One-sided milestone markets: (athleteID, yesOdds), e.g. 1+ HR.
         var hrMilestones: [(athleteID: String, yesOdds: Double)] = []
+        // 1st-5-innings markets (MLB): team-keyed ML, per-team alt run
+        // lines, and totals arriving [overs..., unders...] across alt lines.
+        var f5MLByTeam: [String: Double] = [:]
+        var f5RunLines: [(teamID: String, line: Double, odds: Double)] = []
+        var f5TotalsByLine: [Double: [Double]] = [:]
+        var f5TotalLineOrder: [Double] = []
+
+        func americanOdds(_ item: [String: Any]) -> Double? {
+            (((item["odds"] as? [String: Any])?["american"] as? [String: Any])?["value"] as? String)
+                .flatMap { Double($0.replacingOccurrences(of: "+", with: "")) }
+        }
+        func lineValue(_ item: [String: Any]) -> Double? {
+            (((item["odds"] as? [String: Any])?["total"] as? [String: Any])?["value"] as? String).flatMap(Double.init)
+                ?? ((item["current"] as? [String: Any])?["target"] as? [String: Any])?["value"] as? Double
+        }
+
         let typeByName = Dictionary(uniqueKeysWithValues: types.map { ($0.espnName, $0) })
         for item in propItems {
-            guard let typeName = (item["type"] as? [String: Any])?["name"] as? String,
-                  let athleteRef = (item["athlete"] as? [String: Any])?["$ref"] as? String else { continue }
+            guard let typeName = (item["type"] as? [String: Any])?["name"] as? String else { continue }
+
+            if sportKey == "baseball_mlb" {
+                switch typeName {
+                case "1st 5 Innings Moneyline":
+                    if let tid = teamID(from: item), let odds = americanOdds(item) {
+                        f5MLByTeam[tid] = odds
+                    }
+                    continue
+                case "1st 5 Innings Run Line":
+                    if let tid = teamID(from: item), let odds = americanOdds(item), let line = lineValue(item) {
+                        f5RunLines.append((tid, line, odds))
+                    }
+                    continue
+                case "1st 5 Innings Total Runs":
+                    if let odds = americanOdds(item), let line = lineValue(item) {
+                        if f5TotalsByLine[line] == nil { f5TotalLineOrder.append(line) }
+                        f5TotalsByLine[line, default: []].append(odds)
+                    }
+                    continue
+                default:
+                    break
+                }
+            }
+
+            guard let athleteRef = (item["athlete"] as? [String: Any])?["$ref"] as? String else { continue }
             if sportKey == "baseball_mlb", typeName == "Home Runs Milestones" {
                 let target = ((item["current"] as? [String: Any])?["target"] as? [String: Any])?["value"] as? Double
                 let yes = (((item["odds"] as? [String: Any])?["american"] as? [String: Any])?["value"] as? String)
@@ -758,7 +808,8 @@ struct ESPNPropBoardProvider {
         let complete = order.compactMap { pairs[$0] }.filter {
             $0.line != nil && $0.overOdds != nil && $0.underOdds != nil
         }
-        guard !complete.isEmpty || !hrMilestones.isEmpty else { return [] }
+        let hasF5 = !f5MLByTeam.isEmpty || !f5RunLines.isEmpty || !f5TotalsByLine.isEmpty
+        guard !complete.isEmpty || !hrMilestones.isEmpty || hasF5 else { return [] }
 
         // 3. Resolve athlete display names (cached).
         let uniqueIDs = Array(Set(complete.map(\.athleteID) + hrMilestones.map(\.athleteID)))
@@ -794,6 +845,78 @@ struct ESPNPropBoardProvider {
         // 4. Build derived Matches, grouped by market with per-type caps so
         // hits don't crowd out Ks/runs; favorites first within each type.
         var out: [Match] = []
+
+        func implied(_ o: Double) -> Double {
+            o > 0 ? 100.0 / (o + 100.0) : abs(o) / (abs(o) + 100.0)
+        }
+
+        // 1st 5 Innings rows lead the board.
+        if let homeID = homeTeamID, let awayID = awayTeamID {
+            if let homeML = f5MLByTeam[homeID], let awayML = f5MLByTeam[awayID] {
+                let options = pickemTwoWayQuotes(
+                    nameA: match.awayTeam, oddsA: awayML,
+                    nameB: match.homeTeam, oddsB: homeML
+                )
+                if options.count == 2 {
+                    out.append(Match(
+                        id: "\(match.id)|f5ml",
+                        league: match.league,
+                        awayTeam: match.awayTeam, homeTeam: match.homeTeam,
+                        startsAt: match.startsAt, state: match.state,
+                        statusDetail: match.statusDetail,
+                        awayScore: nil, homeScore: nil,
+                        options: options
+                    ))
+                }
+            }
+            // Run line: pick the most balanced home-relative line pair.
+            var bestRunLine: (line: Double, gap: Double)?
+            for home in f5RunLines where home.teamID == homeID {
+                guard let away = f5RunLines.first(where: { $0.teamID == awayID && $0.line == -home.line }) else { continue }
+                let gap = abs(implied(home.odds) - implied(away.odds))
+                if bestRunLine == nil || gap < bestRunLine!.gap {
+                    bestRunLine = (home.line, gap)
+                }
+            }
+            if let line = bestRunLine?.line {
+                out.append(Match(
+                    id: "\(match.id)|f5sprd|\(pickemFormatLine(line))",
+                    league: match.league,
+                    awayTeam: match.awayTeam, homeTeam: match.homeTeam,
+                    startsAt: match.startsAt, state: match.state,
+                    statusDetail: match.statusDetail,
+                    awayScore: nil, homeScore: nil,
+                    options: [
+                        PickOption(team: "\(match.awayTeam) \(pickemSignedLine(-line))", gainRR: 10, lossRR: 10),
+                        PickOption(team: "\(match.homeTeam) \(pickemSignedLine(line))", gainRR: 10, lossRR: 10)
+                    ]
+                ))
+            }
+        }
+        // Total: most balanced over/under pair ([over, under] feed order).
+        var bestTotal: (line: Double, gap: Double)?
+        for line in f5TotalLineOrder {
+            guard let sides = f5TotalsByLine[line], sides.count == 2 else { continue }
+            let gap = abs(implied(sides[0]) - implied(sides[1]))
+            if bestTotal == nil || gap < bestTotal!.gap {
+                bestTotal = (line, gap)
+            }
+        }
+        if let line = bestTotal?.line {
+            let fmt = pickemFormatLine(line)
+            out.append(Match(
+                id: "\(match.id)|f5tot|\(fmt)",
+                league: match.league,
+                awayTeam: match.awayTeam, homeTeam: match.homeTeam,
+                startsAt: match.startsAt, state: match.state,
+                statusDetail: match.statusDetail,
+                awayScore: nil, homeScore: nil,
+                options: [
+                    PickOption(team: "Over \(fmt)", gainRR: 10, lossRR: 10),
+                    PickOption(team: "Under \(fmt)", gainRR: 10, lossRR: 10)
+                ]
+            ))
+        }
 
         func appendPairs(key: String, cap: Int) {
             let bucket = complete
@@ -848,6 +971,38 @@ struct ESPNPropBoardProvider {
         appendPairs(key: "ast", cap: 5)
         return out
     }
+}
+
+/// First-5-innings runs for both teams from an ESPN event summary's
+/// header linescores. Returns nil (void) when either side played fewer
+/// than 5 innings (rain-shortened).
+func pickemF5Scores(summary: [String: Any]) -> (away: Int, home: Int, awayName: String, homeName: String)? {
+    guard let header = summary["header"] as? [String: Any],
+          let comp = (header["competitions"] as? [[String: Any]])?.first,
+          let competitors = comp["competitors"] as? [[String: Any]] else { return nil }
+    var away: (runs: Int, name: String)?
+    var home: (runs: Int, name: String)?
+    for competitor in competitors {
+        let name = ((competitor["team"] as? [String: Any])?["displayName"] as? String) ?? ""
+        guard let lines = competitor["linescores"] as? [[String: Any]], lines.count >= 5 else { return nil }
+        var runs = 0
+        for line in lines.prefix(5) {
+            if let v = line["value"] as? Double {
+                runs += Int(v)
+            } else if let dv = line["displayValue"] as? String, let v = Int(dv) {
+                runs += v
+            } else {
+                return nil
+            }
+        }
+        if (competitor["homeAway"] as? String) == "home" {
+            home = (runs, name)
+        } else {
+            away = (runs, name)
+        }
+    }
+    guard let away, let home else { return nil }
+    return (away.runs, home.runs, away.name, home.name)
 }
 
 /// Pulls a single athlete stat out of an ESPN event summary box score.
@@ -1033,7 +1188,7 @@ struct ESPNMatchResultProvider: MatchResultProvider {
                             ev.competitions.first?.status.type.state == "post" ? ev.id : nil
                         })
                         let propIDs = matchIDs.filter { mid in
-                            guard mid.contains("|prop|"),
+                            guard mid.contains("|prop|") || mid.contains("|f5"),
                                   mid.hasPrefix("espn-\(sport.oddsSportKey)-") else { return false }
                             let base = mid.components(separatedBy: "|").first ?? ""
                             let eventID = base.components(separatedBy: "-").last ?? ""
@@ -1050,6 +1205,50 @@ struct ESPNMatchResultProvider: MatchResultProvider {
                                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
                                 for mid in ids {
                                     let parts = mid.components(separatedBy: "|")
+
+                                    // 1st-5-innings markets grade from the
+                                    // inning-by-inning linescores; shortened
+                                    // games (<5 innings) void.
+                                    if parts.count >= 2, parts[1].hasPrefix("f5") {
+                                        guard let f5 = pickemF5Scores(summary: json) else {
+                                            results[mid] = "PUSH"
+                                            continue
+                                        }
+                                        switch parts[1] {
+                                        case "f5ml":
+                                            if f5.away > f5.home {
+                                                results[mid] = f5.awayName
+                                            } else if f5.home > f5.away {
+                                                results[mid] = f5.homeName
+                                            } else {
+                                                results[mid] = "PUSH"
+                                            }
+                                        case "f5sprd":
+                                            guard parts.count >= 3, let homeLine = Double(parts[2]) else { continue }
+                                            let adjusted = Double(f5.home - f5.away) + homeLine
+                                            if adjusted > 0 {
+                                                results[mid] = "\(f5.homeName) \(pickemSignedLine(homeLine))"
+                                            } else if adjusted < 0 {
+                                                results[mid] = "\(f5.awayName) \(pickemSignedLine(-homeLine))"
+                                            } else {
+                                                results[mid] = "PUSH"
+                                            }
+                                        case "f5tot":
+                                            guard parts.count >= 3, let line = Double(parts[2]) else { continue }
+                                            let total = Double(f5.away + f5.home)
+                                            if total > line {
+                                                results[mid] = "Over \(pickemFormatLine(line))"
+                                            } else if total < line {
+                                                results[mid] = "Under \(pickemFormatLine(line))"
+                                            } else {
+                                                results[mid] = "PUSH"
+                                            }
+                                        default:
+                                            break
+                                        }
+                                        continue
+                                    }
+
                                     guard parts.count >= 5, let line = Double(parts[4]) else { continue }
                                     let athleteID = parts[2]
                                     let statKey = parts[3]

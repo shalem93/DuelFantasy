@@ -3040,6 +3040,12 @@ struct ContentView: View {
         }
     }
 
+    private func f5MarketLabel(_ id: String) -> String {
+        if id.contains("|f5ml") { return "F5 ML" }
+        if id.contains("|f5sprd|") { return "F5 LINE" }
+        return "F5 TOT"
+    }
+
     @ViewBuilder
     private func propsDisclosure(for match: Match) -> some View {
         if !match.isLocked, ESPNPropBoardProvider.supportsProps(matchID: match.id) {
@@ -3081,8 +3087,13 @@ struct ContentView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
+                        let f5Rows = props.filter { $0.id.contains("|f5") }
+                        let playerRows = props.filter { $0.id.contains("|prop|") }
                         VStack(spacing: 6) {
-                            ForEach(props) { prop in
+                            ForEach(f5Rows) { market in
+                                compactMarketRow(market, label: f5MarketLabel(market.id))
+                            }
+                            ForEach(playerRows) { prop in
                                 HStack(spacing: 6) {
                                     Text(prop.awayTeam)
                                         .font(.caption2.weight(.medium))
@@ -4878,6 +4889,15 @@ private struct PickDetail: Codable {
 private func matchDisplayName(for match: Match) -> String {
     if match.id.contains("|prop|") {
         return match.awayTeam   // "Player — Stat 0.5"
+    }
+    if match.id.contains("|f5ml") {
+        return "\(match.awayTeam) @ \(match.homeTeam) — 1st 5 Innings"
+    }
+    if match.id.contains("|f5sprd|") {
+        return "\(match.awayTeam) @ \(match.homeTeam) — 1st 5 Run Line"
+    }
+    if match.id.contains("|f5tot|") {
+        return "\(match.awayTeam) @ \(match.homeTeam) — 1st 5 Total"
     }
     if match.id.contains("|sprd|") {
         return "\(match.awayTeam) @ \(match.homeTeam) — Spread"
