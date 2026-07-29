@@ -113,10 +113,13 @@ func isDerivedPickemMatchID(_ id: String) -> Bool { id.contains("|") }
 /// the odds-space midpoint of +300 and +500/+600 — about 1.4x the
 /// posted plus odds, NOT a mere ~6% trim. Near-even one-sided prices
 /// fall back to a mild proportional devig.
-func pickemYesNoQuotes(yesOdds: Double) -> [PickOption] {
+func pickemOneSidedQuotes(yesOdds: Double, yesName: String, noName: String) -> [PickOption] {
     let fairOdds: Double
     if yesOdds >= 100 {
-        fairOdds = yesOdds * 1.4
+        // Graduated longshot shade: none at +100, ramping to the full
+        // 1.4x by +300 (a +300 Yes pairs with roughly a -500/-600 No).
+        let scale = 1.0 + 0.4 * min(1.0, (yesOdds - 100.0) / 200.0)
+        fairOdds = yesOdds * scale
     } else {
         let pFair = max(0.01, min(0.99, pickemImpliedProb(yesOdds) / 1.06))
         fairOdds = pickemAmericanOdds(fromProb: pFair)
@@ -124,11 +127,15 @@ func pickemYesNoQuotes(yesOdds: Double) -> [PickOption] {
     let pFair = pickemImpliedProb(fairOdds)
     let swing = max(12, min(240, Int((abs(fairOdds) / 10.0).rounded())))
     if pFair < 0.5 {
-        return [PickOption(team: "Yes", gainRR: swing, lossRR: 10),
-                PickOption(team: "No", gainRR: 10, lossRR: swing)]
+        return [PickOption(team: yesName, gainRR: swing, lossRR: 10),
+                PickOption(team: noName, gainRR: 10, lossRR: swing)]
     }
-    return [PickOption(team: "Yes", gainRR: 10, lossRR: swing),
-            PickOption(team: "No", gainRR: swing, lossRR: 10)]
+    return [PickOption(team: yesName, gainRR: 10, lossRR: swing),
+            PickOption(team: noName, gainRR: swing, lossRR: 10)]
+}
+
+func pickemYesNoQuotes(yesOdds: Double) -> [PickOption] {
+    pickemOneSidedQuotes(yesOdds: yesOdds, yesName: "Yes", noName: "No")
 }
 
 func pickemImpliedProb(_ odds: Double) -> Double {
@@ -723,20 +730,57 @@ struct ESPNPropBoardProvider {
                 PropStatType(espnName: "Total Runs Scored", key: "r", shortLabel: "Runs")
             ]
         }
+        return []
+    }
+
+    /// Milestone-style markets: per (athlete, target) items with a single
+    /// Yes price ("Points Milestones" 20+, "Home Runs Milestones" 1+).
+    /// yesNo styles render Yes/No at target 1; the rest pick the target
+    /// priced closest to even and render as an O/U at target - 0.5.
+    /// Basketball props are ONLY published in this shape; football names
+    /// follow the same pattern (verify once NFL boards post in Aug).
+    struct MilestoneType {
+        let espnName: String
+        let key: String
+        let shortLabel: String
+        var yesNo: Bool = false
+        var cap: Int = 6
+    }
+
+    static func milestoneTypes(forSportKey sportKey: String) -> [MilestoneType] {
+        if sportKey == "baseball_mlb" {
+            return [MilestoneType(espnName: "Home Runs Milestones", key: "hr", shortLabel: "To Hit a HR", yesNo: true, cap: 8)]
+        }
         if sportKey.hasPrefix("basketball_") {
             return [
-                PropStatType(espnName: "Total Points", key: "pts", shortLabel: "Pts"),
-                PropStatType(espnName: "Total Rebounds", key: "reb", shortLabel: "Reb"),
-                PropStatType(espnName: "Total Assists", key: "ast", shortLabel: "Ast"),
-                PropStatType(espnName: "Total Points + Rebounds + Assists", key: "pra", shortLabel: "PRA")
+                MilestoneType(espnName: "Points Milestones", key: "pts", shortLabel: "Pts", cap: 8),
+                MilestoneType(espnName: "Points + Assists + Rebounds Milestones", key: "pra", shortLabel: "PRA", cap: 6),
+                MilestoneType(espnName: "Rebounds Milestones", key: "reb", shortLabel: "Reb", cap: 5),
+                MilestoneType(espnName: "Assists Milestones", key: "ast", shortLabel: "Ast", cap: 5)
+            ]
+        }
+        if sportKey.hasPrefix("americanfootball_") {
+            return [
+                MilestoneType(espnName: "Passing Yards Milestones", key: "payds", shortLabel: "Pass Yds", cap: 4),
+                MilestoneType(espnName: "Rushing Yards Milestones", key: "ruyds", shortLabel: "Rush Yds", cap: 6),
+                MilestoneType(espnName: "Receiving Yards Milestones", key: "reyds", shortLabel: "Rec Yds", cap: 8),
+                MilestoneType(espnName: "Receptions Milestones", key: "rec", shortLabel: "Receptions", cap: 6),
+                MilestoneType(espnName: "Touchdowns Milestones", key: "anytd", shortLabel: "To Score a TD", yesNo: true, cap: 10)
             ]
         }
         return []
     }
 
+    /// Sports whose boards carry 1st Half game markets (spread/ML/total).
+    static func supportsFirstHalf(sportKey: String) -> Bool {
+        sportKey.hasPrefix("basketball_") || sportKey.hasPrefix("americanfootball_")
+    }
+
     static func supportsProps(matchID: String) -> Bool {
         guard let key = sportKeyFromMatchID(matchID) else { return false }
         return !statTypes(forSportKey: key).isEmpty
+            || !milestoneTypes(forSportKey: key).isEmpty
+            || supportsFirstHalf(sportKey: key)
     }
 
     static func sportKeyFromMatchID(_ id: String) -> String? {
@@ -794,8 +838,13 @@ struct ESPNPropBoardProvider {
 
         var pairs: [String: PropPair] = [:]
         var order: [String] = []
-        // One-sided milestone markets: (athleteID, yesOdds), e.g. 1+ HR.
-        var hrMilestones: [(athleteID: String, yesOdds: Double)] = []
+        // Milestone markets: per (athlete, target) single-price items.
+        var milestonesByKey: [String: [(athleteID: String, target: Double, odds: Double)]] = [:]
+        // 1st Half game markets (basketball / football).
+        var h1MLByTeam: [String: Double] = [:]
+        var h1SpreadByTeam: [String: (line: Double, odds: Double)] = [:]
+        var h1TotalSides: [Double] = []
+        var h1TotalLine: Double?
         // 1st-5-innings markets (MLB): team-keyed ML, per-team alt run
         // lines, and totals arriving [overs..., unders...] across alt lines.
         var f5MLByTeam: [String: Double] = [:]
@@ -813,8 +862,47 @@ struct ESPNPropBoardProvider {
         }
 
         let typeByName = Dictionary(uniqueKeysWithValues: types.map { ($0.espnName, $0) })
+        let milestoneByName = Dictionary(uniqueKeysWithValues: Self.milestoneTypes(forSportKey: sportKey).map { ($0.espnName, $0) })
         for item in propItems {
             guard let typeName = (item["type"] as? [String: Any])?["name"] as? String else { continue }
+
+            if Self.supportsFirstHalf(sportKey: sportKey) {
+                switch typeName {
+                case "1st Half Moneyline":
+                    if let tid = teamID(from: item), let odds = americanOdds(item) {
+                        h1MLByTeam[tid] = odds
+                    }
+                    continue
+                case "1st Half Spread":
+                    if let tid = teamID(from: item), let odds = americanOdds(item),
+                       let line = ((item["current"] as? [String: Any])?["target"] as? [String: Any])?["value"] as? Double {
+                        h1SpreadByTeam[tid] = (line, odds)
+                    }
+                    continue
+                case "1st Half Total":
+                    if let odds = americanOdds(item) {
+                        if h1TotalLine == nil {
+                            h1TotalLine = ((item["current"] as? [String: Any])?["target"] as? [String: Any])?["value"] as? Double
+                        }
+                        h1TotalSides.append(odds)
+                    }
+                    continue
+                default:
+                    break
+                }
+            }
+
+            if let milestone = milestoneByName[typeName] {
+                let target = ((item["current"] as? [String: Any])?["target"] as? [String: Any])?["value"] as? Double
+                let odds = americanOdds(item)
+                let athleteID = ((item["athlete"] as? [String: Any])?["$ref"] as? String)?
+                    .split(separator: "?").first
+                    .flatMap { $0.split(separator: "/").last }.map(String.init) ?? ""
+                if let target, let odds, !athleteID.isEmpty {
+                    milestonesByKey[milestone.key, default: []].append((athleteID, target, odds))
+                }
+                continue
+            }
 
             if sportKey == "baseball_mlb" {
                 switch typeName {
@@ -840,17 +928,6 @@ struct ESPNPropBoardProvider {
             }
 
             guard let athleteRef = (item["athlete"] as? [String: Any])?["$ref"] as? String else { continue }
-            if sportKey == "baseball_mlb", typeName == "Home Runs Milestones" {
-                let target = ((item["current"] as? [String: Any])?["target"] as? [String: Any])?["value"] as? Double
-                let yes = (((item["odds"] as? [String: Any])?["american"] as? [String: Any])?["value"] as? String)
-                    .flatMap { Double($0.replacingOccurrences(of: "+", with: "")) }
-                let athleteID = athleteRef.split(separator: "?").first
-                    .flatMap { $0.split(separator: "/").last }.map(String.init) ?? ""
-                if target == 1.0, let yes, !athleteID.isEmpty {
-                    hrMilestones.append((athleteID, yes))
-                }
-                continue
-            }
             guard let type = typeByName[typeName] else { continue }
             let athleteID = athleteRef.split(separator: "?").first
                 .flatMap { $0.split(separator: "/").last }.map(String.init) ?? ""
@@ -874,10 +951,12 @@ struct ESPNPropBoardProvider {
             $0.line != nil && $0.overOdds != nil && $0.underOdds != nil
         }
         let hasF5 = !f5MLByTeam.isEmpty || !f5RunLines.isEmpty || !f5TotalsByLine.isEmpty
-        guard !complete.isEmpty || !hrMilestones.isEmpty || hasF5 else { return [] }
+        let hasH1 = !h1MLByTeam.isEmpty || !h1SpreadByTeam.isEmpty || !h1TotalSides.isEmpty
+        let hasMilestones = milestonesByKey.values.contains { !$0.isEmpty }
+        guard !complete.isEmpty || hasMilestones || hasF5 || hasH1 else { return [] }
 
         // 3. Resolve athlete display names (cached).
-        let uniqueIDs = Array(Set(complete.map(\.athleteID) + hrMilestones.map(\.athleteID)))
+        let uniqueIDs = Array(Set(complete.map(\.athleteID) + milestonesByKey.values.flatMap { $0.map(\.athleteID) }))
         var names: [String: String] = [:]
         Self.nameCacheLock.lock()
         for id in uniqueIDs where Self.athleteNameCache[id] != nil {
@@ -963,6 +1042,62 @@ struct ESPNPropBoardProvider {
                 }
             }
         }
+        // 1st Half markets (basketball / football): ML, spread, total.
+        if let homeID = homeTeamID, let awayID = awayTeamID {
+            if let homeML = h1MLByTeam[homeID], let awayML = h1MLByTeam[awayID] {
+                let options = pickemTwoWayQuotes(
+                    nameA: match.awayTeam, oddsA: awayML,
+                    nameB: match.homeTeam, oddsB: homeML
+                )
+                if options.count == 2 {
+                    out.append(Match(
+                        id: "\(match.id)|h1ml",
+                        league: match.league,
+                        awayTeam: match.awayTeam, homeTeam: match.homeTeam,
+                        startsAt: match.startsAt, state: match.state,
+                        statusDetail: match.statusDetail,
+                        awayScore: nil, homeScore: nil,
+                        options: options
+                    ))
+                }
+            }
+            if let home = h1SpreadByTeam[homeID], let away = h1SpreadByTeam[awayID], home.line == -away.line, home.line != 0 {
+                let options = pickemTwoWayQuotes(
+                    nameA: "\(match.awayTeam) \(pickemSignedLine(away.line))", oddsA: away.odds,
+                    nameB: "\(match.homeTeam) \(pickemSignedLine(home.line))", oddsB: home.odds
+                )
+                if options.count == 2 {
+                    out.append(Match(
+                        id: "\(match.id)|h1sprd|\(pickemFormatLine(home.line))",
+                        league: match.league,
+                        awayTeam: match.awayTeam, homeTeam: match.homeTeam,
+                        startsAt: match.startsAt, state: match.state,
+                        statusDetail: match.statusDetail,
+                        awayScore: nil, homeScore: nil,
+                        options: options
+                    ))
+                }
+            }
+        }
+        if let line = h1TotalLine, h1TotalSides.count == 2 {
+            let fmt = pickemFormatLine(line)
+            let options = pickemTwoWayQuotes(
+                nameA: "Over \(fmt)", oddsA: h1TotalSides[0],
+                nameB: "Under \(fmt)", oddsB: h1TotalSides[1]
+            )
+            if options.count == 2 {
+                out.append(Match(
+                    id: "\(match.id)|h1tot|\(fmt)",
+                    league: match.league,
+                    awayTeam: match.awayTeam, homeTeam: match.homeTeam,
+                    startsAt: match.startsAt, state: match.state,
+                    statusDetail: match.statusDetail,
+                    awayScore: nil, homeScore: nil,
+                    options: options
+                ))
+            }
+        }
+
         // Total: most balanced over/under pair ([over, under] feed order),
         // quoted from its real prices (devigged).
         var bestTotal: (line: Double, overOdds: Double, underOdds: Double, gap: Double)?
@@ -1021,28 +1156,62 @@ struct ESPNPropBoardProvider {
 
         appendPairs(key: "h", cap: 8)
 
-        // "To hit a HR" — most likely sluggers first.
-        for milestone in hrMilestones.sorted(by: { $0.yesOdds < $1.yesOdds }).prefix(8) {
-            guard let name = names[milestone.athleteID] else { continue }
-            out.append(Match(
-                id: "\(match.id)|prop|\(milestone.athleteID)|hr|0.5",
-                league: match.league,
-                awayTeam: "\(name) — To Hit a HR",
-                homeTeam: "",
-                startsAt: match.startsAt, state: match.state,
-                statusDetail: match.statusDetail,
-                awayScore: nil, homeScore: nil,
-                options: pickemYesNoQuotes(yesOdds: milestone.yesOdds)
-            ))
+        // Milestone markets. Yes/No styles (HR, anytime TD) use the
+        // target-1 item; the rest pick each athlete's target priced
+        // closest to even and render as an O/U at target - 0.5.
+        for milestone in Self.milestoneTypes(forSportKey: sportKey) {
+            let items = milestonesByKey[milestone.key] ?? []
+            guard !items.isEmpty else { continue }
+            if milestone.yesNo {
+                let candidates = items.filter { $0.target == 1.0 }.sorted { $0.odds < $1.odds }
+                for item in candidates.prefix(milestone.cap) {
+                    guard let name = names[item.athleteID] else { continue }
+                    out.append(Match(
+                        id: "\(match.id)|prop|\(item.athleteID)|\(milestone.key)|0.5",
+                        league: match.league,
+                        awayTeam: "\(name) — \(milestone.shortLabel)",
+                        homeTeam: "",
+                        startsAt: match.startsAt, state: match.state,
+                        statusDetail: match.statusDetail,
+                        awayScore: nil, homeScore: nil,
+                        options: pickemYesNoQuotes(yesOdds: item.odds)
+                    ))
+                }
+            } else {
+                var bestByAthlete: [String: (target: Double, odds: Double)] = [:]
+                for item in items {
+                    let gap = abs(pickemImpliedProb(item.odds) - 0.5)
+                    if let existing = bestByAthlete[item.athleteID] {
+                        if gap < abs(pickemImpliedProb(existing.odds) - 0.5) {
+                            bestByAthlete[item.athleteID] = (item.target, item.odds)
+                        }
+                    } else {
+                        bestByAthlete[item.athleteID] = (item.target, item.odds)
+                    }
+                }
+                // Stars first: highest line at the top.
+                let ranked = bestByAthlete.sorted { $0.value.target > $1.value.target }.prefix(milestone.cap)
+                for (athleteID, pick) in ranked {
+                    guard let name = names[athleteID] else { continue }
+                    let line = pick.target - 0.5
+                    let fmt = pickemFormatLine(line)
+                    out.append(Match(
+                        id: "\(match.id)|prop|\(athleteID)|\(milestone.key)|\(fmt)",
+                        league: match.league,
+                        awayTeam: "\(name) — \(milestone.shortLabel) \(fmt)",
+                        homeTeam: "",
+                        startsAt: match.startsAt, state: match.state,
+                        statusDetail: match.statusDetail,
+                        awayScore: nil, homeScore: nil,
+                        options: pickemOneSidedQuotes(yesOdds: pick.odds, yesName: "Over \(fmt)", noName: "Under \(fmt)")
+                    ))
+                }
+            }
         }
 
         appendPairs(key: "hrr", cap: 6)
         appendPairs(key: "r", cap: 6)
         appendPairs(key: "k", cap: 4)
-        appendPairs(key: "pts", cap: 8)
-        appendPairs(key: "pra", cap: 8)
-        appendPairs(key: "reb", cap: 5)
-        appendPairs(key: "ast", cap: 5)
         return out
     }
 }
@@ -1073,6 +1242,40 @@ func pickemF5Scores(summary: [String: Any]) -> (away: Int, home: Int, awayName: 
             home = (runs, name)
         } else {
             away = (runs, name)
+        }
+    }
+    guard let away, let home else { return nil }
+    return (away.runs, home.runs, away.name, home.name)
+}
+
+/// First-half points for both teams from the summary linescores.
+/// Quarter sports (NBA/WNBA/NFL/CFB) sum the first two periods; half
+/// sports (NCAAB) take the first. Returns nil (void) when linescores
+/// are missing.
+func pickemFirstHalfScores(summary: [String: Any]) -> (away: Int, home: Int, awayName: String, homeName: String)? {
+    guard let header = summary["header"] as? [String: Any],
+          let comp = (header["competitions"] as? [[String: Any]])?.first,
+          let competitors = comp["competitors"] as? [[String: Any]] else { return nil }
+    var away: (runs: Int, name: String)?
+    var home: (runs: Int, name: String)?
+    for competitor in competitors {
+        let name = ((competitor["team"] as? [String: Any])?["displayName"] as? String) ?? ""
+        guard let lines = competitor["linescores"] as? [[String: Any]], lines.count >= 2 else { return nil }
+        let periodCount = lines.count >= 4 ? 2 : 1
+        var points = 0
+        for line in lines.prefix(periodCount) {
+            if let v = line["value"] as? Double {
+                points += Int(v)
+            } else if let dv = line["displayValue"] as? String, let v = Int(dv) {
+                points += v
+            } else {
+                return nil
+            }
+        }
+        if (competitor["homeAway"] as? String) == "home" {
+            home = (points, name)
+        } else {
+            away = (points, name)
         }
     }
     guard let away, let home else { return nil }
@@ -1132,6 +1335,20 @@ func pickemPropStat(summary: [String: Any], athleteID: String, statKey: String) 
     case "pra":
         guard let line = statLine(groupType: nil, labelsWanted: ["PTS", "REB", "AST"]) else { return nil }
         return (line["PTS"] ?? 0) + (line["REB"] ?? 0) + (line["AST"] ?? 0)
+    case "payds":
+        return statLine(groupType: "passing", labelsWanted: ["YDS"])?["YDS"]
+    case "ruyds":
+        return statLine(groupType: "rushing", labelsWanted: ["YDS"])?["YDS"]
+    case "reyds":
+        return statLine(groupType: "receiving", labelsWanted: ["YDS"])?["YDS"]
+    case "rec":
+        return statLine(groupType: "receiving", labelsWanted: ["REC"])?["REC"]
+    case "anytd":
+        // Rushing + receiving TDs; in either box group counts as playing.
+        let rush = statLine(groupType: "rushing", labelsWanted: ["TD"])?["TD"]
+        let recv = statLine(groupType: "receiving", labelsWanted: ["TD"])?["TD"]
+        guard rush != nil || recv != nil else { return nil }
+        return (rush ?? 0) + (recv ?? 0)
     default:
         return nil
     }
@@ -1262,7 +1479,7 @@ struct ESPNMatchResultProvider: MatchResultProvider {
                             ev.competitions.first?.status.type.state == "post" ? ev.id : nil
                         })
                         let propIDs = matchIDs.filter { mid in
-                            guard mid.contains("|prop|") || mid.contains("|f5"),
+                            guard mid.contains("|prop|") || mid.contains("|f5") || mid.contains("|h1"),
                                   mid.hasPrefix("espn-\(sport.oddsSportKey)-") else { return false }
                             let base = mid.components(separatedBy: "|").first ?? ""
                             let eventID = base.components(separatedBy: "-").last ?? ""
@@ -1280,16 +1497,19 @@ struct ESPNMatchResultProvider: MatchResultProvider {
                                 for mid in ids {
                                     let parts = mid.components(separatedBy: "|")
 
-                                    // 1st-5-innings markets grade from the
-                                    // inning-by-inning linescores; shortened
-                                    // games (<5 innings) void.
-                                    if parts.count >= 2, parts[1].hasPrefix("f5") {
-                                        guard let f5 = pickemF5Scores(summary: json) else {
+                                    // Partial-game markets (F5 innings /
+                                    // 1st half) grade from the linescores;
+                                    // missing linescores void.
+                                    if parts.count >= 2, parts[1].hasPrefix("f5") || parts[1].hasPrefix("h1") {
+                                        let scores = parts[1].hasPrefix("f5")
+                                            ? pickemF5Scores(summary: json)
+                                            : pickemFirstHalfScores(summary: json)
+                                        guard let f5 = scores else {
                                             results[mid] = "PUSH"
                                             continue
                                         }
                                         switch parts[1] {
-                                        case "f5ml":
+                                        case "f5ml", "h1ml":
                                             if f5.away > f5.home {
                                                 results[mid] = f5.awayName
                                             } else if f5.home > f5.away {
@@ -1297,7 +1517,7 @@ struct ESPNMatchResultProvider: MatchResultProvider {
                                             } else {
                                                 results[mid] = "PUSH"
                                             }
-                                        case "f5sprd":
+                                        case "f5sprd", "h1sprd":
                                             guard parts.count >= 3, let homeLine = Double(parts[2]) else { continue }
                                             let adjusted = Double(f5.home - f5.away) + homeLine
                                             if adjusted > 0 {
@@ -1307,7 +1527,7 @@ struct ESPNMatchResultProvider: MatchResultProvider {
                                             } else {
                                                 results[mid] = "PUSH"
                                             }
-                                        case "f5tot":
+                                        case "f5tot", "h1tot":
                                             guard parts.count >= 3, let line = Double(parts[2]) else { continue }
                                             let total = Double(f5.away + f5.home)
                                             if total > line {
@@ -1330,9 +1550,10 @@ struct ESPNMatchResultProvider: MatchResultProvider {
                                         results[mid] = "PUSH"   // DNP / not in box — void
                                         continue
                                     }
-                                    // Milestone props ("to hit a HR") are Yes/No
-                                    let overLabel = statKey == "hr" ? "Yes" : "Over \(pickemFormatLine(line))"
-                                    let underLabel = statKey == "hr" ? "No" : "Under \(pickemFormatLine(line))"
+                                    // Milestone props ("to hit a HR", "to score a TD") are Yes/No
+                                    let isYesNo = statKey == "hr" || statKey == "anytd"
+                                    let overLabel = isYesNo ? "Yes" : "Over \(pickemFormatLine(line))"
+                                    let underLabel = isYesNo ? "No" : "Under \(pickemFormatLine(line))"
                                     if value > line {
                                         results[mid] = overLabel
                                     } else if value < line {

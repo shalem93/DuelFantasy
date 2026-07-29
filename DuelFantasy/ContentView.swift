@@ -3043,7 +3043,10 @@ struct ContentView: View {
     private func f5MarketLabel(_ id: String) -> String {
         if id.contains("|f5ml") { return "F5 ML" }
         if id.contains("|f5sprd|") { return "F5 LINE" }
-        return "F5 TOT"
+        if id.contains("|f5tot|") { return "F5 TOT" }
+        if id.contains("|h1ml") { return "1H ML" }
+        if id.contains("|h1sprd|") { return "1H LINE" }
+        return "1H TOT"
     }
 
     @ViewBuilder
@@ -3087,7 +3090,7 @@ struct ContentView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
-                        let f5Rows = props.filter { $0.id.contains("|f5") }
+                        let f5Rows = props.filter { $0.id.contains("|f5") || $0.id.contains("|h1") }
                         let playerRows = props.filter { $0.id.contains("|prop|") }
                         VStack(spacing: 6) {
                             ForEach(f5Rows) { market in
@@ -4898,6 +4901,15 @@ private func matchDisplayName(for match: Match) -> String {
     }
     if match.id.contains("|f5tot|") {
         return "\(match.awayTeam) @ \(match.homeTeam) — 1st 5 Total"
+    }
+    if match.id.contains("|h1ml") {
+        return "\(match.awayTeam) @ \(match.homeTeam) — 1st Half"
+    }
+    if match.id.contains("|h1sprd|") {
+        return "\(match.awayTeam) @ \(match.homeTeam) — 1st Half Spread"
+    }
+    if match.id.contains("|h1tot|") {
+        return "\(match.awayTeam) @ \(match.homeTeam) — 1st Half Total"
     }
     if match.id.contains("|sprd|") {
         return "\(match.awayTeam) @ \(match.homeTeam) — Spread"
