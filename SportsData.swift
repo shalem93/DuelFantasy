@@ -802,7 +802,12 @@ struct ESPNPropBoardProvider {
         guard let sportKey = Self.sportKeyFromMatchID(match.id),
               let sport = ESPSportDefinition.majorSports.first(where: { $0.oddsSportKey == sportKey }) else { return [] }
         let types = Self.statTypes(forSportKey: sportKey)
-        guard !types.isEmpty else { return [] }
+        // Basketball has NO O/U pair types (its props are all milestones),
+        // so gate on the union of capabilities — the old `types.isEmpty`
+        // guard returned [] for every WNBA/NBA game before fetching.
+        guard !types.isEmpty
+            || !Self.milestoneTypes(forSportKey: sportKey).isEmpty
+            || Self.supportsFirstHalf(sportKey: sportKey) else { return [] }
         let eventID = String(match.id.split(separator: "-").last ?? "")
         guard !eventID.isEmpty else { return [] }
 
