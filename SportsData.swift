@@ -45,6 +45,11 @@ struct GameFixture {
     var spreadHome: Double? = nil
     /// Full-game over/under line from ESPN's odds block.
     var overUnder: Double? = nil
+    /// Per-side American prices for the spread and total, when available.
+    var spreadAwayOdds: Double? = nil
+    var spreadHomeOdds: Double? = nil
+    var overOdds: Double? = nil
+    var underOdds: Double? = nil
 }
 
 struct OddsQuote {
@@ -103,11 +108,15 @@ func pickemSignedLine(_ v: Double) -> String {
 func isDerivedPickemMatchID(_ id: String) -> Bool { id.contains("|") }
 
 /// RR quote pair for a one-sided milestone prop (e.g. "to hit a HR" at
-/// +760): Yes pays its own swing, No mirrors it — same shape as the
-/// 3-way soccer per-outcome quotes.
+/// +760). The book only posts the Yes price, which carries its margin —
+/// devig by assuming a standard overround so the mirrored No side isn't
+/// systematically +EV.
 func pickemYesNoQuotes(yesOdds: Double) -> [PickOption] {
-    let swing = max(12, min(240, Int((abs(yesOdds) / 10.0).rounded())))
-    if yesOdds >= 0 {
+    let overround = 1.06
+    let pFair = max(0.01, min(0.99, pickemImpliedProb(yesOdds) / overround))
+    let fairOdds = pickemAmericanOdds(fromProb: pFair)
+    let swing = max(12, min(240, Int((abs(fairOdds) / 10.0).rounded())))
+    if pFair < 0.5 {
         return [PickOption(team: "Yes", gainRR: swing, lossRR: 10),
                 PickOption(team: "No", gainRR: 10, lossRR: swing)]
     }
@@ -115,16 +124,29 @@ func pickemYesNoQuotes(yesOdds: Double) -> [PickOption] {
             PickOption(team: "No", gainRR: swing, lossRR: 10)]
 }
 
-/// Two-way juiced RR quotes shared by moneylines and player props.
+func pickemImpliedProb(_ odds: Double) -> Double {
+    odds > 0 ? 100.0 / (odds + 100.0) : abs(odds) / (abs(odds) + 100.0)
+}
+
+func pickemAmericanOdds(fromProb p: Double) -> Double {
+    p >= 0.5 ? -100.0 * p / (1.0 - p) : 100.0 * (1.0 - p) / p
+}
+
+/// Two-way RR quotes from a pair of book prices, DEVIGGED: the implied
+/// probabilities are normalized to sum to 1 (the "in between" of the
+/// juice) and RR swings derive from the fair odds — so neither side of
+/// a juiced market is systematically +EV.
 func pickemTwoWayQuotes(nameA: String, oddsA: Double, nameB: String, oddsB: Double) -> [PickOption] {
-    func implied(_ o: Double) -> Double {
-        o > 0 ? 100.0 / (o + 100.0) : abs(o) / (abs(o) + 100.0)
-    }
-    let pA = implied(oddsA)
-    let pB = implied(oddsB)
+    let pA = pickemImpliedProb(oddsA)
+    let pB = pickemImpliedProb(oddsB)
     guard pA > 0, pB > 0 else { return [] }
-    let swing = max(12, min(240, Int(((abs(oddsA) + abs(oddsB)) / 20.0).rounded())))
-    let aIsFavorite = pA >= pB
+    let fairA = pA / (pA + pB)
+    let fairB = 1.0 - fairA
+    guard fairA > 0.005, fairB > 0.005 else { return [] }
+    let fairOddsA = pickemAmericanOdds(fromProb: fairA)
+    let fairOddsB = pickemAmericanOdds(fromProb: fairB)
+    let swing = max(12, min(240, Int(((abs(fairOddsA) + abs(fairOddsB)) / 20.0).rounded())))
+    let aIsFavorite = fairA >= fairB
     return [
         PickOption(team: nameA, gainRR: aIsFavorite ? 10 : swing, lossRR: aIsFavorite ? swing : 10),
         PickOption(team: nameB, gainRR: aIsFavorite ? swing : 10, lossRR: aIsFavorite ? 10 : swing)
@@ -271,6 +293,23 @@ struct CompositeMatchProvider: MatchProvider {
             guard baseIDs.contains(fixture.id),
                   !fixture.sportKey.hasPrefix("tennis_") else { continue }
             if let line = fixture.spreadHome, line != 0 {
+                let awayLabel = "\(fixture.awayTeam) \(pickemSignedLine(-line))"
+                let homeLabel = "\(fixture.homeTeam) \(pickemSignedLine(line))"
+                // Real per-side prices (devigged) when the book posts them —
+                // a -1.5 run line is NOT a coin flip. Flat only as fallback.
+                var options: [PickOption] = []
+                if let awayPrice = fixture.spreadAwayOdds, let homePrice = fixture.spreadHomeOdds {
+                    options = pickemTwoWayQuotes(
+                        nameA: awayLabel, oddsA: awayPrice,
+                        nameB: homeLabel, oddsB: homePrice
+                    )
+                }
+                if options.count != 2 {
+                    options = [
+                        PickOption(team: awayLabel, gainRR: 10, lossRR: 10),
+                        PickOption(team: homeLabel, gainRR: 10, lossRR: 10)
+                    ]
+                }
                 derived.append(Match(
                     id: "\(fixture.id)|sprd|\(pickemFormatLine(line))",
                     league: fixture.league,
@@ -278,24 +317,32 @@ struct CompositeMatchProvider: MatchProvider {
                     startsAt: fixture.startsAt, state: fixture.state,
                     statusDetail: fixture.statusDetail,
                     awayScore: fixture.awayScore, homeScore: fixture.homeScore,
-                    options: [
-                        PickOption(team: "\(fixture.awayTeam) \(pickemSignedLine(-line))", gainRR: 10, lossRR: 10),
-                        PickOption(team: "\(fixture.homeTeam) \(pickemSignedLine(line))", gainRR: 10, lossRR: 10)
-                    ]
+                    options: options
                 ))
             }
             if let total = fixture.overUnder, total > 0 {
+                let fmt = pickemFormatLine(total)
+                var options: [PickOption] = []
+                if let overPrice = fixture.overOdds, let underPrice = fixture.underOdds {
+                    options = pickemTwoWayQuotes(
+                        nameA: "Over \(fmt)", oddsA: overPrice,
+                        nameB: "Under \(fmt)", oddsB: underPrice
+                    )
+                }
+                if options.count != 2 {
+                    options = [
+                        PickOption(team: "Over \(fmt)", gainRR: 10, lossRR: 10),
+                        PickOption(team: "Under \(fmt)", gainRR: 10, lossRR: 10)
+                    ]
+                }
                 derived.append(Match(
-                    id: "\(fixture.id)|tot|\(pickemFormatLine(total))",
+                    id: "\(fixture.id)|tot|\(fmt)",
                     league: fixture.league,
                     awayTeam: fixture.awayTeam, homeTeam: fixture.homeTeam,
                     startsAt: fixture.startsAt, state: fixture.state,
                     statusDetail: fixture.statusDetail,
                     awayScore: fixture.awayScore, homeScore: fixture.homeScore,
-                    options: [
-                        PickOption(team: "Over \(pickemFormatLine(total))", gainRR: 10, lossRR: 10),
-                        PickOption(team: "Under \(pickemFormatLine(total))", gainRR: 10, lossRR: 10)
-                    ]
+                    options: options
                 ))
             }
         }
@@ -313,24 +360,9 @@ struct CompositeMatchProvider: MatchProvider {
         teamB: String,
         oddsB: Double
     ) -> [OddsQuote] {
-        let pA = impliedProbability(from: oddsA)
-        let pB = impliedProbability(from: oddsB)
-        guard pA > 0, pB > 0 else { return [] }
-
-        // Swing = how many RR the underdog gains (and favorite risks).
-        // Based on combined absolute American odds divided by 20, clamped [12, 240].
-        // E.g. -305/+245 → (305+245)/20 = 28, -5000/+2500 → 375 → capped at 240
-        let swing = clamp(Int(((abs(oddsA) + abs(oddsB)) / 20.0).rounded()), min: 12, max: 240)
-        let fixed = 10
-        let aIsFavorite = pA >= pB
-
-        let quoteA = aIsFavorite
-            ? OddsQuote(team: teamA, gainRR: fixed, lossRR: swing)
-            : OddsQuote(team: teamA, gainRR: swing, lossRR: fixed)
-        let quoteB = aIsFavorite
-            ? OddsQuote(team: teamB, gainRR: swing, lossRR: fixed)
-            : OddsQuote(team: teamB, gainRR: fixed, lossRR: swing)
-        return [quoteA, quoteB]
+        // Shared devigged math — see pickemTwoWayQuotes.
+        pickemTwoWayQuotes(nameA: teamA, oddsA: oddsA, nameB: teamB, oddsB: oddsB)
+            .map { OddsQuote(team: $0.team, gainRR: $0.gainRR, lossRR: $0.lossRR) }
     }
 
     private func impliedProbability(from americanOdds: Double) -> Double {
@@ -507,6 +539,7 @@ struct ESPNTodayGameProvider: GameProvider {
             // so spread/total usually need the Core API even when moneylines
             // came through.
             let needsLines = fixture.spreadHome == nil || fixture.overUnder == nil
+                || fixture.spreadAwayOdds == nil || fixture.overOdds == nil
             guard (needsML || needsLines) && !fixture.sportKey.hasPrefix("tennis_") else { continue }
 
             // Check cache first
@@ -556,6 +589,10 @@ struct ESPNTodayGameProvider: GameProvider {
             let drawML: Double?
             let spreadHome: Double?
             let overUnder: Double?
+            let spreadAwayOdds: Double?
+            let spreadHomeOdds: Double?
+            let overOdds: Double?
+            let underOdds: Double?
         }
         let fetched: [CoreOddsFetch] = await withTaskGroup(of: CoreOddsFetch?.self) { group in
             for req in requests {
@@ -579,11 +616,28 @@ struct ESPNTodayGameProvider: GameProvider {
                     // top-level "spread" matches homeTeamOdds.pointSpread sign).
                     let spreadHome = num(first["spread"])
                     let overUnder = num(first["overUnder"])
+                    // Per-side prices: total prices are top-level; spread
+                    // prices sit under each team's current.spread as a
+                    // decimal — convert to American.
+                    func decimalToAmerican(_ dec: Double?) -> Double? {
+                        guard let dec, dec > 1.0 else { return nil }
+                        return dec >= 2.0 ? (dec - 1.0) * 100.0 : -100.0 / (dec - 1.0)
+                    }
+                    func spreadPrice(_ side: Any?) -> Double? {
+                        let spread = ((side as? [String: Any])?["current"] as? [String: Any])?["spread"] as? [String: Any]
+                        return decimalToAmerican(num(spread?["value"]))
+                    }
+                    let overOdds = num(first["overOdds"])
+                    let underOdds = num(first["underOdds"])
+                    let spreadAwayOdds = spreadPrice(first["awayTeamOdds"])
+                    let spreadHomeOdds = spreadPrice(first["homeTeamOdds"])
                     if awayML == nil && homeML == nil && spreadHome == nil && overUnder == nil { return nil }
                     return CoreOddsFetch(
                         index: req.index, eventID: req.eventID,
                         awayML: awayML, homeML: homeML, drawML: drawML,
-                        spreadHome: spreadHome, overUnder: overUnder
+                        spreadHome: spreadHome, overUnder: overUnder,
+                        spreadAwayOdds: spreadAwayOdds, spreadHomeOdds: spreadHomeOdds,
+                        overOdds: overOdds, underOdds: underOdds
                     )
                 }
             }
@@ -611,7 +665,11 @@ struct ESPNTodayGameProvider: GameProvider {
                 homeMoneyline: f.homeMoneyline ?? fetch.homeML,
                 drawMoneyline: f.drawMoneyline ?? fetch.drawML,
                 spreadHome: f.spreadHome ?? fetch.spreadHome,
-                overUnder: f.overUnder ?? fetch.overUnder
+                overUnder: f.overUnder ?? fetch.overUnder,
+                spreadAwayOdds: f.spreadAwayOdds ?? fetch.spreadAwayOdds,
+                spreadHomeOdds: f.spreadHomeOdds ?? fetch.spreadHomeOdds,
+                overOdds: f.overOdds ?? fetch.overOdds,
+                underOdds: f.underOdds ?? fetch.underOdds
             )
         }
         return updated
@@ -869,53 +927,62 @@ struct ESPNPropBoardProvider {
                     ))
                 }
             }
-            // Run line: pick the most balanced home-relative line pair.
-            var bestRunLine: (line: Double, gap: Double)?
+            // Run line: the most balanced home-relative line pair, quoted
+            // from its real per-side prices (devigged).
+            var bestRunLine: (line: Double, homeOdds: Double, awayOdds: Double, gap: Double)?
             for home in f5RunLines where home.teamID == homeID {
                 guard let away = f5RunLines.first(where: { $0.teamID == awayID && $0.line == -home.line }) else { continue }
                 let gap = abs(implied(home.odds) - implied(away.odds))
                 if bestRunLine == nil || gap < bestRunLine!.gap {
-                    bestRunLine = (home.line, gap)
+                    bestRunLine = (home.line, home.odds, away.odds, gap)
                 }
             }
-            if let line = bestRunLine?.line {
+            if let runLine = bestRunLine {
+                let line = runLine.line
+                let options = pickemTwoWayQuotes(
+                    nameA: "\(match.awayTeam) \(pickemSignedLine(-line))", oddsA: runLine.awayOdds,
+                    nameB: "\(match.homeTeam) \(pickemSignedLine(line))", oddsB: runLine.homeOdds
+                )
+                if options.count == 2 {
+                    out.append(Match(
+                        id: "\(match.id)|f5sprd|\(pickemFormatLine(line))",
+                        league: match.league,
+                        awayTeam: match.awayTeam, homeTeam: match.homeTeam,
+                        startsAt: match.startsAt, state: match.state,
+                        statusDetail: match.statusDetail,
+                        awayScore: nil, homeScore: nil,
+                        options: options
+                    ))
+                }
+            }
+        }
+        // Total: most balanced over/under pair ([over, under] feed order),
+        // quoted from its real prices (devigged).
+        var bestTotal: (line: Double, overOdds: Double, underOdds: Double, gap: Double)?
+        for line in f5TotalLineOrder {
+            guard let sides = f5TotalsByLine[line], sides.count == 2 else { continue }
+            let gap = abs(implied(sides[0]) - implied(sides[1]))
+            if bestTotal == nil || gap < bestTotal!.gap {
+                bestTotal = (line, sides[0], sides[1], gap)
+            }
+        }
+        if let total = bestTotal {
+            let fmt = pickemFormatLine(total.line)
+            let options = pickemTwoWayQuotes(
+                nameA: "Over \(fmt)", oddsA: total.overOdds,
+                nameB: "Under \(fmt)", oddsB: total.underOdds
+            )
+            if options.count == 2 {
                 out.append(Match(
-                    id: "\(match.id)|f5sprd|\(pickemFormatLine(line))",
+                    id: "\(match.id)|f5tot|\(fmt)",
                     league: match.league,
                     awayTeam: match.awayTeam, homeTeam: match.homeTeam,
                     startsAt: match.startsAt, state: match.state,
                     statusDetail: match.statusDetail,
                     awayScore: nil, homeScore: nil,
-                    options: [
-                        PickOption(team: "\(match.awayTeam) \(pickemSignedLine(-line))", gainRR: 10, lossRR: 10),
-                        PickOption(team: "\(match.homeTeam) \(pickemSignedLine(line))", gainRR: 10, lossRR: 10)
-                    ]
+                    options: options
                 ))
             }
-        }
-        // Total: most balanced over/under pair ([over, under] feed order).
-        var bestTotal: (line: Double, gap: Double)?
-        for line in f5TotalLineOrder {
-            guard let sides = f5TotalsByLine[line], sides.count == 2 else { continue }
-            let gap = abs(implied(sides[0]) - implied(sides[1]))
-            if bestTotal == nil || gap < bestTotal!.gap {
-                bestTotal = (line, gap)
-            }
-        }
-        if let line = bestTotal?.line {
-            let fmt = pickemFormatLine(line)
-            out.append(Match(
-                id: "\(match.id)|f5tot|\(fmt)",
-                league: match.league,
-                awayTeam: match.awayTeam, homeTeam: match.homeTeam,
-                startsAt: match.startsAt, state: match.state,
-                statusDetail: match.statusDetail,
-                awayScore: nil, homeScore: nil,
-                options: [
-                    PickOption(team: "Over \(fmt)", gainRR: 10, lossRR: 10),
-                    PickOption(team: "Under \(fmt)", gainRR: 10, lossRR: 10)
-                ]
-            ))
         }
 
         func appendPairs(key: String, cap: Int) {
