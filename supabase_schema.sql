@@ -1550,3 +1550,11 @@ create index if not exists idx_survivor_picks_pool on survivor_picks (pool_id, w
 
 alter table profiles alter column rr_score set default 3000;
 update profiles set rr_score = rr_score + 2000;
+
+
+-- Fantasy leaderboard filter (Jul 2026): the profile leaderboard needs to
+-- aggregate every user's fantasy ledger, so relax select-own to select-all.
+drop policy if exists "frl_select_own" on public.fantasy_rr_ledger;
+drop policy if exists "frl_select_all" on public.fantasy_rr_ledger;
+create policy "frl_select_all" on public.fantasy_rr_ledger
+  for select to authenticated using (true);

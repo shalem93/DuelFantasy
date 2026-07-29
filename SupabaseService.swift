@@ -2290,6 +2290,32 @@ final class SupabaseService {
         )
     }
 
+    /// Cross-user fantasy ledger rows for the leaderboard's Fantasy
+    /// filter. Requires the frl_select_all RLS policy — with the original
+    /// select-own policy this returns only the caller's rows.
+    struct AllUserFantasyLedgerRow: Codable {
+        let userID: String
+        let rrDelta: Int
+        let createdAt: Date?
+        enum CodingKeys: String, CodingKey {
+            case userID = "user_id"
+            case rrDelta = "rr_delta"
+            case createdAt = "created_at"
+        }
+    }
+
+    func fetchAllFantasyLedgerSince(sinceISO: String, accessToken: String) async throws -> [AllUserFantasyLedgerRow] {
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/fantasy_rr_ledger"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "created_at", value: "gte.\(sinceISO)"),
+            URLQueryItem(name: "select", value: "user_id,rr_delta,created_at"),
+            URLQueryItem(name: "order", value: "created_at.desc"),
+            URLQueryItem(name: "limit", value: "5000")
+        ]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+    }
+
     // MARK: - NFL Survivor
 
     func fetchSurvivorEntries(poolIDs: [String], accessToken: String) async throws -> [SurvivorEntryRecord] {

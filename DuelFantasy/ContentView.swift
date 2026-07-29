@@ -446,6 +446,7 @@ struct ContentView: View {
         case all = "All"
         case pickem = "Pick'em"
         case dfs = "DFS"
+        case fantasy = "Fantasy"
     }
     @State private var leaderboardTimeFrame: LeaderboardTimeFrame = .allTime
     @State private var leaderboardGameFilter: LeaderboardGameFilter = .all
@@ -1948,7 +1949,7 @@ struct ContentView: View {
                                 // DFS has no win-loss record — the column is
                                 // pick'em-only and read "0-0" noise under the
                                 // DFS filter.
-                                if leaderboardGameFilter != .dfs {
+                                if leaderboardGameFilter != .dfs && leaderboardGameFilter != .fantasy {
                                     Text("W-L")
                                         .frame(width: 65, alignment: .trailing)
                                 }
@@ -1975,7 +1976,7 @@ struct ContentView: View {
                                             .font(.subheadline.weight(.medium))
                                             .foregroundStyle(.primary)
                                         Spacer()
-                                        if leaderboardGameFilter != .dfs {
+                                        if leaderboardGameFilter != .dfs && leaderboardGameFilter != .fantasy {
                                             Text("\(friend.wins)-\(friend.losses)")
                                                 .font(.caption.monospacedDigit())
                                                 .foregroundStyle(.secondary)
@@ -2039,7 +2040,7 @@ struct ContentView: View {
                                 // DFS has no win-loss record — the column is
                                 // pick'em-only and read "0-0" noise under the
                                 // DFS filter.
-                                if leaderboardGameFilter != .dfs {
+                                if leaderboardGameFilter != .dfs && leaderboardGameFilter != .fantasy {
                                     Text("W-L")
                                         .frame(width: 65, alignment: .trailing)
                                 }
@@ -2415,7 +2416,7 @@ struct ContentView: View {
                 .font(.subheadline.weight(isMe ? .bold : .medium))
                 .foregroundStyle(isMe ? brandPurple : .primary)
             Spacer()
-            if leaderboardGameFilter != .dfs {
+            if leaderboardGameFilter != .dfs && leaderboardGameFilter != .fantasy {
                 Text("\(profile.wins)-\(profile.losses)")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
@@ -2531,18 +2532,30 @@ struct ContentView: View {
         do {
             var allPicks: [AllUserSettledPick] = []
             var allDFS: [AllUserDFSResult] = []
+            var allLedger: [SupabaseService.AllUserFantasyLedgerRow] = []
 
             switch requestedGameFilter {
             case .pickem:
                 allPicks = try await SupabaseService.shared.fetchAllSettledPicksSince(sinceISO: sinceISO, accessToken: token)
             case .dfs:
                 allDFS = try await SupabaseService.shared.fetchAllDFSResultsSince(sinceISO: sinceISO, accessToken: token)
+            case .fantasy:
+                // Tiers/Bracket rows live in dfs_tournament_results under
+                // fantasy tids; Best Ball / Survivor entries+payouts in the
+                // fantasy RR ledger.
+                async let dfsFetch = SupabaseService.shared.fetchAllDFSResultsSince(sinceISO: sinceISO, accessToken: token)
+                async let ledgerFetch = SupabaseService.shared.fetchAllFantasyLedgerSince(sinceISO: sinceISO, accessToken: token)
+                let (dfs, ledger) = try await (dfsFetch, ledgerFetch)
+                allDFS = dfs
+                allLedger = ledger
             case .all:
                 async let picksFetch = SupabaseService.shared.fetchAllSettledPicksSince(sinceISO: sinceISO, accessToken: token)
                 async let dfsFetch = SupabaseService.shared.fetchAllDFSResultsSince(sinceISO: sinceISO, accessToken: token)
-                let (picks, dfs) = try await (picksFetch, dfsFetch)
+                async let ledgerFetch = SupabaseService.shared.fetchAllFantasyLedgerSince(sinceISO: sinceISO, accessToken: token)
+                let (picks, dfs, ledger) = try await (picksFetch, dfsFetch, ledgerFetch)
                 allPicks = picks
                 allDFS = dfs
+                allLedger = ledger
             }
 
             // Aggregate per user
@@ -2566,25 +2579,56 @@ struct ContentView: View {
             //  3. Admin-excluded contests are filtered from the current
             //     user's local history — apply the same exclusions here.
             let excludedTids = DFSViewModel.excludedTournamentIDs
-            var latestByKey: [String: AllUserDFSResult] = [:]
-            for dfs in allDFS {
-                let tid = dfs.tournamentID ?? UUID().uuidString
-                let baseTid = tid.components(separatedBy: "#group-").first ?? tid
-                guard !DFSViewModel.isFantasyModeTid(baseTid), !tid.contains("#group-") else { continue }
-                guard !excludedTids.contains(tid) else { continue }
-                let key = "\(dfs.userID)|\(tid)|\(dfs.lineupOrdinal)"
-                if let existing = latestByKey[key] {
-                    if (dfs.createdAt ?? .distantPast) > (existing.createdAt ?? .distantPast) {
+            if requestedGameFilter == .dfs || requestedGameFilter == .all {
+                var latestByKey: [String: AllUserDFSResult] = [:]
+                for dfs in allDFS {
+                    let tid = dfs.tournamentID ?? UUID().uuidString
+                    let baseTid = tid.components(separatedBy: "#group-").first ?? tid
+                    guard !DFSViewModel.isFantasyModeTid(baseTid), !tid.contains("#group-") else { continue }
+                    guard !excludedTids.contains(tid) else { continue }
+                    let key = "\(dfs.userID)|\(tid)|\(dfs.lineupOrdinal)"
+                    if let existing = latestByKey[key] {
+                        if (dfs.createdAt ?? .distantPast) > (existing.createdAt ?? .distantPast) {
+                            latestByKey[key] = dfs
+                        }
+                    } else {
                         latestByKey[key] = dfs
                     }
-                } else {
-                    latestByKey[key] = dfs
+                }
+                for dfs in latestByKey.values {
+                    var stats = userStats[dfs.userID, default: (rr: 0, wins: 0, losses: 0)]
+                    stats.rr += dfs.rrDelta
+                    userStats[dfs.userID] = stats
                 }
             }
-            for dfs in latestByKey.values {
-                var stats = userStats[dfs.userID, default: (rr: 0, wins: 0, losses: 0)]
-                stats.rr += dfs.rrDelta
-                userStats[dfs.userID] = stats
+
+            // Fantasy: newest Tiers/Bracket row per (user, tid) + ledger rows
+            // (Best Ball / Survivor entries and payouts).
+            if requestedGameFilter == .fantasy || requestedGameFilter == .all {
+                var latestFantasyByKey: [String: AllUserDFSResult] = [:]
+                for dfs in allDFS {
+                    guard let tid = dfs.tournamentID,
+                          DFSViewModel.isFantasyModeTid(tid), !tid.contains("#group-"),
+                          !excludedTids.contains(tid) else { continue }
+                    let key = "\(dfs.userID)|\(tid)"
+                    if let existing = latestFantasyByKey[key] {
+                        if (dfs.createdAt ?? .distantPast) > (existing.createdAt ?? .distantPast) {
+                            latestFantasyByKey[key] = dfs
+                        }
+                    } else {
+                        latestFantasyByKey[key] = dfs
+                    }
+                }
+                for dfs in latestFantasyByKey.values {
+                    var stats = userStats[dfs.userID, default: (rr: 0, wins: 0, losses: 0)]
+                    stats.rr += dfs.rrDelta
+                    userStats[dfs.userID] = stats
+                }
+                for row in allLedger {
+                    var stats = userStats[row.userID, default: (rr: 0, wins: 0, losses: 0)]
+                    stats.rr += row.rrDelta
+                    userStats[row.userID] = stats
+                }
             }
 
             // Build LeaderboardProfile entries using usernames from existing profiles
