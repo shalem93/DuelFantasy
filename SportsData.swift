@@ -116,9 +116,11 @@ func isDerivedPickemMatchID(_ id: String) -> Bool { id.contains("|") }
 func pickemOneSidedQuotes(yesOdds: Double, yesName: String, noName: String) -> [PickOption] {
     let fairOdds: Double
     if yesOdds >= 100 {
-        // Graduated longshot shade: none at +100, ramping to the full
-        // 1.4x by +300 (a +300 Yes pairs with roughly a -500/-600 No).
-        let scale = 1.0 + 0.4 * min(1.0, (yesOdds - 100.0) / 200.0)
+        // Longshot shade calibrated against real DK two-sided pairs:
+        // -172/+141 has its juice-free middle at ~+156 (1.10x the dog),
+        // -710/+486 at ~+600 (1.24x) — so scale from 1.10 at +100 to
+        // 1.24 at +500 and hold there. (1.4x proved too aggressive.)
+        let scale = 1.10 + 0.14 * min(1.0, max(0.0, (yesOdds - 100.0) / 400.0))
         fairOdds = yesOdds * scale
     } else {
         let pFair = max(0.01, min(0.99, pickemImpliedProb(yesOdds) / 1.06))
