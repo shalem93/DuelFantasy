@@ -1533,7 +1533,7 @@ struct ContentView: View {
                         // duplicate IDs for the same game that weren't marked resolved.
                         // Only use the 20 most recent to avoid suppressing rematches.
                         let recentResultNames = Set(predictionHistory.prefix(20).map(\.matchName))
-                        let activePicks: [(id: String, team: String, displayName: String, isLive: Bool, dateLabel: String)] = rawActivePicks
+                        let activePicks: [(id: String, team: String, displayName: String, isLive: Bool, dateLabel: String, rrLabel: String)] = rawActivePicks
                             .sorted(by: { $0.key < $1.key }) // espn- sorts before odds-
                             .compactMap { matchID, team in
                                 let match = knownMatchesByID[matchID]
@@ -1572,7 +1572,16 @@ struct ContentView: View {
                                     let day = cal.component(.day, from: startDate)
                                     return "\(month)/\(day)"
                                 }()
-                                return (id: matchID, team: team, displayName: displayName, isLive: isLive, dateLabel: dateLabel)
+                                // What's at stake: from the live match option if
+                                // present, else the persisted pick detail.
+                                let option = match?.options.first(where: { $0.team == team })
+                                let gainRR = option?.gainRR ?? pickDetails[matchID]?.gainRR
+                                let lossRR = option?.lossRR ?? pickDetails[matchID]?.lossRR
+                                let rrLabel: String = {
+                                    guard let gainRR, let lossRR else { return "" }
+                                    return "+\(gainRR) / -\(lossRR)"
+                                }()
+                                return (id: matchID, team: team, displayName: displayName, isLive: isLive, dateLabel: dateLabel, rrLabel: rrLabel)
                             }
                         if !activePicks.isEmpty {
                             VStack(alignment: .leading, spacing: 6) {
@@ -1595,13 +1604,20 @@ struct ContentView: View {
                                             }
                                         }
                                         Spacer()
-                                        Text(pick.team)
-                                            .font(.caption.weight(.semibold))
-                                            .padding(.horizontal, 8)
-                                            .padding(.vertical, 3)
-                                            .background(brandPurple.opacity(0.15))
-                                            .foregroundStyle(brandPurple)
-                                            .clipShape(Capsule())
+                                        VStack(alignment: .trailing, spacing: 2) {
+                                            Text(pick.team)
+                                                .font(.caption.weight(.semibold))
+                                                .padding(.horizontal, 8)
+                                                .padding(.vertical, 3)
+                                                .background(brandPurple.opacity(0.15))
+                                                .foregroundStyle(brandPurple)
+                                                .clipShape(Capsule())
+                                            if !pick.rrLabel.isEmpty {
+                                                Text(pick.rrLabel)
+                                                    .font(.caption2.monospacedDigit())
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
                                     }
                                     .padding(.vertical, 2)
                                 }

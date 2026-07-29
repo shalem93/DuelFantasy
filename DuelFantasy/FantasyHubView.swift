@@ -178,6 +178,15 @@ struct FantasyHubView: View {
             // both on initial appearance AND every time the id changes,
             // so it's the right primitive for "fetch when auth lands"
             // without juggling separate .task + .onChange paths.
+            // ACTIVE CONTESTS on first visit: the main .task above can run
+            // before auth finishes wiring, in which case loadMyLeagues bails
+            // on its token guard and the section stays empty until the user
+            // opens Best Ball. Re-fire when the token lands.
+            .task(id: bestBallViewModel.accessToken) {
+                if bestBallViewModel.accessToken != nil, bestBallViewModel.myLeagues.isEmpty {
+                    await bestBallViewModel.loadMyLeagues()
+                }
+            }
             .task(id: tennisBracketViewModel.accessToken) {
                 // Import settled tennis brackets (e.g. a finished French Open)
                 // from the server into the shared local history blob. The DFS

@@ -187,7 +187,13 @@ final class SoccerTiersViewModel {
             // server row to live, and let scoring resume. Idempotent — after
             // the first heal the stale history row is gone, so reruns
             // reverse nothing.
-            if existing.isSettled || existing.status == "settled" {
+            // HARD WINDOW: healing is only legitimate while the tournament
+            // could plausibly still be running (lock + 45 days covers the
+            // ~38-day World Cup plus slack). Past that, a "not complete /
+            // has unplayed" reading is an ESPN transient — a single bad
+            // fetch un-settled the finished 2026 World Cup AGAIN on Jul 29.
+            let healDeadline = (existing.lockTime ?? .distantFuture).addingTimeInterval(45 * 24 * 3600)
+            if (existing.isSettled || existing.status == "settled") && Date() < healDeadline {
                 let reallyComplete = await espnProvider.checkTournamentComplete()
                 // Un-settle ONLY on positive evidence of unplayed matches.
                 // "Can't verify the final happened" (empty/reshaped ESPN
@@ -559,9 +565,15 @@ final class SoccerTiersViewModel {
             currentUserID: userID
         )
 
-        // Check if tournament is complete → settle
+        // Check if tournament is complete → settle. Past the hard window
+        // the tournament is over by definition — settle even when ESPN's
+        // post-tournament responses no longer identify the final.
         if tournament.status == "live" {
-            let complete = await espnProvider.checkTournamentComplete()
+            let pastDeadline = Date() > (tournament.lockTime ?? .distantFuture).addingTimeInterval(45 * 24 * 3600)
+            var complete = pastDeadline
+            if !complete {
+                complete = await espnProvider.checkTournamentComplete()
+            }
             if complete {
                 await settle()
             }
@@ -953,7 +965,11 @@ final class SoccerTiersViewModel {
 
         // Check if we should transition from locked → live (matches started)
         if self.tournament?.status == "locked" {
-            let hasMatchesStarted = await espnProvider.hasMatchesStarted()
+            let pastDeadline = Date() > (tournament.lockTime ?? .distantFuture).addingTimeInterval(45 * 24 * 3600)
+            var hasMatchesStarted = pastDeadline
+            if !hasMatchesStarted {
+                hasMatchesStarted = await espnProvider.hasMatchesStarted()
+            }
             if hasMatchesStarted {
                 self.tournament = SoccerTiersTournament(
                     id: tournament.id, title: tournament.title, season: tournament.season,
