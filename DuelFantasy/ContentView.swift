@@ -3086,8 +3086,9 @@ struct ContentView: View {
                                 HStack(spacing: 6) {
                                     Text(prop.awayTeam)
                                         .font(.caption2.weight(.medium))
-                                        .lineLimit(1)
-                                        .minimumScaleFactor(0.8)
+                                        .lineLimit(2)
+                                        .minimumScaleFactor(0.9)
+                                        .fixedSize(horizontal: false, vertical: true)
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                     ForEach(prop.options) { option in
                                         compactPickButton(match: prop, option: option, width: 86)
@@ -4130,6 +4131,9 @@ struct ContentView: View {
                 var duplicateIDs: [String] = []
                 let sorted = mergedByID.values.sorted { $0.id < $1.id } // espn- sorts before odds-
                 for m in sorted {
+                    // Derived markets (spread/total/props) share teams+date
+                    // with their base game — they are NOT duplicates.
+                    guard !isDerivedPickemMatchID(m.id) else { continue }
                     let dateKey = dedupDateFormatter.string(from: m.startsAt)
                     let key = "\(m.awayTeam)|\(m.homeTeam)|\(m.league)|\(dateKey)"
                     if let keptID = seenGames[key] {
@@ -4172,13 +4176,17 @@ struct ContentView: View {
                 let now = Date()
                 let allMatchesByTeams: [String: [Match]] = {
                     var grouped: [String: [Match]] = [:]
-                    for m in mergedByID.values {
+                    for m in mergedByID.values where !isDerivedPickemMatchID(m.id) {
                         let teamKey = "\(m.awayTeam)|\(m.homeTeam)|\(m.league)"
                         grouped[teamKey, default: []].append(m)
                     }
                     return grouped
                 }()
                 for (matchID, _) in picksByMatch {
+                    // A spread/total/prop pick belongs to its exact market —
+                    // repair-migration to a same-teams base match would
+                    // silently turn it into a moneyline pick.
+                    guard !isDerivedPickemMatchID(matchID) else { continue }
                     guard let currentMatch = mergedByID[matchID] ?? knownMatchesByID[matchID] else { continue }
                     // Only repair if the pick's match is in the future (hasn't started)
                     guard currentMatch.startsAt > now else { continue }

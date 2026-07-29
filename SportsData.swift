@@ -102,6 +102,19 @@ func pickemSignedLine(_ v: Double) -> String {
 
 func isDerivedPickemMatchID(_ id: String) -> Bool { id.contains("|") }
 
+/// RR quote pair for a one-sided milestone prop (e.g. "to hit a HR" at
+/// +760): Yes pays its own swing, No mirrors it — same shape as the
+/// 3-way soccer per-outcome quotes.
+func pickemYesNoQuotes(yesOdds: Double) -> [PickOption] {
+    let swing = max(12, min(240, Int((abs(yesOdds) / 10.0).rounded())))
+    if yesOdds >= 0 {
+        return [PickOption(team: "Yes", gainRR: swing, lossRR: 10),
+                PickOption(team: "No", gainRR: 10, lossRR: swing)]
+    }
+    return [PickOption(team: "Yes", gainRR: 10, lossRR: swing),
+            PickOption(team: "No", gainRR: swing, lossRR: 10)]
+}
+
 /// Two-way juiced RR quotes shared by moneylines and player props.
 func pickemTwoWayQuotes(nameA: String, oddsA: Double, nameB: String, oddsB: Double) -> [PickOption] {
     func implied(_ o: Double) -> Double {
@@ -706,11 +719,24 @@ struct ESPNPropBoardProvider {
         }
         var pairs: [String: PropPair] = [:]
         var order: [String] = []
+        // One-sided milestone markets: (athleteID, yesOdds), e.g. 1+ HR.
+        var hrMilestones: [(athleteID: String, yesOdds: Double)] = []
         let typeByName = Dictionary(uniqueKeysWithValues: types.map { ($0.espnName, $0) })
         for item in propItems {
             guard let typeName = (item["type"] as? [String: Any])?["name"] as? String,
-                  let type = typeByName[typeName],
                   let athleteRef = (item["athlete"] as? [String: Any])?["$ref"] as? String else { continue }
+            if sportKey == "baseball_mlb", typeName == "Home Runs Milestones" {
+                let target = ((item["current"] as? [String: Any])?["target"] as? [String: Any])?["value"] as? Double
+                let yes = (((item["odds"] as? [String: Any])?["american"] as? [String: Any])?["value"] as? String)
+                    .flatMap { Double($0.replacingOccurrences(of: "+", with: "")) }
+                let athleteID = athleteRef.split(separator: "?").first
+                    .flatMap { $0.split(separator: "/").last }.map(String.init) ?? ""
+                if target == 1.0, let yes, !athleteID.isEmpty {
+                    hrMilestones.append((athleteID, yes))
+                }
+                continue
+            }
+            guard let type = typeByName[typeName] else { continue }
             let athleteID = athleteRef.split(separator: "?").first
                 .flatMap { $0.split(separator: "/").last }.map(String.init) ?? ""
             guard !athleteID.isEmpty else { continue }
@@ -732,10 +758,10 @@ struct ESPNPropBoardProvider {
         let complete = order.compactMap { pairs[$0] }.filter {
             $0.line != nil && $0.overOdds != nil && $0.underOdds != nil
         }
-        guard !complete.isEmpty else { return [] }
+        guard !complete.isEmpty || !hrMilestones.isEmpty else { return [] }
 
         // 3. Resolve athlete display names (cached).
-        let uniqueIDs = Array(Set(complete.map(\.athleteID)))
+        let uniqueIDs = Array(Set(complete.map(\.athleteID) + hrMilestones.map(\.athleteID)))
         var names: [String: String] = [:]
         Self.nameCacheLock.lock()
         for id in uniqueIDs where Self.athleteNameCache[id] != nil {
@@ -765,31 +791,61 @@ struct ESPNPropBoardProvider {
         }
         Self.nameCacheLock.unlock()
 
-        // 4. Build derived Matches — stars first (shortest over odds), capped.
-        let sorted = complete.sorted { (a, b) in
-            (a.overOdds ?? 0) < (b.overOdds ?? 0)
-        }.prefix(14)
+        // 4. Build derived Matches, grouped by market with per-type caps so
+        // hits don't crowd out Ks/runs; favorites first within each type.
         var out: [Match] = []
-        for pair in sorted {
-            guard let line = pair.line, let over = pair.overOdds, let under = pair.underOdds,
-                  let name = names[pair.athleteID] else { continue }
-            let fmt = pickemFormatLine(line)
-            let options = pickemTwoWayQuotes(
-                nameA: "Over \(fmt)", oddsA: over,
-                nameB: "Under \(fmt)", oddsB: under
-            )
-            guard options.count == 2 else { continue }
+
+        func appendPairs(key: String, cap: Int) {
+            let bucket = complete
+                .filter { $0.type.key == key }
+                .sorted { ($0.overOdds ?? 0) < ($1.overOdds ?? 0) }
+                .prefix(cap)
+            for pair in bucket {
+                guard let line = pair.line, let over = pair.overOdds, let under = pair.underOdds,
+                      let name = names[pair.athleteID] else { continue }
+                let fmt = pickemFormatLine(line)
+                let options = pickemTwoWayQuotes(
+                    nameA: "Over \(fmt)", oddsA: over,
+                    nameB: "Under \(fmt)", oddsB: under
+                )
+                guard options.count == 2 else { continue }
+                out.append(Match(
+                    id: "\(match.id)|prop|\(pair.athleteID)|\(pair.type.key)|\(fmt)",
+                    league: match.league,
+                    awayTeam: "\(name) — \(pair.type.shortLabel) \(fmt)",
+                    homeTeam: "",
+                    startsAt: match.startsAt, state: match.state,
+                    statusDetail: match.statusDetail,
+                    awayScore: nil, homeScore: nil,
+                    options: options
+                ))
+            }
+        }
+
+        appendPairs(key: "h", cap: 8)
+
+        // "To hit a HR" — most likely sluggers first.
+        for milestone in hrMilestones.sorted(by: { $0.yesOdds < $1.yesOdds }).prefix(8) {
+            guard let name = names[milestone.athleteID] else { continue }
             out.append(Match(
-                id: "\(match.id)|prop|\(pair.athleteID)|\(pair.type.key)|\(fmt)",
+                id: "\(match.id)|prop|\(milestone.athleteID)|hr|0.5",
                 league: match.league,
-                awayTeam: "\(name) — \(pair.type.shortLabel) \(fmt)",
+                awayTeam: "\(name) — To Hit a HR",
                 homeTeam: "",
                 startsAt: match.startsAt, state: match.state,
                 statusDetail: match.statusDetail,
                 awayScore: nil, homeScore: nil,
-                options: options
+                options: pickemYesNoQuotes(yesOdds: milestone.yesOdds)
             ))
         }
+
+        appendPairs(key: "hrr", cap: 6)
+        appendPairs(key: "r", cap: 6)
+        appendPairs(key: "k", cap: 4)
+        appendPairs(key: "pts", cap: 8)
+        appendPairs(key: "pra", cap: 8)
+        appendPairs(key: "reb", cap: 5)
+        appendPairs(key: "ast", cap: 5)
         return out
     }
 }
@@ -829,6 +885,8 @@ func pickemPropStat(summary: [String: Any], athleteID: String, statKey: String) 
     switch statKey {
     case "h":
         return statLine(groupType: "batting", labelsWanted: ["H"])?["H"]
+    case "hr":
+        return statLine(groupType: "batting", labelsWanted: ["HR"])?["HR"]
     case "r":
         return statLine(groupType: "batting", labelsWanted: ["R"])?["R"]
     case "hrr":
@@ -999,10 +1057,13 @@ struct ESPNMatchResultProvider: MatchResultProvider {
                                         results[mid] = "PUSH"   // DNP / not in box — void
                                         continue
                                     }
+                                    // Milestone props ("to hit a HR") are Yes/No
+                                    let overLabel = statKey == "hr" ? "Yes" : "Over \(pickemFormatLine(line))"
+                                    let underLabel = statKey == "hr" ? "No" : "Under \(pickemFormatLine(line))"
                                     if value > line {
-                                        results[mid] = "Over \(pickemFormatLine(line))"
+                                        results[mid] = overLabel
                                     } else if value < line {
-                                        results[mid] = "Under \(pickemFormatLine(line))"
+                                        results[mid] = underLabel
                                     } else {
                                         results[mid] = "PUSH"
                                     }
