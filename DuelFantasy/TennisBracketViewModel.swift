@@ -69,7 +69,7 @@ final class TennisBracketViewModel {
     var userID: String?
     var accessToken: String?
     var profileName: String = ""
-    var rrScore: Int = 1000
+    var rrScore: Int = rrBaselineScore
 
     // MARK: - Groups State
     var myGroups: [TennisBracketGroup] = []

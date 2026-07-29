@@ -5,7 +5,7 @@ create extension if not exists pgcrypto;
 create table if not exists public.profiles (
     id uuid primary key references auth.users(id) on delete cascade,
     username text not null default 'Player',
-    rr_score integer not null default 1000,
+    rr_score integer not null default 3000,
     created_at timestamptz not null default now()
 );
 
@@ -1540,3 +1540,13 @@ create policy svp_insert_own on survivor_picks for insert to authenticated with 
 create policy svp_update_own on survivor_picks for update to authenticated using (auth.uid() = user_id);
 
 create index if not exists idx_survivor_picks_pool on survivor_picks (pool_id, week);
+
+
+-- ============================================================
+-- RR baseline bump (Jul 2026): all players start at 3000 RR
+-- (was 1000) now that fantasy entry fees go up to 250 RR.
+-- Run once: new-signup default + one-time +2000 for existing rows.
+-- ============================================================
+
+alter table profiles alter column rr_score set default 3000;
+update profiles set rr_score = rr_score + 2000;

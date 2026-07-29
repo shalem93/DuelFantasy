@@ -432,7 +432,7 @@ final class DFSViewModel {
     var accessToken: String?
     var userEmail: String = ""
     var profileName: String = ""
-    var rrScore: Int = 1000
+    var rrScore: Int = rrBaselineScore
 
     // MARK: - Providers
     let sport: String  // "NBA", "MLB", etc.

@@ -268,6 +268,12 @@ private struct ExtraSettledSyncModifier: ViewModifier {
     }
 }
 
+/// Starting RR balance for every account. Bumped 1000 -> 3000 (Jul 2026)
+/// so fantasy entry fees (up to 250 RR per pool) don't dominate a fresh
+/// bankroll. Server-side: profiles.rr_score default must match, and
+/// existing rows were bumped +2000 in the same migration.
+let rrBaselineScore = 3000
+
 struct ContentView: View {
     @EnvironmentObject private var auth: AuthViewModel
     @Environment(\.scenePhase) private var scenePhase
@@ -277,10 +283,10 @@ struct ContentView: View {
     @State private var avatarUploading: Bool = false
     @State private var avatarBlockedAlert: String?
     @AppStorage("odds_api_key") private var oddsAPIKey: String = AppSecrets.defaultOddsAPIKey
-    @AppStorage("rr_score") private var rrScore: Int = 1000
+    @AppStorage("rr_score") private var rrScore: Int = rrBaselineScore
     // Last fully-synced total RR, shown instantly on launch so the number is
     // stable from the first frame instead of climbing as async sources load.
-    @AppStorage("last_stable_rr") private var lastStableRR: Int = 1000
+    @AppStorage("last_stable_rr") private var lastStableRR: Int = rrBaselineScore
     @State private var rrSyncReady = false
     // Last DFS-RR delta from AFTER the launch settle completed (the correct,
     // fully-loaded value — e.g. with both WC lineups). Shown on the DFS pill
@@ -542,7 +548,7 @@ struct ContentView: View {
     /// Displayed total RR — always derived from components so the pills add up.
     /// This avoids drift from incremental rrScore += delta between syncs.
     private var displayedRR: Int {
-        1000 + pickemRRDelta + dfsRRDelta + fantasyRRDelta
+        rrBaselineScore + pickemRRDelta + dfsRRDelta + fantasyRRDelta
     }
 
     /// DFS-RR delta shown on the home pill. Before the launch settle finishes
@@ -592,7 +598,7 @@ struct ContentView: View {
         // Total pill, consistent with the DFS pill: uses the post-settle DFS-RR
         // snapshot until the live settle catches up. Server pushes still use the
         // live `displayedRR`, so persistence stays accurate.
-        1000 + pickemRRDelta + shownDfsRR + fantasyRRDelta
+        rrBaselineScore + pickemRRDelta + shownDfsRR + fantasyRRDelta
     }
 
     private var brandPurple: Color {
@@ -796,7 +802,7 @@ struct ContentView: View {
                 // Clean up all bad DFS history entries and reset RR to baseline.
                 settledTournamentData = Data()
                 dfsHistoryData = Data()
-                rrScore = 1000
+                rrScore = rrBaselineScore
             }
             if dfsSettlementVersion < 18 {
                 // v18: Hard correction — previous recompute counted pre-v14 settled
@@ -4249,7 +4255,7 @@ struct ContentView: View {
                 // pushed whipsawing RR values to the server (logs showed
                 // dfs=1514 vs the real 2451 during a settle pass).
                 let localDFSDelta = dfsRRDelta
-                let fullRR = 1000 + pickemDelta + localDFSDelta + fantasyRRDelta
+                let fullRR = rrBaselineScore + pickemDelta + localDFSDelta + fantasyRRDelta
 
                 // Safety guard: if the server fetch came back EMPTY or
                 // PARTIAL but we have a non-zero local record, treat it as
@@ -4654,7 +4660,7 @@ struct ContentView: View {
     private func clearLocalUserData() {
         profileName = ""
         draftName = ""
-        rrScore = 1000
+        rrScore = rrBaselineScore
         wins = 0
         losses = 0
         historyData = Data()

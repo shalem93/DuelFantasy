@@ -130,9 +130,6 @@ struct FantasyHubView: View {
 
                     // Past results across every Fantasy-hub game
                     pastResultsSection
-
-                    // Coming soon section
-                    comingSoonSection
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
@@ -587,6 +584,9 @@ struct FantasyHubView: View {
             }
             .buttonStyle(.plain)
             }
+
+            // NFL Survivor
+            comingSoonSection
         }
     }
 

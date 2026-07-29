@@ -37,7 +37,7 @@ final class GolfTiersViewModel {
     var accessToken: String?
     var userEmail: String = ""
     var profileName: String = ""
-    var rrScore: Int = 1000
+    var rrScore: Int = rrBaselineScore
 
     // MARK: - Groups State
     var myGroups: [GolfTiersGroup] = []
