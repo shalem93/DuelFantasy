@@ -324,9 +324,11 @@ struct BestBallLeagueRecord: Codable, Identifiable {
     let nflTeStarters: Int?
     let nflFlexStarters: Int?
     let nflSflexStarters: Int?
+    let entryFee: Int?
 
     enum CodingKeys: String, CodingKey {
         case id, title, sport, season, status, schedule
+        case entryFee = "entry_fee"
         case draftStartTime = "draft_start_time"
         case draftOrder = "draft_order"
         case currentPickNumber = "current_pick_number"
@@ -376,7 +378,26 @@ struct BestBallLeagueRecord: Codable, Identifiable {
         league.nflTeStarters = nflTeStarters ?? 1
         league.nflFlexStarters = nflFlexStarters ?? 2
         league.nflSflexStarters = nflSflexStarters ?? 0
+        league.entryFee = entryFee ?? 10
         return league
+    }
+}
+
+// MARK: - Fantasy RR Ledger
+
+/// Append-only RR ledger row for fantasy modes (entry fees, payouts).
+/// The DB's unique (user_id, ref_id, kind) key makes inserts idempotent.
+struct FantasyLedgerRecord: Codable {
+    let userID: String
+    let refID: String
+    let kind: String
+    let rrDelta: Int
+
+    enum CodingKeys: String, CodingKey {
+        case userID = "user_id"
+        case refID = "ref_id"
+        case kind
+        case rrDelta = "rr_delta"
     }
 }
 
@@ -2172,6 +2193,7 @@ final class SupabaseService {
         pitcherSlots: Int = 2, batterSlots: Int = 6,
         scoringMode: String = "normal",
         nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0,
+        entryFee: Int = 10,
         createdBy: String, accessToken: String
     ) async throws -> BestBallLeagueRecord {
         var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/bestball_leagues"), resolvingAgainstBaseURL: false)
@@ -2200,8 +2222,10 @@ final class SupabaseService {
             let nflTeStarters: Int
             let nflFlexStarters: Int
             let nflSflexStarters: Int
+            let entryFee: Int
             enum CodingKeys: String, CodingKey {
                 case title, sport, season
+                case entryFee = "entry_fee"
                 case totalWeeks = "total_weeks"
                 case isPrivate = "is_private"
                 case createdBy = "created_by"
@@ -2229,11 +2253,41 @@ final class SupabaseService {
             scoringMode: scoringMode,
             nflQbStarters: nflQB, nflRbStarters: nflRB,
             nflWrStarters: nflWR, nflTeStarters: nflTE, nflFlexStarters: nflFLEX,
-            nflSflexStarters: nflSFLEX
+            nflSflexStarters: nflSFLEX,
+            entryFee: entryFee
         )
         let results: [BestBallLeagueRecord] = try await request(url: url, method: "POST", body: payload, bearerToken: accessToken, preferReturn: "representation")
         guard let league = results.first else { throw URLError(.badServerResponse) }
         return league
+    }
+
+    // MARK: - Fantasy RR Ledger
+
+    func fetchFantasyLedger(userID: String, accessToken: String) async throws -> [FantasyLedgerRecord] {
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/fantasy_rr_ledger"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "user_id", value: "eq.\(userID)"),
+            URLQueryItem(name: "select", value: "user_id,ref_id,kind,rr_delta"),
+            URLQueryItem(name: "limit", value: "1000")
+        ]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+    }
+
+    /// Idempotent: the DB's unique (user_id, ref_id, kind) plus
+    /// ignore-duplicates means retries can never double-charge or
+    /// double-pay.
+    func insertFantasyLedgerRow(userID: String, refID: String, kind: String, rrDelta: Int, accessToken: String) async throws {
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/fantasy_rr_ledger"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "on_conflict", value: "user_id,ref_id,kind")
+        ]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        let row = FantasyLedgerRecord(userID: userID, refID: refID, kind: kind, rrDelta: rrDelta)
+        try await requestNoResponse(
+            url: url, method: "POST", body: [row], bearerToken: accessToken,
+            preferHeader: "resolution=ignore-duplicates"
+        )
     }
 
     private static func generateInviteCode() -> String {
@@ -4988,7 +5042,8 @@ final class SupabaseService {
         method: String,
         body: Body?,
         bearerToken: String?,
-        preferUpsert: Bool = false
+        preferUpsert: Bool = false,
+        preferHeader: String? = nil
     ) async throws {
         var request = URLRequest(url: url)
         request.httpMethod = method
@@ -4997,7 +5052,9 @@ final class SupabaseService {
         if let bearerToken {
             request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
         }
-        if preferUpsert {
+        if let preferHeader {
+            request.setValue(preferHeader, forHTTPHeaderField: "Prefer")
+        } else if preferUpsert {
             request.setValue("resolution=merge-duplicates", forHTTPHeaderField: "Prefer")
         }
         if let body {

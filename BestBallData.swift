@@ -40,6 +40,8 @@ struct BestBallLeague: Identifiable, Equatable, Hashable {
     var pitcherSlots: Int         // MLB: scoring pitcher count; NBA/NFL: ignored
     var batterSlots: Int          // MLB: scoring batter/UTIL count; NBA/NFL: ignored
     var scoringMode: BestBallScoringMode
+    /// RR entry fee (10/20/50/100/250). 0 = free (grandfathered leagues).
+    var entryFee: Int = 10
 
     // NFL starting-lineup config (only relevant when sport == "NFL").
     // Defaults match the prior hardcoded lineup; can be edited by the

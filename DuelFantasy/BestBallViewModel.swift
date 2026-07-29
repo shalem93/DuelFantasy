@@ -44,6 +44,8 @@ final class BestBallViewModel {
     var leagueMemberCounts: [String: Int] = [:]
     var wonLeagueIDs: Set<String> = []
     var leagueMatchupPreviews: [String: LeagueMatchupPreview] = [:]
+    /// Sum of the user's fantasy RR ledger (entry fees + payouts).
+    var fantasyLedgerDelta: Int = 0
     var isLoading: Bool = false
     var isStartingDraft: Bool = false
     var error: String?
@@ -246,6 +248,9 @@ final class BestBallViewModel {
                 }
             }
             leagueMatchupPreviews = previews
+
+            // Entry fees + payouts (idempotent; see reconcileFantasyLedger)
+            await reconcileFantasyLedger(token: token)
         } catch {
             self.error = error.localizedDescription
         }
@@ -253,8 +258,12 @@ final class BestBallViewModel {
 
     // MARK: - Create & Join
 
-    func createLeague(title: String, sport: String, isPrivate: Bool = false, maxMembers: Int = 12, rosterSize: Int = 12, pitcherSlots: Int = 2, batterSlots: Int = 6, scoringMode: BestBallScoringMode = .normal, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0) async -> BestBallLeague? {
+    func createLeague(title: String, sport: String, isPrivate: Bool = false, maxMembers: Int = 12, rosterSize: Int = 12, pitcherSlots: Int = 2, batterSlots: Int = 6, scoringMode: BestBallScoringMode = .normal, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0, entryFee: Int = 10) async -> BestBallLeague? {
         guard let uid = userID, let token = accessToken else { return nil }
+        if let reason = entryDenialReason(fee: entryFee) {
+            self.error = reason
+            return nil
+        }
         do {
             let season = BestBallSeasonHelper.currentSeason(sport: sport)
             let record = try await SupabaseService.shared.createLeague(
@@ -263,6 +272,7 @@ final class BestBallViewModel {
                 pitcherSlots: pitcherSlots, batterSlots: batterSlots,
                 scoringMode: scoringMode.rawValue,
                 nflQB: nflQB, nflRB: nflRB, nflWR: nflWR, nflTE: nflTE, nflFLEX: nflFLEX, nflSFLEX: nflSFLEX,
+                entryFee: entryFee,
                 createdBy: uid, accessToken: token
             )
             var league = record.toModel()
@@ -281,6 +291,7 @@ final class BestBallViewModel {
             league.nflTeStarters = nflTE
             league.nflFlexStarters = nflFLEX
             league.nflSflexStarters = nflSFLEX
+            league.entryFee = entryFee
 
             // Cache so the detail view has the correct values right away
             currentLeague = league
@@ -301,8 +312,121 @@ final class BestBallViewModel {
         }
     }
 
+    // MARK: - Fantasy RR (entry fees)
+
+    static let entryFeeTiers = [10, 20, 50, 100, 250]
+
+    /// How many non-completed leagues a user may hold at each fee level.
+    /// Fantasy is a season-long commitment, so the caps step down as the
+    /// stakes go up.
+    static func joinCap(forFee fee: Int) -> Int {
+        switch fee {
+        case ..<20: return 30
+        case ..<50: return 10
+        case ..<100: return 5
+        default: return 3
+        }
+    }
+
+    /// Non-completed leagues the user is in at this fee tier.
+    func activeLeagueCount(atFee fee: Int) -> Int {
+        myLeagues.filter { $0.entryFee == fee && $0.status != "completed" }.count
+    }
+
+    /// nil = allowed; otherwise a user-facing reason (shared by join+create).
+    func entryDenialReason(fee: Int) -> String? {
+        guard fee > 0 else { return nil }
+        // Persisted profile RR (kept at the derived total by the
+        // leaderboard sync) — this VM doesn't carry its own rrScore.
+        let balance = UserDefaults.standard.integer(forKey: "rr_score")
+        if balance < fee {
+            return "Not enough RR — this league costs \(fee) RR to enter."
+        }
+        let cap = Self.joinCap(forFee: fee)
+        if activeLeagueCount(atFee: fee) >= cap {
+            return "You're already in \(cap) leagues at the \(fee) RR level — finish one first."
+        }
+        return nil
+    }
+
+    /// RR payout multiples by final standing. Season-long investment, so
+    /// the top of the table pays meaningfully better than a daily contest.
+    static func bestBallPayout(fee: Int, rank: Int, members: Int) -> Int {
+        guard fee > 0, rank > 0 else { return 0 }
+        if members >= 10 {
+            switch rank {
+            case 1: return fee * 5
+            case 2: return fee * 2
+            case 3: return fee
+            default: return 0
+            }
+        }
+        if members >= 6 {
+            switch rank {
+            case 1: return fee * 4
+            case 2: return fee * 3 / 2
+            default: return 0
+            }
+        }
+        return rank == 1 ? fee * 3 : 0
+    }
+
+    /// Lazy self-charging + payouts. Fees are charged when a paid league
+    /// has actually STARTED (drafting/active/completed) — nobody pays for
+    /// an open league that might get deleted — and RLS only lets a user
+    /// write their own ledger rows, so each member's own device charges
+    /// them, exactly once (DB unique key makes retries idempotent).
+    /// Completed leagues pay the top of the standings in fee multiples.
+    private func reconcileFantasyLedger(token: String) async {
+        guard let uid = userID else { return }
+        var ledger = (try? await SupabaseService.shared.fetchFantasyLedger(userID: uid, accessToken: token)) ?? []
+        func hasRow(_ ref: String, _ kind: String) -> Bool {
+            ledger.contains { $0.refID == ref && $0.kind == kind }
+        }
+        var didInsert = false
+        for league in myLeagues where league.entryFee > 0 && league.status != "open" {
+            if !hasRow(league.id, "bestball_entry") {
+                try? await SupabaseService.shared.insertFantasyLedgerRow(
+                    userID: uid, refID: league.id, kind: "bestball_entry",
+                    rrDelta: -league.entryFee, accessToken: token
+                )
+                didInsert = true
+            }
+            if league.status == "completed", !hasRow(league.id, "bestball_payout"),
+               let membership = myMemberships.first(where: { $0.leagueId == league.id }) {
+                let standingRecords = (try? await SupabaseService.shared.fetchStandings(leagueID: league.id, accessToken: token)) ?? []
+                let standings = standingRecords.map { $0.toModel() }
+                if let mine = standings.first(where: { $0.memberID == membership.id }) {
+                    let payout = Self.bestBallPayout(
+                        fee: league.entryFee, rank: mine.rank,
+                        members: max(standings.count, league.maxMembers)
+                    )
+                    if payout > 0 {
+                        try? await SupabaseService.shared.insertFantasyLedgerRow(
+                            userID: uid, refID: league.id, kind: "bestball_payout",
+                            rrDelta: payout, accessToken: token
+                        )
+                        didInsert = true
+                    }
+                }
+            }
+        }
+        if didInsert {
+            ledger = (try? await SupabaseService.shared.fetchFantasyLedger(userID: uid, accessToken: token)) ?? ledger
+        }
+        let total = ledger.reduce(0) { $0 + $1.rrDelta }
+        fantasyLedgerDelta = total
+        // Mirror into UserDefaults so ContentView's @AppStorage pill bucket
+        // updates reactively.
+        UserDefaults.standard.set(total, forKey: "fantasy_rr_delta")
+    }
+
     func joinLeague(_ league: BestBallLeague) async -> Bool {
         guard let uid = userID, let token = accessToken else { return false }
+        if let reason = entryDenialReason(fee: league.entryFee) {
+            self.error = reason
+            return false
+        }
         do {
             let members = try await SupabaseService.shared.fetchLeagueMembers(leagueID: league.id, accessToken: token)
             let occupiedSlots = Set(members.map { $0.slotIndex })

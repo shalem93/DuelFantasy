@@ -6,6 +6,7 @@ struct BestBallBrowseView: View {
     @State private var showJoinByCode: Bool = false
     @State private var newLeagueTitle: String = ""
     @State private var newLeagueSport: String = "NFL"
+    @State private var newLeagueEntryFee: Int = 10
     @State private var newLeaguePrivate: Bool = false
     @State private var newLeagueSize: Int = 12
     @State private var newLeagueRosterSize: Int = 12
@@ -288,6 +289,13 @@ struct BestBallBrowseView: View {
                 Text(league.title)
                     .font(.subheadline.weight(.semibold))
                 Spacer()
+                Text(league.entryFee > 0 ? "\(league.entryFee) RR" : "FREE")
+                    .font(.caption.weight(.bold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background((league.entryFee > 0 ? brandPurple : Color.green).opacity(0.12))
+                    .foregroundStyle(league.entryFee > 0 ? brandPurple : .green)
+                    .clipShape(Capsule())
                 if league.isDingersOnly {
                     Text("HR")
                         .font(.caption.weight(.bold))
@@ -338,6 +346,35 @@ struct BestBallBrowseView: View {
                     sportCardPicker
                         .listRowInsets(EdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8))
                         .listRowBackground(Color.clear)
+                }
+
+                Section {
+                    HStack(spacing: 8) {
+                        ForEach(BestBallViewModel.entryFeeTiers, id: \.self) { fee in
+                            let isSelected = newLeagueEntryFee == fee
+                            Button {
+                                Haptics.light()
+                                newLeagueEntryFee = fee
+                            } label: {
+                                Text("\(fee)")
+                                    .font(.subheadline.weight(.bold).monospacedDigit())
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 10)
+                                    .background(isSelected ? brandPurple : Color(.systemGray6))
+                                    .foregroundStyle(isSelected ? .white : .primary)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .listRowInsets(EdgeInsets(top: 8, leading: 8, bottom: 4, trailing: 8))
+                    .listRowBackground(Color.clear)
+                } header: {
+                    Text("Entry Fee (RR)")
+                } footer: {
+                    let cap = BestBallViewModel.joinCap(forFee: newLeagueEntryFee)
+                    let current = viewModel.activeLeagueCount(atFee: newLeagueEntryFee)
+                    Text("Charged when the draft starts. Winners earn back multiples of the entry. You can be in \(cap) leagues at this level (currently in \(current)).")
                 }
 
                 Section("League Settings") {
@@ -504,7 +541,8 @@ struct BestBallBrowseView: View {
                                 batterSlots: newBatterSlots,
                                 scoringMode: newScoringMode,
                                 nflQB: newNflQB, nflRB: newNflRB,
-                                nflWR: newNflWR, nflTE: newNflTE, nflFLEX: newNflFLEX, nflSFLEX: newNflSFLEX
+                                nflWR: newNflWR, nflTE: newNflTE, nflFLEX: newNflFLEX, nflSFLEX: newNflSFLEX,
+                                entryFee: newLeagueEntryFee
                             )
                             showCreateSheet = false
                             newLeagueTitle = ""

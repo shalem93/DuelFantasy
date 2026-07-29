@@ -1467,3 +1467,34 @@ alter table public.bestball_leagues add constraint bestball_leagues_sport_check
   check (sport in ('NBA', 'MLB', 'NFL', 'CFB'));
 
 select pg_notify('pgrst', 'reload schema');
+
+-- ============================================================
+-- Fantasy RR: Best Ball entry fees + fantasy RR ledger
+-- ============================================================
+-- Entry fee tiers (10/20/50/100/250 RR) chosen at league creation.
+-- Leagues that already started before this feature stay free.
+alter table public.bestball_leagues add column if not exists entry_fee integer not null default 10;
+update public.bestball_leagues set entry_fee = 0 where status <> 'open';
+
+-- Append-only RR ledger for fantasy modes (entries, payouts, refunds).
+-- The unique key makes charges/payouts idempotent: a client can retry
+-- the insert forever and the user is charged/paid exactly once.
+create table if not exists public.fantasy_rr_ledger (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  ref_id text not null,
+  kind text not null,
+  rr_delta integer not null,
+  created_at timestamptz not null default now(),
+  unique (user_id, ref_id, kind)
+);
+alter table public.fantasy_rr_ledger enable row level security;
+grant select, insert on table public.fantasy_rr_ledger to authenticated, service_role;
+drop policy if exists "frl_select_own" on public.fantasy_rr_ledger;
+create policy "frl_select_own" on public.fantasy_rr_ledger
+  for select to authenticated using (auth.uid() = user_id);
+drop policy if exists "frl_insert_own" on public.fantasy_rr_ledger;
+create policy "frl_insert_own" on public.fantasy_rr_ledger
+  for insert to authenticated with check (auth.uid() = user_id);
+
+select pg_notify('pgrst', 'reload schema');

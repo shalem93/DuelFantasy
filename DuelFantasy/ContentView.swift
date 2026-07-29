@@ -458,6 +458,9 @@ struct ContentView: View {
     /// Probable pitchers for MLB Pick'em cards: match ID → (away, home).
     @State private var mlbProbablesByMatchID: [String: (away: String?, home: String?)] = [:]
     @State private var lastProbablesFetch: Date = .distantPast
+    /// Fantasy RR ledger sum (Best Ball entry fees + payouts), mirrored
+    /// from the server ledger by BestBallViewModel.reconcileFantasyLedger.
+    @AppStorage("fantasy_rr_delta") private var fantasyRRDelta: Int = 0
 
     private var winRate: Int {
         let total = wins + losses
@@ -538,7 +541,7 @@ struct ContentView: View {
     /// Displayed total RR — always derived from components so the pills add up.
     /// This avoids drift from incremental rrScore += delta between syncs.
     private var displayedRR: Int {
-        1000 + pickemRRDelta + dfsRRDelta
+        1000 + pickemRRDelta + dfsRRDelta + fantasyRRDelta
     }
 
     /// DFS-RR delta shown on the home pill. Before the launch settle finishes
@@ -588,7 +591,7 @@ struct ContentView: View {
         // Total pill, consistent with the DFS pill: uses the post-settle DFS-RR
         // snapshot until the live settle catches up. Server pushes still use the
         // live `displayedRR`, so persistence stays accurate.
-        1000 + pickemRRDelta + shownDfsRR
+        1000 + pickemRRDelta + shownDfsRR + fantasyRRDelta
     }
 
     private var brandPurple: Color {
@@ -2687,6 +2690,9 @@ struct ContentView: View {
             HStack(spacing: 16) {
                 rrBreakdownPill(label: "Pick'em", delta: pickemRRDelta)
                 rrBreakdownPill(label: "DFS", delta: shownDfsRR)
+                if fantasyRRDelta != 0 {
+                    rrBreakdownPill(label: "Fantasy", delta: fantasyRRDelta)
+                }
             }
             .padding(.vertical, 10)
             .padding(.horizontal, 16)
@@ -4186,7 +4192,7 @@ struct ContentView: View {
                 // pushed whipsawing RR values to the server (logs showed
                 // dfs=1514 vs the real 2451 during a settle pass).
                 let localDFSDelta = dfsRRDelta
-                let fullRR = 1000 + pickemDelta + localDFSDelta
+                let fullRR = 1000 + pickemDelta + localDFSDelta + fantasyRRDelta
 
                 // Safety guard: if the server fetch came back EMPTY or
                 // PARTIAL but we have a non-zero local record, treat it as
