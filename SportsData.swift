@@ -41,6 +41,10 @@ struct GameFixture {
     let homeMoneyline: Double?
     /// Soccer 3-way draw price, when the odds source provides one.
     var drawMoneyline: Double? = nil
+    /// Home-team point spread (e.g. -1.5) from ESPN's odds block.
+    var spreadHome: Double? = nil
+    /// Full-game over/under line from ESPN's odds block.
+    var overUnder: Double? = nil
 }
 
 struct OddsQuote {
@@ -75,6 +79,43 @@ protocol MatchResultProvider {
 enum SportsDataError: Error {
     case missingAPIKey
     case invalidResponse
+}
+
+// MARK: - Derived Pick'em markets (spread / total / props)
+//
+// Each extra market is its own Match with a suffixed id so the existing
+// pick, sync, and settle pipeline needs no schema changes:
+//   "<baseID>|sprd|<homeLine>"                    options "Team -1.5" / "Team +1.5"
+//   "<baseID>|tot|<line>"                         options "Over 9.5" / "Under 9.5"
+//   "<baseID>|prop|<athleteID>|<statKey>|<line>"  options "Over 0.5" / "Under 0.5"
+// The line is snapshotted into the id + option strings at fetch time, so a
+// later line move can never regrade an existing pick. Winner "PUSH" settles
+// as result "expired" with 0 RR.
+
+func pickemFormatLine(_ v: Double) -> String {
+    v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v)
+}
+
+func pickemSignedLine(_ v: Double) -> String {
+    v >= 0 ? "+\(pickemFormatLine(v))" : "-\(pickemFormatLine(abs(v)))"
+}
+
+func isDerivedPickemMatchID(_ id: String) -> Bool { id.contains("|") }
+
+/// Two-way juiced RR quotes shared by moneylines and player props.
+func pickemTwoWayQuotes(nameA: String, oddsA: Double, nameB: String, oddsB: Double) -> [PickOption] {
+    func implied(_ o: Double) -> Double {
+        o > 0 ? 100.0 / (o + 100.0) : abs(o) / (abs(o) + 100.0)
+    }
+    let pA = implied(oddsA)
+    let pB = implied(oddsB)
+    guard pA > 0, pB > 0 else { return [] }
+    let swing = max(12, min(240, Int(((abs(oddsA) + abs(oddsB)) / 20.0).rounded())))
+    let aIsFavorite = pA >= pB
+    return [
+        PickOption(team: nameA, gainRR: aIsFavorite ? 10 : swing, lossRR: aIsFavorite ? swing : 10),
+        PickOption(team: nameB, gainRR: aIsFavorite ? swing : 10, lossRR: aIsFavorite ? 10 : swing)
+    ]
 }
 
 enum AppSecrets {
@@ -207,6 +248,45 @@ struct CompositeMatchProvider: MatchProvider {
                     }
                 )
             }
+
+        // Derived markets: one extra Match per game for the spread and the
+        // total, rendered as rows inside the game card. Flat +10/-10 both
+        // sides (near-even markets don't need juice-scaled RR).
+        let baseIDs = Set(matches.map(\.id))
+        var derived: [Match] = []
+        for fixture in fixtures {
+            guard baseIDs.contains(fixture.id),
+                  !fixture.sportKey.hasPrefix("tennis_") else { continue }
+            if let line = fixture.spreadHome, line != 0 {
+                derived.append(Match(
+                    id: "\(fixture.id)|sprd|\(pickemFormatLine(line))",
+                    league: fixture.league,
+                    awayTeam: fixture.awayTeam, homeTeam: fixture.homeTeam,
+                    startsAt: fixture.startsAt, state: fixture.state,
+                    statusDetail: fixture.statusDetail,
+                    awayScore: fixture.awayScore, homeScore: fixture.homeScore,
+                    options: [
+                        PickOption(team: "\(fixture.awayTeam) \(pickemSignedLine(-line))", gainRR: 10, lossRR: 10),
+                        PickOption(team: "\(fixture.homeTeam) \(pickemSignedLine(line))", gainRR: 10, lossRR: 10)
+                    ]
+                ))
+            }
+            if let total = fixture.overUnder, total > 0 {
+                derived.append(Match(
+                    id: "\(fixture.id)|tot|\(pickemFormatLine(total))",
+                    league: fixture.league,
+                    awayTeam: fixture.awayTeam, homeTeam: fixture.homeTeam,
+                    startsAt: fixture.startsAt, state: fixture.state,
+                    statusDetail: fixture.statusDetail,
+                    awayScore: fixture.awayScore, homeScore: fixture.homeScore,
+                    options: [
+                        PickOption(team: "Over \(pickemFormatLine(total))", gainRR: 10, lossRR: 10),
+                        PickOption(team: "Under \(pickemFormatLine(total))", gainRR: 10, lossRR: 10)
+                    ]
+                ))
+            }
+        }
+        matches.append(contentsOf: derived)
 
         // Add Odds API-only matches (games ESPN doesn't have fixtures for)
         matches.append(contentsOf: oddsResult.extraMatches)
@@ -347,6 +427,8 @@ struct ESPNTodayGameProvider: GameProvider {
                         let awayMoneyline = parseAmericanOdds(from: competition.odds?.first?.moneyline?.away?.close?.odds)
                         let homeMoneyline = parseAmericanOdds(from: competition.odds?.first?.moneyline?.home?.close?.odds)
                         let drawMoneyline = parseAmericanOdds(from: competition.odds?.first?.moneyline?.draw?.close?.odds)
+                        let spreadHome = competition.odds?.first?.spread
+                        let overUnder = competition.odds?.first?.overUnder
                         out.append(
                             GameFixture(
                                 id: "espn-\(sport.oddsSportKey)-\(event.id)",
@@ -363,7 +445,9 @@ struct ESPNTodayGameProvider: GameProvider {
                                 homeWinPct: homeCompetitor.records?.compactMap({ $0.summary }).compactMap(parseWinPercentage(from:)).first,
                                 awayMoneyline: awayMoneyline,
                                 homeMoneyline: homeMoneyline,
-                                drawMoneyline: drawMoneyline
+                                drawMoneyline: drawMoneyline,
+                                spreadHome: spreadHome,
+                                overUnder: overUnder
                             )
                         )
                     }
@@ -405,15 +489,19 @@ struct ESPNTodayGameProvider: GameProvider {
         var updated = fixtures
         var stillNeedsOdds: [(Int, GameFixture)] = []
         for (index, fixture) in fixtures.enumerated() {
-            guard fixture.awayMoneyline == nil && fixture.homeMoneyline == nil
-                  && !fixture.sportKey.hasPrefix("tennis_") else { continue }
+            let needsML = fixture.awayMoneyline == nil && fixture.homeMoneyline == nil
+            // The site scoreboard's odds block is empty for much of the day,
+            // so spread/total usually need the Core API even when moneylines
+            // came through.
+            let needsLines = fixture.spreadHome == nil || fixture.overUnder == nil
+            guard (needsML || needsLines) && !fixture.sportKey.hasPrefix("tennis_") else { continue }
 
             // Check cache first
             let parts = fixture.id.split(separator: "-")
             guard parts.count >= 3 else { continue }
             let eventID = String(parts.last!)
 
-            if let cached = CoreAPIOddsCache.shared.get(eventID) {
+            if needsML, !needsLines, let cached = CoreAPIOddsCache.shared.get(eventID) {
                 updated[index] = GameFixture(
                     id: fixture.id, sportKey: fixture.sportKey, league: fixture.league,
                     awayTeam: fixture.awayTeam, homeTeam: fixture.homeTeam,
@@ -447,7 +535,16 @@ struct ESPNTodayGameProvider: GameProvider {
         guard !requests.isEmpty else { return updated }
 
         // Fetch odds in parallel (Core API is free, no rate limit concerns)
-        let fetched: [(Int, String, Double, Double, Double?)] = await withTaskGroup(of: (Int, String, Double, Double, Double?)?.self) { group in
+        struct CoreOddsFetch {
+            let index: Int
+            let eventID: String
+            let awayML: Double?
+            let homeML: Double?
+            let drawML: Double?
+            let spreadHome: Double?
+            let overUnder: Double?
+        }
+        let fetched: [CoreOddsFetch] = await withTaskGroup(of: CoreOddsFetch?.self) { group in
             for req in requests {
                 group.addTask {
                     let urlStr = "https://sports.core.api.espn.com/v2/sports/\(req.sportPath)/leagues/\(req.leaguePath)/events/\(req.eventID)/competitions/\(req.eventID)/odds"
@@ -457,40 +554,51 @@ struct ESPNTodayGameProvider: GameProvider {
                     guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                           let items = json["items"] as? [[String: Any]],
                           let first = items.first else { return nil }
+                    func num(_ any: Any?) -> Double? {
+                        (any as? Double) ?? (any as? Int).map(Double.init)
+                    }
                     // Parse moneyline from Core API response (can be Int or Double)
-                    guard let awayTeamOdds = first["awayTeamOdds"] as? [String: Any],
-                          let homeTeamOdds = first["homeTeamOdds"] as? [String: Any] else { return nil }
-                    let awayML: Double? = (awayTeamOdds["moneyLine"] as? Double) ?? (awayTeamOdds["moneyLine"] as? Int).map(Double.init)
-                    let homeML: Double? = (homeTeamOdds["moneyLine"] as? Double) ?? (homeTeamOdds["moneyLine"] as? Int).map(Double.init)
+                    let awayML = num((first["awayTeamOdds"] as? [String: Any])?["moneyLine"])
+                    let homeML = num((first["homeTeamOdds"] as? [String: Any])?["moneyLine"])
                     // Soccer 3-way: Core API carries the draw under "drawOdds"
-                    let drawML: Double? = {
-                        guard let drawOdds = first["drawOdds"] as? [String: Any] else { return nil }
-                        return (drawOdds["moneyLine"] as? Double) ?? (drawOdds["moneyLine"] as? Int).map(Double.init)
-                    }()
-                    guard let awayOdds = awayML, let homeOdds = homeML else { return nil }
-                    return (req.index, req.eventID, awayOdds, homeOdds, drawML)
+                    let drawML = num((first["drawOdds"] as? [String: Any])?["moneyLine"])
+                    // Home-relative point spread + full-game total (verified:
+                    // top-level "spread" matches homeTeamOdds.pointSpread sign).
+                    let spreadHome = num(first["spread"])
+                    let overUnder = num(first["overUnder"])
+                    if awayML == nil && homeML == nil && spreadHome == nil && overUnder == nil { return nil }
+                    return CoreOddsFetch(
+                        index: req.index, eventID: req.eventID,
+                        awayML: awayML, homeML: homeML, drawML: drawML,
+                        spreadHome: spreadHome, overUnder: overUnder
+                    )
                 }
             }
-            var results: [(Int, String, Double, Double, Double?)] = []
+            var results: [CoreOddsFetch] = []
             for await result in group {
                 if let r = result { results.append(r) }
             }
             return results
         }
 
-        for (index, eventID, awayML, homeML, drawML) in fetched {
+        for fetch in fetched {
             // Cache for future refreshes
-            CoreAPIOddsCache.shared.set(eventID, away: awayML, home: homeML)
+            if let awayML = fetch.awayML, let homeML = fetch.homeML {
+                CoreAPIOddsCache.shared.set(fetch.eventID, away: awayML, home: homeML)
+            }
 
-            let f = updated[index]
-            updated[index] = GameFixture(
+            let f = updated[fetch.index]
+            updated[fetch.index] = GameFixture(
                 id: f.id, sportKey: f.sportKey, league: f.league,
                 awayTeam: f.awayTeam, homeTeam: f.homeTeam,
                 startsAt: f.startsAt, state: f.state, statusDetail: f.statusDetail,
                 awayScore: f.awayScore, homeScore: f.homeScore,
                 awayWinPct: f.awayWinPct, homeWinPct: f.homeWinPct,
-                awayMoneyline: awayML, homeMoneyline: homeML,
-                drawMoneyline: drawML
+                awayMoneyline: f.awayMoneyline ?? fetch.awayML,
+                homeMoneyline: f.homeMoneyline ?? fetch.homeML,
+                drawMoneyline: f.drawMoneyline ?? fetch.drawML,
+                spreadHome: f.spreadHome ?? fetch.spreadHome,
+                overUnder: f.overUnder ?? fetch.overUnder
             )
         }
         return updated
@@ -512,6 +620,233 @@ struct ESPNTodayGameProvider: GameProvider {
         raw = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if raw.isEmpty { return nil }
         return Double(raw)
+    }
+}
+
+// MARK: - Player prop board (ESPN core API, DraftKings lines — free)
+
+/// Fetches the DraftKings player-prop board for a game from ESPN's core
+/// API and converts headline markets into derived pick'em Matches.
+/// Pairs arrive as [over, under] in feed order; RR quotes are juice-scaled
+/// with the same math as moneylines.
+struct ESPNPropBoardProvider {
+    struct PropStatType {
+        let espnName: String
+        let key: String
+        let shortLabel: String
+    }
+
+    static func statTypes(forSportKey sportKey: String) -> [PropStatType] {
+        if sportKey == "baseball_mlb" {
+            return [
+                PropStatType(espnName: "Total Hits", key: "h", shortLabel: "Hits"),
+                PropStatType(espnName: "Total Hits + Runs + RBIs", key: "hrr", shortLabel: "H+R+RBI"),
+                PropStatType(espnName: "Total Strikeouts", key: "k", shortLabel: "Ks"),
+                PropStatType(espnName: "Total Runs Scored", key: "r", shortLabel: "Runs")
+            ]
+        }
+        if sportKey.hasPrefix("basketball_") {
+            return [
+                PropStatType(espnName: "Total Points", key: "pts", shortLabel: "Pts"),
+                PropStatType(espnName: "Total Rebounds", key: "reb", shortLabel: "Reb"),
+                PropStatType(espnName: "Total Assists", key: "ast", shortLabel: "Ast"),
+                PropStatType(espnName: "Total Points + Rebounds + Assists", key: "pra", shortLabel: "PRA")
+            ]
+        }
+        return []
+    }
+
+    static func supportsProps(matchID: String) -> Bool {
+        guard let key = sportKeyFromMatchID(matchID) else { return false }
+        return !statTypes(forSportKey: key).isEmpty
+    }
+
+    static func sportKeyFromMatchID(_ id: String) -> String? {
+        guard id.hasPrefix("espn-"), !id.contains("|") else { return nil }
+        let core = id.dropFirst(5)
+        guard let lastDash = core.lastIndex(of: "-") else { return nil }
+        return String(core[..<lastDash])
+    }
+
+    private static let nameCacheLock = NSLock()
+    nonisolated(unsafe) private static var athleteNameCache: [String: String] = [:]
+
+    func fetchPropMatches(for match: Match) async -> [Match] {
+        guard let sportKey = Self.sportKeyFromMatchID(match.id),
+              let sport = ESPSportDefinition.majorSports.first(where: { $0.oddsSportKey == sportKey }) else { return [] }
+        let types = Self.statTypes(forSportKey: sportKey)
+        guard !types.isEmpty else { return [] }
+        let eventID = String(match.id.split(separator: "-").last ?? "")
+        guard !eventID.isEmpty else { return [] }
+
+        // 1. The odds item carries a $ref to its propBets collection.
+        let oddsURL = "https://sports.core.api.espn.com/v2/sports/\(sport.sportPath)/leagues/\(sport.leaguePath)/events/\(eventID)/competitions/\(eventID)/odds"
+        guard let url = URL(string: oddsURL),
+              let (data, _) = try? await URLSession.shared.data(from: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = json["items"] as? [[String: Any]] else { return [] }
+        guard let propRef = items.compactMap({ ($0["propBets"] as? [String: Any])?["$ref"] as? String }).first,
+              var refComponents = URLComponents(string: propRef) else { return [] }
+        refComponents.scheme = "https"
+        var refItems = refComponents.queryItems ?? []
+        refItems.append(URLQueryItem(name: "limit", value: "1000"))
+        refComponents.queryItems = refItems
+        guard let propURL = refComponents.url,
+              let (propData, _) = try? await URLSession.shared.data(from: propURL),
+              let propJSON = try? JSONSerialization.jsonObject(with: propData) as? [String: Any],
+              let propItems = propJSON["items"] as? [[String: Any]] else { return [] }
+
+        // 2. Group by (athlete, market); feed order within a pair is [over, under].
+        struct PropPair {
+            let athleteID: String
+            let type: PropStatType
+            var line: Double?
+            var overOdds: Double?
+            var underOdds: Double?
+        }
+        var pairs: [String: PropPair] = [:]
+        var order: [String] = []
+        let typeByName = Dictionary(uniqueKeysWithValues: types.map { ($0.espnName, $0) })
+        for item in propItems {
+            guard let typeName = (item["type"] as? [String: Any])?["name"] as? String,
+                  let type = typeByName[typeName],
+                  let athleteRef = (item["athlete"] as? [String: Any])?["$ref"] as? String else { continue }
+            let athleteID = athleteRef.split(separator: "?").first
+                .flatMap { $0.split(separator: "/").last }.map(String.init) ?? ""
+            guard !athleteID.isEmpty else { continue }
+            let odds = item["odds"] as? [String: Any]
+            let american = ((odds?["american"] as? [String: Any])?["value"] as? String)
+                .flatMap { Double($0.replacingOccurrences(of: "+", with: "")) }
+            let line = ((odds?["total"] as? [String: Any])?["value"] as? String).flatMap(Double.init)
+                ?? ((item["current"] as? [String: Any])?["target"] as? [String: Any])?["value"] as? Double
+            let key = "\(athleteID)|\(type.key)"
+            if pairs[key] == nil {
+                pairs[key] = PropPair(athleteID: athleteID, type: type, line: line, overOdds: american, underOdds: nil)
+                order.append(key)
+            } else if pairs[key]?.underOdds == nil {
+                pairs[key]?.underOdds = american
+                if pairs[key]?.line == nil { pairs[key]?.line = line }
+            }
+        }
+
+        let complete = order.compactMap { pairs[$0] }.filter {
+            $0.line != nil && $0.overOdds != nil && $0.underOdds != nil
+        }
+        guard !complete.isEmpty else { return [] }
+
+        // 3. Resolve athlete display names (cached).
+        let uniqueIDs = Array(Set(complete.map(\.athleteID)))
+        var names: [String: String] = [:]
+        Self.nameCacheLock.lock()
+        for id in uniqueIDs where Self.athleteNameCache[id] != nil {
+            names[id] = Self.athleteNameCache[id]
+        }
+        Self.nameCacheLock.unlock()
+        let missing = uniqueIDs.filter { names[$0] == nil }
+        let fetchedNames: [(String, String)] = await withTaskGroup(of: (String, String)?.self) { group in
+            for id in missing {
+                group.addTask {
+                    let urlStr = "https://sports.core.api.espn.com/v2/sports/\(sport.sportPath)/leagues/\(sport.leaguePath)/athletes/\(id)"
+                    guard let url = URL(string: urlStr),
+                          let (data, _) = try? await URLSession.shared.data(from: url),
+                          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let name = (json["displayName"] as? String) ?? (json["fullName"] as? String) else { return nil }
+                    return (id, name)
+                }
+            }
+            var out: [(String, String)] = []
+            for await r in group { if let r { out.append(r) } }
+            return out
+        }
+        Self.nameCacheLock.lock()
+        for (id, name) in fetchedNames {
+            names[id] = name
+            Self.athleteNameCache[id] = name
+        }
+        Self.nameCacheLock.unlock()
+
+        // 4. Build derived Matches — stars first (shortest over odds), capped.
+        let sorted = complete.sorted { (a, b) in
+            (a.overOdds ?? 0) < (b.overOdds ?? 0)
+        }.prefix(14)
+        var out: [Match] = []
+        for pair in sorted {
+            guard let line = pair.line, let over = pair.overOdds, let under = pair.underOdds,
+                  let name = names[pair.athleteID] else { continue }
+            let fmt = pickemFormatLine(line)
+            let options = pickemTwoWayQuotes(
+                nameA: "Over \(fmt)", oddsA: over,
+                nameB: "Under \(fmt)", oddsB: under
+            )
+            guard options.count == 2 else { continue }
+            out.append(Match(
+                id: "\(match.id)|prop|\(pair.athleteID)|\(pair.type.key)|\(fmt)",
+                league: match.league,
+                awayTeam: "\(name) — \(pair.type.shortLabel) \(fmt)",
+                homeTeam: "",
+                startsAt: match.startsAt, state: match.state,
+                statusDetail: match.statusDetail,
+                awayScore: nil, homeScore: nil,
+                options: options
+            ))
+        }
+        return out
+    }
+}
+
+/// Pulls a single athlete stat out of an ESPN event summary box score.
+/// statKey: "h"/"r"/"hrr" (MLB batting), "k" (MLB pitching),
+/// "pts"/"reb"/"ast"/"pra" (basketball). Returns nil when the athlete
+/// isn't in the box (DNP) — callers treat that as a void/PUSH.
+func pickemPropStat(summary: [String: Any], athleteID: String, statKey: String) -> Double? {
+    guard let box = summary["boxscore"] as? [String: Any],
+          let teams = box["players"] as? [[String: Any]] else { return nil }
+
+    func statLine(groupType: String?, labelsWanted: [String]) -> [String: Double]? {
+        for team in teams {
+            for group in (team["statistics"] as? [[String: Any]]) ?? [] {
+                if let groupType {
+                    let gtype = (group["type"] as? String) ?? (group["name"] as? String) ?? ""
+                    guard gtype.lowercased() == groupType else { continue }
+                }
+                let labels = (group["labels"] as? [String]) ?? (group["names"] as? [String]) ?? []
+                for entry in (group["athletes"] as? [[String: Any]]) ?? [] {
+                    guard let ath = entry["athlete"] as? [String: Any],
+                          (ath["id"] as? String) == athleteID,
+                          let stats = entry["stats"] as? [String], !stats.isEmpty else { continue }
+                    var line: [String: Double] = [:]
+                    for (label, raw) in zip(labels, stats) {
+                        line[label] = Double(raw)
+                    }
+                    guard labelsWanted.allSatisfy({ line[$0] != nil }) else { continue }
+                    return line
+                }
+            }
+        }
+        return nil
+    }
+
+    switch statKey {
+    case "h":
+        return statLine(groupType: "batting", labelsWanted: ["H"])?["H"]
+    case "r":
+        return statLine(groupType: "batting", labelsWanted: ["R"])?["R"]
+    case "hrr":
+        guard let line = statLine(groupType: "batting", labelsWanted: ["H", "R", "RBI"]) else { return nil }
+        return (line["H"] ?? 0) + (line["R"] ?? 0) + (line["RBI"] ?? 0)
+    case "k":
+        return statLine(groupType: "pitching", labelsWanted: ["K"])?["K"]
+    case "pts":
+        return statLine(groupType: nil, labelsWanted: ["PTS"])?["PTS"]
+    case "reb":
+        return statLine(groupType: nil, labelsWanted: ["REB"])?["REB"]
+    case "ast":
+        return statLine(groupType: nil, labelsWanted: ["AST"])?["AST"]
+    case "pra":
+        guard let line = statLine(groupType: nil, labelsWanted: ["PTS", "REB", "AST"]) else { return nil }
+        return (line["PTS"] ?? 0) + (line["REB"] ?? 0) + (line["AST"] ?? 0)
+    default:
+        return nil
     }
 }
 
@@ -565,6 +900,48 @@ struct ESPNMatchResultProvider: MatchResultProvider {
                             guard let competition = event.competitions.first else { continue }
                             guard competition.status.type.state == "post" else { continue }
                             let matchID = "espn-\(sport.oddsSportKey)-\(event.id)"
+
+                            // Derived markets (spread/total) grade off the
+                            // final score with the line parsed from the id;
+                            // props are collected and graded from box scores
+                            // after the scoreboard pass.
+                            let derivedIDs = matchIDs.filter { $0.hasPrefix(matchID + "|") }
+                            if !derivedIDs.isEmpty {
+                                let away = competition.competitors.first(where: { $0.homeAway == "away" })
+                                let home = competition.competitors.first(where: { $0.homeAway == "home" })
+                                if let awayScore = Int(away?.score ?? ""),
+                                   let homeScore = Int(home?.score ?? "") {
+                                    for derivedID in derivedIDs {
+                                        let parts = derivedID.components(separatedBy: "|")
+                                        guard parts.count >= 3 else { continue }
+                                        switch parts[1] {
+                                        case "sprd":
+                                            guard let homeLine = Double(parts[2]) else { continue }
+                                            let adjusted = Double(homeScore - awayScore) + homeLine
+                                            if adjusted > 0 {
+                                                results[derivedID] = "\(home?.team.displayName ?? "") \(pickemSignedLine(homeLine))"
+                                            } else if adjusted < 0 {
+                                                results[derivedID] = "\(away?.team.displayName ?? "") \(pickemSignedLine(-homeLine))"
+                                            } else {
+                                                results[derivedID] = "PUSH"
+                                            }
+                                        case "tot":
+                                            guard let line = Double(parts[2]) else { continue }
+                                            let total = Double(awayScore + homeScore)
+                                            if total > line {
+                                                results[derivedID] = "Over \(pickemFormatLine(line))"
+                                            } else if total < line {
+                                                results[derivedID] = "Under \(pickemFormatLine(line))"
+                                            } else {
+                                                results[derivedID] = "PUSH"
+                                            }
+                                        default:
+                                            break   // props handled below
+                                        }
+                                    }
+                                }
+                            }
+
                             guard matchIDs.contains(matchID) else { continue }
 
                             // For soccer, ALWAYS use match score — never the winner flag.
@@ -590,6 +967,47 @@ struct ESPNMatchResultProvider: MatchResultProvider {
                                 continue
                             }
                             results[matchID] = awayScore > homeScore ? away?.team.displayName : home?.team.displayName
+                        }
+
+                        // Player props: grade from the final box score. Only
+                        // events this scoreboard saw as final are attempted.
+                        let finalEventIDs = Set(scoreboard.events.compactMap { ev -> String? in
+                            ev.competitions.first?.status.type.state == "post" ? ev.id : nil
+                        })
+                        let propIDs = matchIDs.filter { mid in
+                            guard mid.contains("|prop|"),
+                                  mid.hasPrefix("espn-\(sport.oddsSportKey)-") else { return false }
+                            let base = mid.components(separatedBy: "|").first ?? ""
+                            let eventID = base.components(separatedBy: "-").last ?? ""
+                            return finalEventIDs.contains(eventID)
+                        }
+                        if !propIDs.isEmpty {
+                            let byEvent = Dictionary(grouping: propIDs) { mid in
+                                (mid.components(separatedBy: "|").first ?? "").components(separatedBy: "-").last ?? ""
+                            }
+                            for (eventID, ids) in byEvent {
+                                guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/\(sport.sportPath)/\(sport.leaguePath)/summary?event=\(eventID)"),
+                                      let (data, response) = try? await timedSession.data(from: url),
+                                      let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                                for mid in ids {
+                                    let parts = mid.components(separatedBy: "|")
+                                    guard parts.count >= 5, let line = Double(parts[4]) else { continue }
+                                    let athleteID = parts[2]
+                                    let statKey = parts[3]
+                                    guard let value = pickemPropStat(summary: json, athleteID: athleteID, statKey: statKey) else {
+                                        results[mid] = "PUSH"   // DNP / not in box — void
+                                        continue
+                                    }
+                                    if value > line {
+                                        results[mid] = "Over \(pickemFormatLine(line))"
+                                    } else if value < line {
+                                        results[mid] = "Under \(pickemFormatLine(line))"
+                                    } else {
+                                        results[mid] = "PUSH"
+                                    }
+                                }
+                            }
                         }
                         return results
                     }
@@ -1647,6 +2065,8 @@ private struct ESPNCompetitorTeam: Codable {
 
 private struct ESPNCompetitionOdds: Codable {
     let moneyline: ESPNMoneyline?
+    let spread: Double?
+    let overUnder: Double?
 }
 
 private struct ESPNMoneyline: Codable {

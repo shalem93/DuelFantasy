@@ -330,6 +330,10 @@ struct ContentView: View {
     @State private var pickDetails: [String: PickDetail] = [:]
     @State private var knownMatchesByID: [String: Match] = [:]
     @State private var matches: [Match] = []
+    // Player props: lazily fetched per game when the card's expander opens.
+    @State private var propMatchesByBase: [String: [Match]] = [:]
+    @State private var expandedPropMatchIDs: Set<String> = []
+    @State private var loadingPropsFor: Set<String> = []
     @State private var isLoadingMatches: Bool = false
     @State private var matchesError: String?
     @State private var selectedLeagueFilter: String? = nil
@@ -2820,22 +2824,31 @@ struct ContentView: View {
         // user didn't pick — they just clutter the feed with games whose
         // outcome doesn't affect the user's RR. Pre-game matches always
         // pass through (still pickable).
+        let hasAnyPick: (Match) -> Bool = { match in
+            if picksByMatch[match.id] != nil { return true }
+            // Derived markets (spread/total/props) count too — a live game
+            // with only a total pick must stay visible.
+            return picksByMatch.keys.contains { $0.hasPrefix(match.id + "|") }
+        }
         let pickedOrPregame: (Match) -> Bool = { match in
             if match.isLive || match.isFinal {
-                return picksByMatch[match.id] != nil
+                return hasAnyPick(match)
             }
             return true
         }
+        // Derived matches never render as standalone cards — they're rows
+        // inside their base game's card.
+        let baseMatches = matches.filter { !isDerivedPickemMatchID($0.id) }
         guard let filter = selectedLeagueFilter else {
-            return matches.filter(pickedOrPregame)
+            return baseMatches.filter(pickedOrPregame)
         }
         if filter == "Live" {
-            return matches.filter { $0.isLive && picksByMatch[$0.id] != nil }
+            return baseMatches.filter { $0.isLive && hasAnyPick($0) }
         }
         if filter == "Final" {
-            return matches.filter { $0.isFinal && picksByMatch[$0.id] != nil }
+            return baseMatches.filter { $0.isFinal && hasAnyPick($0) }
         }
-        return matches.filter { $0.league == filter && pickedOrPregame($0) }
+        return baseMatches.filter { $0.league == filter && pickedOrPregame($0) }
     }
 
     private var matchesSection: some View {
@@ -2941,6 +2954,160 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
+    /// Shared pick tap handler (main card buttons + derived-market rows).
+    private func togglePick(match: Match, option: PickOption) {
+        Haptics.medium()
+        let removing = picksByMatch[match.id] == option.team
+        if removing {
+            picksByMatch[match.id] = nil
+            pickDetails[match.id] = nil
+        } else {
+            picksByMatch[match.id] = option.team
+            pickDetails[match.id] = PickDetail(
+                matchName: matchDisplayName(for: match),
+                team: option.team,
+                gainRR: option.gainRR,
+                lossRR: option.lossRR,
+                startsAt: match.startsAt
+            )
+        }
+        persistPickDetails()
+        // Sync to Supabase with retry
+        if let uid = auth.userID, let token = auth.accessToken {
+            Task {
+                for attempt in 1...3 {
+                    do {
+                        if removing {
+                            try await SupabaseService.shared.deletePick(userID: uid, matchID: match.id, accessToken: token)
+                        } else {
+                            try await SupabaseService.shared.upsertPick(
+                                userID: uid, matchID: match.id,
+                                pickedTeam: option.team,
+                                matchName: matchDisplayName(for: match),
+                                gainRR: option.gainRR, lossRR: option.lossRR,
+                                accessToken: token
+                            )
+                        }
+                        break // success
+                    } catch {
+                        print("[Pick'em] Sync attempt \(attempt) failed: \(error.localizedDescription)")
+                        if attempt < 3 {
+                            try? await Task.sleep(for: .seconds(Double(attempt) * 2))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func compactPickButton(match: Match, option: PickOption, width: CGFloat?) -> some View {
+        let isSelected = picksByMatch[match.id] == option.team
+        let isResolved = resolvedMatches.contains(match.id)
+        return Button {
+            guard !isResolved, !match.isLocked else { return }
+            togglePick(match: match, option: option)
+        } label: {
+            VStack(spacing: 1) {
+                Text(option.team)
+                    .font(.system(size: 10, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Text("+\(option.gainRR)/-\(option.lossRR)")
+                    .font(.system(size: 8).monospacedDigit())
+                    .foregroundStyle(isSelected ? .white.opacity(0.8) : .secondary)
+            }
+            .frame(maxWidth: width == nil ? .infinity : nil)
+            .frame(width: width)
+            .padding(.vertical, 6)
+            .padding(.horizontal, 6)
+            .background(isSelected ? brandPurple : Color(.systemGray6))
+            .foregroundStyle(isSelected ? .white : .primary)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .disabled(match.isLocked || isResolved)
+    }
+
+    private func compactMarketRow(_ market: Match, label: String) -> some View {
+        HStack(spacing: 6) {
+            Text(label)
+                .font(.system(size: 8, weight: .heavy))
+                .foregroundStyle(.secondary)
+                .frame(width: 42, alignment: .leading)
+            ForEach(market.options) { option in
+                compactPickButton(match: market, option: option, width: nil)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func propsDisclosure(for match: Match) -> some View {
+        if !match.isLocked, ESPNPropBoardProvider.supportsProps(matchID: match.id) {
+            let expanded = expandedPropMatchIDs.contains(match.id)
+            Button {
+                Haptics.light()
+                if expanded {
+                    expandedPropMatchIDs.remove(match.id)
+                } else {
+                    expandedPropMatchIDs.insert(match.id)
+                    if propMatchesByBase[match.id] == nil, !loadingPropsFor.contains(match.id) {
+                        loadingPropsFor.insert(match.id)
+                        Task {
+                            let props = await ESPNPropBoardProvider().fetchPropMatches(for: match)
+                            propMatchesByBase[match.id] = props
+                            for prop in props { knownMatchesByID[prop.id] = prop }
+                            loadingPropsFor.remove(match.id)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "person.crop.circle.badge.plus")
+                        .font(.caption2)
+                    Text("Player Props")
+                        .font(.caption.weight(.semibold))
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 8, weight: .bold))
+                    Spacer()
+                }
+                .foregroundStyle(brandPurple)
+            }
+            .buttonStyle(.plain)
+
+            if expanded {
+                if let props = propMatchesByBase[match.id] {
+                    if props.isEmpty {
+                        Text("No props posted for this game yet")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        VStack(spacing: 6) {
+                            ForEach(props) { prop in
+                                HStack(spacing: 6) {
+                                    Text(prop.awayTeam)
+                                        .font(.caption2.weight(.medium))
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.8)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    ForEach(prop.options) { option in
+                                        compactPickButton(match: prop, option: option, width: 86)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    HStack {
+                        Spacer()
+                        ProgressView()
+                        Spacer()
+                    }
+                    .padding(.vertical, 6)
+                }
+            }
+        }
+    }
+
     private func matchCard(_ match: Match) -> some View {
         VStack(spacing: 12) {
             // Header
@@ -3032,48 +3199,7 @@ struct ContentView: View {
                     let isResolved = resolvedMatches.contains(match.id)
                     Button {
                         guard !isResolved, !match.isLocked else { return }
-                        Haptics.medium()
-                        let removing = picksByMatch[match.id] == option.team
-                        if removing {
-                            picksByMatch[match.id] = nil
-                            pickDetails[match.id] = nil
-                        } else {
-                            picksByMatch[match.id] = option.team
-                            pickDetails[match.id] = PickDetail(
-                                matchName: matchDisplayName(for: match),
-                                team: option.team,
-                                gainRR: option.gainRR,
-                                lossRR: option.lossRR,
-                                startsAt: match.startsAt
-                            )
-                        }
-                        persistPickDetails()
-                        // Sync to Supabase with retry
-                        if let uid = auth.userID, let token = auth.accessToken {
-                            Task {
-                                for attempt in 1...3 {
-                                    do {
-                                        if removing {
-                                            try await SupabaseService.shared.deletePick(userID: uid, matchID: match.id, accessToken: token)
-                                        } else {
-                                            try await SupabaseService.shared.upsertPick(
-                                                userID: uid, matchID: match.id,
-                                                pickedTeam: option.team,
-                                                matchName: matchDisplayName(for: match),
-                                                gainRR: option.gainRR, lossRR: option.lossRR,
-                                                accessToken: token
-                                            )
-                                        }
-                                        break // success
-                                    } catch {
-                                        print("[Pick'em] Sync attempt \(attempt) failed: \(error.localizedDescription)")
-                                        if attempt < 3 {
-                                            try? await Task.sleep(for: .seconds(Double(attempt) * 2))
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        togglePick(match: match, option: option)
                     } label: {
                         VStack(spacing: 3) {
                             Text(option.team)
@@ -3094,6 +3220,13 @@ struct ContentView: View {
                     .disabled(match.isLocked || isResolved)
                 }
             }
+
+            // Derived markets: spread & total rows, then player props
+            let extraMarkets = matches.filter { $0.id.hasPrefix(match.id + "|") && !$0.id.contains("|prop|") }
+            ForEach(extraMarkets) { market in
+                compactMarketRow(market, label: market.id.contains("|sprd|") ? "SPREAD" : "TOTAL")
+            }
+            propsDisclosure(for: match)
 
             // Status text
             if let selected = picksByMatch[match.id] {
@@ -3232,6 +3365,7 @@ struct ContentView: View {
         // Exact match first; fall back to name-word-set match for tennis (odds- IDs)
         // where ESPN might use a different name order than the Odds API
         // (e.g. "Zhizhen Zhang" on Odds API vs "Zhang Zhizhen" on ESPN).
+        let isPush = winner == "PUSH"
         var didWin = selectedTeam == winner
         if !didWin && matchID.hasPrefix("odds-") {
             let selectedWords = Set(selectedTeam.lowercased().split(separator: " ").map(String.init))
@@ -3241,14 +3375,16 @@ struct ContentView: View {
                 didWin = true
             }
         }
-        let delta = didWin ? gainRR : -lossRR
+        let delta = isPush ? 0 : (didWin ? gainRR : -lossRR)
 
         rrScore += delta
         serverPickemRRDelta += delta
-        if didWin {
-            wins += 1
-        } else {
-            losses += 1
+        if !isPush {
+            if didWin {
+                wins += 1
+            } else {
+                losses += 1
+            }
         }
         resolvedMatches.insert(matchID)
 
@@ -3279,7 +3415,7 @@ struct ContentView: View {
                 id: UUID(),
                 matchName: matchName,
                 pickedTeam: selectedTeam,
-                winnerTeam: winner,
+                winnerTeam: isPush ? "Push" : winner,
                 rrDelta: delta,
                 loggedAt: matchDate
             ),
@@ -3296,7 +3432,7 @@ struct ContentView: View {
             let currentRR = displayedRR
             let currentWins = wins
             let currentLosses = losses
-            let result = didWin ? "win" : "loss"
+            let result = isPush ? "expired" : (didWin ? "win" : "loss")
             Task {
                 for attempt in 1...3 {
                     do {
@@ -3447,6 +3583,7 @@ struct ContentView: View {
         for (matchID, winner) in winners {
             guard let picks = picksByMatchID[matchID] else { continue }
             for pick in picks {
+                let isPush = winner == "PUSH"
                 var didWin = pick.pickedTeam == winner
                 if !didWin && matchID.hasPrefix("odds-") {
                     let pickedWords = Set(pick.pickedTeam.lowercased().split(separator: " ").map(String.init))
@@ -3456,12 +3593,13 @@ struct ContentView: View {
                         didWin = true
                     }
                 }
-                let delta = didWin ? pick.gainRr : -pick.lossRr
+                let delta = isPush ? 0 : (didWin ? pick.gainRr : -pick.lossRr)
                 jobs.append(SettlementJob(
                     userID: pick.userId, matchID: matchID,
-                    result: didWin ? "win" : "loss", rrDelta: delta, didWin: didWin,
+                    result: isPush ? "expired" : (didWin ? "win" : "loss"),
+                    rrDelta: delta, didWin: didWin,
                     matchName: pick.matchName, pickedTeam: pick.pickedTeam,
-                    winner: winner, createdAt: pick.createdAt
+                    winner: isPush ? "Push" : winner, createdAt: pick.createdAt
                 ))
             }
         }
@@ -3497,16 +3635,19 @@ struct ContentView: View {
         var userDeltas: [String: (rrDelta: Int, wins: Int, losses: Int)] = [:]
         for r in settledResults where r.wasSettled {
             let job = r.job
+            let isPush = job.result == "expired"
             var current = userDeltas[job.userID] ?? (0, 0, 0)
             current.rrDelta += job.rrDelta
-            current.wins += job.didWin ? 1 : 0
-            current.losses += job.didWin ? 0 : 1
+            current.wins += (!isPush && job.didWin) ? 1 : 0
+            current.losses += (!isPush && !job.didWin) ? 1 : 0
             userDeltas[job.userID] = current
 
             if job.userID == auth.userID, !resolvedMatches.contains(job.matchID) {
                 rrScore += job.rrDelta
                 serverPickemRRDelta += job.rrDelta
-                if job.didWin { wins += 1 } else { losses += 1 }
+                if !isPush {
+                    if job.didWin { wins += 1 } else { losses += 1 }
+                }
                 resolvedMatches.insert(job.matchID)
 
                 let matchDate = knownMatchesByID[job.matchID]?.startsAt
@@ -4727,6 +4868,15 @@ private struct PickDetail: Codable {
 }
 
 private func matchDisplayName(for match: Match) -> String {
+    if match.id.contains("|prop|") {
+        return match.awayTeam   // "Player — Stat 0.5"
+    }
+    if match.id.contains("|sprd|") {
+        return "\(match.awayTeam) @ \(match.homeTeam) — Spread"
+    }
+    if match.id.contains("|tot|") {
+        return "\(match.awayTeam) @ \(match.homeTeam) — Total"
+    }
     let separator = (match.league == "ATP" || match.league == "WTA") ? "vs" : "@"
     return "\(match.awayTeam) \(separator) \(match.homeTeam)"
 }
