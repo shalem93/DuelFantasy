@@ -125,7 +125,7 @@ func pickemOneSidedQuotes(yesOdds: Double, yesName: String, noName: String) -> [
         fairOdds = pickemAmericanOdds(fromProb: pFair)
     }
     let pFair = pickemImpliedProb(fairOdds)
-    let swing = max(12, min(240, Int((abs(fairOdds) / 10.0).rounded())))
+    let swing = max(10, min(240, Int((abs(fairOdds) / 10.0).rounded())))
     if pFair < 0.5 {
         return [PickOption(team: yesName, gainRR: swing, lossRR: 10),
                 PickOption(team: noName, gainRR: 10, lossRR: swing)]
@@ -159,7 +159,10 @@ func pickemTwoWayQuotes(nameA: String, oddsA: Double, nameB: String, oddsB: Doub
     guard fairA > 0.005, fairB > 0.005 else { return [] }
     let fairOddsA = pickemAmericanOdds(fromProb: fairA)
     let fairOddsB = pickemAmericanOdds(fromProb: fairB)
-    let swing = max(12, min(240, Int(((abs(fairOddsA) + abs(fairOddsB)) / 20.0).rounded())))
+    // Floor of 10, not 12: an even market (fair ±100) must quote a flat
+    // +10/-10 on both sides — a 12 floor manufactured a phantom favorite
+    // on every spread/total.
+    let swing = max(10, min(240, Int(((abs(fairOddsA) + abs(fairOddsB)) / 20.0).rounded())))
     let aIsFavorite = fairA >= fairB
     return [
         PickOption(team: nameA, gainRR: aIsFavorite ? 10 : swing, lossRR: aIsFavorite ? swing : 10),
