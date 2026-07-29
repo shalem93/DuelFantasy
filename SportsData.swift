@@ -108,13 +108,20 @@ func pickemSignedLine(_ v: Double) -> String {
 func isDerivedPickemMatchID(_ id: String) -> Bool { id.contains("|") }
 
 /// RR quote pair for a one-sided milestone prop (e.g. "to hit a HR" at
-/// +760). The book only posts the Yes price, which carries its margin —
-/// devig by assuming a standard overround so the mirrored No side isn't
-/// systematically +EV.
+/// +300). Books shade longshots hard (favorite-longshot bias): a +300
+/// Yes typically pairs with a -500/-600 No, so the fair price sits near
+/// the odds-space midpoint of +300 and +500/+600 — about 1.4x the
+/// posted plus odds, NOT a mere ~6% trim. Near-even one-sided prices
+/// fall back to a mild proportional devig.
 func pickemYesNoQuotes(yesOdds: Double) -> [PickOption] {
-    let overround = 1.06
-    let pFair = max(0.01, min(0.99, pickemImpliedProb(yesOdds) / overround))
-    let fairOdds = pickemAmericanOdds(fromProb: pFair)
+    let fairOdds: Double
+    if yesOdds >= 100 {
+        fairOdds = yesOdds * 1.4
+    } else {
+        let pFair = max(0.01, min(0.99, pickemImpliedProb(yesOdds) / 1.06))
+        fairOdds = pickemAmericanOdds(fromProb: pFair)
+    }
+    let pFair = pickemImpliedProb(fairOdds)
     let swing = max(12, min(240, Int((abs(fairOdds) / 10.0).rounded())))
     if pFair < 0.5 {
         return [PickOption(team: "Yes", gainRR: swing, lossRR: 10),
