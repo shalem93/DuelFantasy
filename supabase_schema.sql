@@ -1498,3 +1498,45 @@ create policy "frl_insert_own" on public.fantasy_rr_ledger
   for insert to authenticated with check (auth.uid() = user_id);
 
 select pg_notify('pgrst', 'reload schema');
+
+-- ============================================================
+-- NFL Survivor (Jul 2026): one global pool per RR entry-fee tier
+-- (pool ids are client-minted: survivor-nfl-2026-{10,20,50,100,250}).
+-- Entry fees / payouts flow through fantasy_rr_ledger with kinds
+-- 'survivor_entry' / 'survivor_payout' (idempotent via the unique key).
+-- ============================================================
+
+create table if not exists survivor_entries (
+  id uuid primary key default gen_random_uuid(),
+  pool_id text not null,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  entry_name text not null default '',
+  status text not null default 'alive',
+  eliminated_week int,
+  created_at timestamptz not null default now(),
+  unique (pool_id, user_id)
+);
+
+alter table survivor_entries enable row level security;
+create policy sve_select_all on survivor_entries for select to authenticated using (true);
+create policy sve_insert_own on survivor_entries for insert to authenticated with check (auth.uid() = user_id);
+create policy sve_update_own on survivor_entries for update to authenticated using (auth.uid() = user_id);
+
+create table if not exists survivor_picks (
+  id uuid primary key default gen_random_uuid(),
+  pool_id text not null,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  week int not null,
+  team_abbr text not null,
+  team_name text not null default '',
+  result text not null default 'pending',
+  created_at timestamptz not null default now(),
+  unique (pool_id, user_id, week)
+);
+
+alter table survivor_picks enable row level security;
+create policy svp_select_all on survivor_picks for select to authenticated using (true);
+create policy svp_insert_own on survivor_picks for insert to authenticated with check (auth.uid() = user_id);
+create policy svp_update_own on survivor_picks for update to authenticated using (auth.uid() = user_id);
+
+create index if not exists idx_survivor_picks_pool on survivor_picks (pool_id, week);

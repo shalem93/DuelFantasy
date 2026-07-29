@@ -65,6 +65,7 @@ struct TennisBracketPastResultDestination: View {
 
 struct FantasyHubView: View {
     @Bindable var bestBallViewModel: BestBallViewModel
+    @Bindable var survivorViewModel: SurvivorViewModel
     @Bindable var playoffTiersViewModel: PlayoffTiersViewModel
     @Bindable var tennisBracketViewModel: TennisBracketViewModel
     @Bindable var golfTiersViewModel: GolfTiersViewModel
@@ -759,14 +760,29 @@ struct FantasyHubView: View {
     // MARK: - Coming Soon
 
     private var comingSoonSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("COMING SOON")
-                .font(.caption.weight(.bold))
-                .foregroundStyle(.secondary)
-                .padding(.leading, 4)
-
-            comingSoonCard(title: "NFL Survivor Pool", icon: "football.fill", sport: "NFL")
+        NavigationLink {
+            SurvivorLobbyView(viewModel: survivorViewModel)
+        } label: {
+            gameTypeCard(
+                title: "NFL Survivor",
+                subtitle: "Pick one team to win each week — lose and you're out. Winner takes the pot.",
+                icon: "football.fill",
+                gradient: [Color(red: 0.08, green: 0.15, blue: 0.30), Color(red: 0.15, green: 0.28, blue: 0.50)],
+                status: survivorCardStatus
+            )
         }
+        .buttonStyle(.plain)
+    }
+
+    private var survivorCardStatus: GameStatus {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
+        let seasonStart = cal.date(from: DateComponents(year: 2026, month: 9, day: 10)) ?? .distantFuture
+        let seasonEnd = cal.date(from: DateComponents(year: 2027, month: 1, day: 11)) ?? .distantFuture
+        let now = Date()
+        if now < seasonStart { return .open }
+        if now < seasonEnd { return .live }
+        return .settled
     }
 
     // MARK: - Past Results (Fantasy)

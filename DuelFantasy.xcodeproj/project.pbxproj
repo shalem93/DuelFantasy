@@ -25,6 +25,7 @@
 		04A32C982FB479DD00EFB19C /* GolfTiersLiveView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04A32C972FB479DD00EFB19C /* GolfTiersLiveView.swift */; };
 		04A32C9A2FB479DF00EFB19C /* GolfTiersGroupDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04A32C992FB479DF00EFB19C /* GolfTiersGroupDetailView.swift */; };
 		04D4E5F62FD1234500861B2F /* NASCARDFSData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04D4E5F52FD1234500861B2E /* NASCARDFSData.swift */; };
+		04D4E5F82FD1234500861B31 /* SurvivorData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04D4E5F72FD1234500861B30 /* SurvivorData.swift */; };
 		04E02D0F2F579009009A4D3A /* SportsData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E02D0E2F579009009A4D3A /* SportsData.swift */; };
 		04E02D112F579627009A4D3A /* DFSData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E02D102F579627009A4D3A /* DFSData.swift */; };
 		04E02D172F588486009A4D3A /* SupabaseService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E02D162F588486009A4D3A /* SupabaseService.swift */; };
@@ -71,6 +72,7 @@
 		04A32C972FB479DD00EFB19C /* GolfTiersLiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GolfTiersLiveView.swift; sourceTree = "<group>"; };
 		04A32C992FB479DF00EFB19C /* GolfTiersGroupDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GolfTiersGroupDetailView.swift; sourceTree = "<group>"; };
 		04D4E5F52FD1234500861B2E /* NASCARDFSData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NASCARDFSData.swift; sourceTree = "<group>"; };
+		04D4E5F72FD1234500861B30 /* SurvivorData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurvivorData.swift; sourceTree = "<group>"; };
 		04E02CDF2F578B80009A4D3A /* DuelFantasy.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DuelFantasy.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		04E02CF12F578B82009A4D3A /* DuelFantasyTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DuelFantasyTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		04E02CFB2F578B82009A4D3A /* DuelFantasyUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DuelFantasyUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -156,6 +158,7 @@
 				04E02DC22F5BD7A9009A4D3A /* BestBallData.swift */,
 				04E02E712F611884009A4D3A /* GolfDFSData.swift */,
 				04D4E5F52FD1234500861B2E /* NASCARDFSData.swift */,
+				04D4E5F72FD1234500861B30 /* SurvivorData.swift */,
 				042F01692F69DCC30087BDC2 /* GolfPlayerDetailView.swift */,
 				042F016B2F6C99910087BDC2 /* FullHistoryView.swift */,
 				0469ADCD2F7E61E60035C895 /* AnalyticsView.swift */,
@@ -344,6 +347,7 @@
 				04E02D0F2F579009009A4D3A /* SportsData.swift in Sources */,
 				04E02E722F611884009A4D3A /* GolfDFSData.swift in Sources */,
 				04D4E5F62FD1234500861B2F /* NASCARDFSData.swift in Sources */,
+				04D4E5F82FD1234500861B31 /* SurvivorData.swift in Sources */,
 				0469AF212F8CC1E00035C895 /* PlayoffTiersData.swift in Sources */,
 				048067DC2FC1785400861A1E /* UFCDFSData.swift in Sources */,
 				0469ADCE2F7E61E60035C895 /* AnalyticsView.swift in Sources */,

@@ -446,6 +446,9 @@ final class BestBallViewModel {
             )
         }.sorted { $0.loggedAt > $1.loggedAt }
 
+        if UserDefaults.standard.integer(forKey: "fantasy_tiers_delta") != tiersDelta {
+            UserDefaults.standard.set(tiersDelta, forKey: "fantasy_tiers_delta")
+        }
         let total = ledger.reduce(0) { $0 + $1.rrDelta } + tiersDelta
         fantasyLedgerDelta = total
         // Mirror into UserDefaults so ContentView's @AppStorage pill bucket

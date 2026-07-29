@@ -394,6 +394,7 @@ struct ContentView: View {
         scoringProvider: ESPNNASCARDFSLiveScoringProvider()
     )
     @State private var bestBallViewModel = BestBallViewModel()
+    @State private var survivorViewModel = SurvivorViewModel()
     @State private var playoffTiersViewModel = PlayoffTiersViewModel()
     @State private var tennisBracketViewModel = TennisBracketViewModel()
     @State private var golfTiersViewModel = GolfTiersViewModel()
@@ -674,7 +675,7 @@ struct ContentView: View {
                 }
                 .tag(1)
 
-            FantasyHubView(bestBallViewModel: bestBallViewModel, playoffTiersViewModel: playoffTiersViewModel, tennisBracketViewModel: tennisBracketViewModel, golfTiersViewModel: golfTiersViewModel, soccerTiersViewModel: soccerTiersViewModel)
+            FantasyHubView(bestBallViewModel: bestBallViewModel, survivorViewModel: survivorViewModel, playoffTiersViewModel: playoffTiersViewModel, tennisBracketViewModel: tennisBracketViewModel, golfTiersViewModel: golfTiersViewModel, soccerTiersViewModel: soccerTiersViewModel)
                 .tabItem {
                     Label("Fantasy", systemImage: "star.circle")
                 }
@@ -1020,6 +1021,7 @@ struct ContentView: View {
             wnbaDFSViewModel.profileName = newValue
             nascarDFSViewModel.profileName = newValue
             bestBallViewModel.profileName = newValue
+            survivorViewModel.profileName = newValue
             playoffTiersViewModel.profileName = newValue
             tennisBracketViewModel.profileName = newValue
             golfTiersViewModel.profileName = newValue
@@ -1085,6 +1087,9 @@ struct ContentView: View {
         bestBallViewModel.accessToken = auth.accessToken
         bestBallViewModel.userID = auth.userID
         bestBallViewModel.profileName = profileName
+        survivorViewModel.accessToken = auth.accessToken
+        survivorViewModel.userID = auth.userID
+        survivorViewModel.profileName = profileName
         playoffTiersViewModel.accessToken = auth.accessToken
         playoffTiersViewModel.userID = auth.userID
         playoffTiersViewModel.profileName = profileName

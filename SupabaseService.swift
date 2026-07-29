@@ -2290,6 +2290,119 @@ final class SupabaseService {
         )
     }
 
+    // MARK: - NFL Survivor
+
+    func fetchSurvivorEntries(poolIDs: [String], accessToken: String) async throws -> [SurvivorEntryRecord] {
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/survivor_entries"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "pool_id", value: "in.(\(poolIDs.joined(separator: ",")))"),
+            URLQueryItem(name: "select", value: "*"),
+            URLQueryItem(name: "limit", value: "2000")
+        ]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+    }
+
+    func insertSurvivorEntry(poolID: String, userID: String, entryName: String, accessToken: String) async throws {
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/survivor_entries"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "on_conflict", value: "pool_id,user_id")]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        struct Payload: Codable {
+            let poolID: String
+            let userID: String
+            let entryName: String
+            let status: String
+            enum CodingKeys: String, CodingKey {
+                case poolID = "pool_id"
+                case userID = "user_id"
+                case entryName = "entry_name"
+                case status
+            }
+        }
+        try await requestNoResponse(
+            url: url, method: "POST",
+            body: [Payload(poolID: poolID, userID: userID, entryName: entryName, status: "alive")],
+            bearerToken: accessToken, preferHeader: "resolution=ignore-duplicates"
+        )
+    }
+
+    func updateSurvivorEntry(entryID: String, status: String, eliminatedWeek: Int?, accessToken: String) async throws {
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/survivor_entries"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "id", value: "eq.\(entryID)")]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        struct Payload: Codable {
+            let status: String
+            let eliminatedWeek: Int?
+            enum CodingKeys: String, CodingKey {
+                case status
+                case eliminatedWeek = "eliminated_week"
+            }
+            // Encode nil explicitly so healing back to "alive" clears the week.
+            func encode(to encoder: Encoder) throws {
+                var container = encoder.container(keyedBy: CodingKeys.self)
+                try container.encode(status, forKey: .status)
+                try container.encode(eliminatedWeek, forKey: .eliminatedWeek)
+            }
+        }
+        try await requestNoResponse(
+            url: url, method: "PATCH",
+            body: Payload(status: status, eliminatedWeek: eliminatedWeek),
+            bearerToken: accessToken
+        )
+    }
+
+    func fetchSurvivorPicks(poolID: String, accessToken: String) async throws -> [SurvivorPickRecord] {
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/survivor_picks"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "pool_id", value: "eq.\(poolID)"),
+            URLQueryItem(name: "select", value: "*"),
+            URLQueryItem(name: "limit", value: "5000")
+        ]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+    }
+
+    /// Upsert on (pool_id, user_id, week): switching a pick before lock
+    /// merges into the existing row and resets its result to pending.
+    func upsertSurvivorPick(poolID: String, userID: String, week: Int, teamAbbr: String, teamName: String, accessToken: String) async throws {
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/survivor_picks"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "on_conflict", value: "pool_id,user_id,week")]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        struct Payload: Codable {
+            let poolID: String
+            let userID: String
+            let week: Int
+            let teamAbbr: String
+            let teamName: String
+            let result: String
+            enum CodingKeys: String, CodingKey {
+                case poolID = "pool_id"
+                case userID = "user_id"
+                case week
+                case teamAbbr = "team_abbr"
+                case teamName = "team_name"
+                case result
+            }
+        }
+        try await requestNoResponse(
+            url: url, method: "POST",
+            body: [Payload(poolID: poolID, userID: userID, week: week, teamAbbr: teamAbbr, teamName: teamName, result: "pending")],
+            bearerToken: accessToken, preferHeader: "resolution=merge-duplicates"
+        )
+    }
+
+    func updateSurvivorPickResult(poolID: String, userID: String, week: Int, result: String, accessToken: String) async throws {
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/survivor_picks"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "pool_id", value: "eq.\(poolID)"),
+            URLQueryItem(name: "user_id", value: "eq.\(userID)"),
+            URLQueryItem(name: "week", value: "eq.\(week)")
+        ]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        struct Payload: Codable { let result: String }
+        try await requestNoResponse(url: url, method: "PATCH", body: Payload(result: result), bearerToken: accessToken)
+    }
+
     private static func generateInviteCode() -> String {
         let chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // no I/O/0/1 to avoid confusion
         return String((0..<6).map { _ in chars.randomElement()! })
