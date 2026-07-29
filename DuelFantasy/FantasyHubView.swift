@@ -440,7 +440,7 @@ struct FantasyHubView: View {
                             .font(.system(size: 20, weight: .bold).monospacedDigit())
                             .foregroundStyle(preview.opponentScore > preview.myScore ? brandPurple : .primary)
                         if let record = preview.opponentRecord {
-                            Text(record)
+                            Text(preview.opponentStanding.map { "\(record) · \($0)" } ?? record)
                                 .font(.system(size: 9, weight: .semibold))
                                 .foregroundStyle(.secondary)
                         }

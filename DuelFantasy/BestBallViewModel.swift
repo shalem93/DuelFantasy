@@ -13,8 +13,9 @@ struct LeagueMatchupPreview {
     /// "3-2" style H2H records from standings (nil pre-season).
     var myRecord: String? = nil
     var opponentRecord: String? = nil
-    /// "4th/16" style standing for the user (nil pre-season).
+    /// "4th/16" style standings (nil pre-season).
     var myStanding: String? = nil
+    var opponentStanding: String? = nil
 }
 
 /// "1st", "2nd", "3rd", "4th"… for standings display.
@@ -237,6 +238,9 @@ final class BestBallViewModel {
                     }
                     if let theirs = oppStandingRow {
                         preview.opponentRecord = "\(theirs.wins)-\(theirs.losses)"
+                        if theirs.rank > 0, memberCount > 0 {
+                            preview.opponentStanding = "\(bestBallOrdinal(theirs.rank))/\(memberCount)"
+                        }
                     }
                     previews[league.id] = preview
                 }
