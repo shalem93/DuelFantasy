@@ -1527,8 +1527,11 @@ struct FantasyHubView: View {
                 }
             }
             Spacer()
-            // RR is intentionally not displayed for Fantasy-hub games —
-            // there's no RR ledger associated with brackets/tiers yet.
+            if result.rrDelta != 0 {
+                Text("\(result.rrDelta >= 0 ? "+" : "")\(result.rrDelta)")
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(result.rrDelta >= 0 ? .green : .red)
+            }
             Image(systemName: "chevron.right")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.tertiary)

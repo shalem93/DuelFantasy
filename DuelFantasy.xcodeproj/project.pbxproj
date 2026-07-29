@@ -24,6 +24,7 @@
 		04A32C962FB479DC00EFB19C /* GolfTiersLobbyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04A32C952FB479DC00EFB19C /* GolfTiersLobbyView.swift */; };
 		04A32C982FB479DD00EFB19C /* GolfTiersLiveView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04A32C972FB479DD00EFB19C /* GolfTiersLiveView.swift */; };
 		04A32C9A2FB479DF00EFB19C /* GolfTiersGroupDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04A32C992FB479DF00EFB19C /* GolfTiersGroupDetailView.swift */; };
+		04D4E5F62FD1234500861B2F /* NASCARDFSData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04D4E5F52FD1234500861B2E /* NASCARDFSData.swift */; };
 		04E02D0F2F579009009A4D3A /* SportsData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E02D0E2F579009009A4D3A /* SportsData.swift */; };
 		04E02D112F579627009A4D3A /* DFSData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E02D102F579627009A4D3A /* DFSData.swift */; };
 		04E02D172F588486009A4D3A /* SupabaseService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E02D162F588486009A4D3A /* SupabaseService.swift */; };
@@ -32,7 +33,6 @@
 		04E02D1D2F5885F6009A4D3A /* supabase_schema.sql in Resources */ = {isa = PBXBuildFile; fileRef = 04E02D1C2F5885F6009A4D3A /* supabase_schema.sql */; };
 		04E02DC32F5BD7A9009A4D3A /* BestBallData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E02DC22F5BD7A9009A4D3A /* BestBallData.swift */; };
 		04E02E722F611884009A4D3A /* GolfDFSData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04E02E712F611884009A4D3A /* GolfDFSData.swift */; };
-		04D4E5F62FD1234500861B2F /* NASCARDFSData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04D4E5F52FD1234500861B2E /* NASCARDFSData.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -70,6 +70,7 @@
 		04A32C952FB479DC00EFB19C /* GolfTiersLobbyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GolfTiersLobbyView.swift; sourceTree = "<group>"; };
 		04A32C972FB479DD00EFB19C /* GolfTiersLiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GolfTiersLiveView.swift; sourceTree = "<group>"; };
 		04A32C992FB479DF00EFB19C /* GolfTiersGroupDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GolfTiersGroupDetailView.swift; sourceTree = "<group>"; };
+		04D4E5F52FD1234500861B2E /* NASCARDFSData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NASCARDFSData.swift; sourceTree = "<group>"; };
 		04E02CDF2F578B80009A4D3A /* DuelFantasy.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DuelFantasy.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		04E02CF12F578B82009A4D3A /* DuelFantasyTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DuelFantasyTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		04E02CFB2F578B82009A4D3A /* DuelFantasyUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DuelFantasyUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -81,7 +82,6 @@
 		04E02D1C2F5885F6009A4D3A /* supabase_schema.sql */ = {isa = PBXFileReference; lastKnownFileType = text; path = supabase_schema.sql; sourceTree = "<group>"; };
 		04E02DC22F5BD7A9009A4D3A /* BestBallData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BestBallData.swift; sourceTree = "<group>"; };
 		04E02E712F611884009A4D3A /* GolfDFSData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GolfDFSData.swift; sourceTree = "<group>"; };
-		04D4E5F52FD1234500861B2E /* NASCARDFSData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NASCARDFSData.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -511,7 +511,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 13;
+				CURRENT_PROJECT_VERSION = 15;
 				DEVELOPMENT_TEAM = D9WFQ2TQD9;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -535,7 +535,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
-				MARKETING_VERSION = 1.1.2;
+				MARKETING_VERSION = 1.1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = GameOn.GameOn7;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -558,7 +558,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 13;
+				CURRENT_PROJECT_VERSION = 15;
 				DEVELOPMENT_TEAM = D9WFQ2TQD9;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -582,7 +582,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
-				MARKETING_VERSION = 1.1.2;
+				MARKETING_VERSION = 1.1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = GameOn.GameOn7;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;

@@ -46,6 +46,9 @@ final class BestBallViewModel {
     var leagueMatchupPreviews: [String: LeagueMatchupPreview] = [:]
     /// Sum of the user's fantasy RR ledger (entry fees + payouts).
     var fantasyLedgerDelta: Int = 0
+    /// Settled Tiers/Bracket results (rank, points, RR) for the Profile
+    /// tab's Fantasy Results list. Built during reconcileFantasyLedger.
+    var fantasyPastRows: [DFSResult] = []
     var isLoading: Bool = false
     var isStartingDraft: Bool = false
     var error: String?
@@ -414,11 +417,61 @@ final class BestBallViewModel {
         if didInsert {
             ledger = (try? await SupabaseService.shared.fetchFantasyLedger(userID: uid, accessToken: token)) ?? ledger
         }
-        let total = ledger.reduce(0) { $0 + $1.rrDelta }
+
+        // Tiers/Bracket winnings & losses: those modes write rr_delta rows
+        // into dfs_tournament_results under fantasy tids, which the DFS
+        // bucket deliberately filters out — fold the newest row per contest
+        // into the fantasy bucket and publish display rows for Profile.
+        let serverRows = (try? await SupabaseService.shared.fetchUserDFSHistory(userID: uid, limit: 500, accessToken: token)) ?? []
+        var newestByTid: [String: DFSTournamentResultRecord] = [:]
+        for row in serverRows {
+            let tid = row.tournamentID
+            guard DFSViewModel.isFantasyModeTid(tid), !tid.contains("#group-"),
+                  !DFSViewModel.excludedTournamentIDs.contains(tid) else { continue }
+            if let existing = newestByTid[tid] {
+                if (row.createdAt ?? .distantPast) > (existing.createdAt ?? .distantPast) {
+                    newestByTid[tid] = row
+                }
+            } else {
+                newestByTid[tid] = row
+            }
+        }
+        let tiersDelta = newestByTid.values.reduce(0) { $0 + $1.rrDelta }
+        fantasyPastRows = newestByTid.map { (tid, row) in
+            DFSResult(
+                id: UUID(), tournamentTitle: Self.fantasyTitle(for: tid),
+                rank: row.rank, totalEntries: max(1000, row.rank),
+                lineupPoints: row.totalPoints, rrDelta: row.rrDelta,
+                loggedAt: row.createdAt ?? Date(), tournamentId: tid, lineupNumber: nil
+            )
+        }.sorted { $0.loggedAt > $1.loggedAt }
+
+        let total = ledger.reduce(0) { $0 + $1.rrDelta } + tiersDelta
         fantasyLedgerDelta = total
         // Mirror into UserDefaults so ContentView's @AppStorage pill bucket
-        // updates reactively.
-        UserDefaults.standard.set(total, forKey: "fantasy_rr_delta")
+        // updates reactively; equality-guarded to avoid churn.
+        if UserDefaults.standard.integer(forKey: "fantasy_rr_delta") != total {
+            UserDefaults.standard.set(total, forKey: "fantasy_rr_delta")
+        }
+    }
+
+    /// Display title for a fantasy-mode tid.
+    private static func fantasyTitle(for tid: String) -> String {
+        let base = tid.components(separatedBy: "#group-").first ?? tid
+        if base.hasPrefix("world-cup-") { return "World Cup Tiers" }
+        if base.hasPrefix("nba-playoffs-") { return "NBA Playoff Tiers" }
+        if base.hasPrefix("masters-") { return "The Masters — Golf Tiers" }
+        if base.hasPrefix("pga-championship-") { return "PGA Championship — Golf Tiers" }
+        if base.hasPrefix("us-open-") { return "U.S. Open — Golf Tiers" }
+        if base.hasPrefix("the-open-") { return "The Open — Golf Tiers" }
+        if base.contains("-atp-") || base.contains("-wta-") {
+            let tour = base.contains("-atp-") ? "ATP" : "WTA"
+            if base.hasPrefix("wimbledon-") { return "Wimbledon — \(tour)" }
+            if base.hasPrefix("us_open-") { return "US Open — \(tour)" }
+            if base.hasPrefix("french_open-") { return "French Open — \(tour)" }
+            if base.hasPrefix("australian_open-") { return "Australian Open — \(tour)" }
+        }
+        return "Fantasy Contest"
     }
 
     func joinLeague(_ league: BestBallLeague) async -> Bool {

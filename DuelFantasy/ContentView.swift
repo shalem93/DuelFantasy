@@ -1730,6 +1730,54 @@ struct ContentView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                     .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
 
+                    // Fantasy Results (Tiers, Brackets, Best Ball RR)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Fantasy Results")
+                            .font(.headline)
+
+                        if bestBallViewModel.fantasyPastRows.isEmpty {
+                            VStack(spacing: 8) {
+                                Image(systemName: "trophy")
+                                    .font(.title3)
+                                    .foregroundStyle(.tertiary)
+                                Text("No fantasy results yet")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                Text("Settled brackets, tiers, and leagues will appear here")
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 16)
+                        } else {
+                            let rows = bestBallViewModel.fantasyPastRows.prefix(10)
+                            ForEach(rows) { result in
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(result.tournamentTitle)
+                                            .font(.subheadline.weight(.medium))
+                                            .foregroundStyle(.primary)
+                                        Text("#\(result.rank)/\(result.totalEntries) • \(String(format: "%.1f", result.lineupPoints)) pts • \(result.loggedAt.formatted(.dateTime.month(.defaultDigits).day()))")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Text("\(result.rrDelta >= 0 ? "+" : "")\(result.rrDelta)")
+                                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                                        .foregroundStyle(result.rrDelta >= 0 ? .green : .red)
+                                }
+                                .padding(.vertical, 4)
+                                if result.id != rows.last?.id {
+                                    Divider()
+                                }
+                            }
+                        }
+                    }
+                    .padding(16)
+                    .background(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
+
                     // Leaderboard game type filter
                     Picker("Game Type", selection: $leaderboardGameFilter) {
                         ForEach(LeaderboardGameFilter.allCases, id: \.self) { filter in
@@ -2060,6 +2108,10 @@ struct ContentView: View {
                 // Quick check: if this user has zero server DFS results but local
                 // history has entries, wipe the stale data (from a previous account).
                 await cleanStaleLocalDFSHistory()
+                // Refresh the fantasy ledger + Tiers/Bracket result rows so
+                // the Fantasy Results card and the Fantasy RR bucket are
+                // current even if the user never opened the Fantasy tab.
+                await bestBallViewModel.loadMyLeagues()
                 // Sync DFS history from server for EVERY sport. Run in
                 // parallel so the user sees one update instead of the RR
                 // number ratcheting through 10 intermediate states. Each
