@@ -113,9 +113,18 @@ func isDerivedPickemMatchID(_ id: String) -> Bool { id.contains("|") }
 /// the odds-space midpoint of +300 and +500/+600 — about 1.4x the
 /// posted plus odds, NOT a mere ~6% trim. Near-even one-sided prices
 /// fall back to a mild proportional devig.
-func pickemOneSidedQuotes(yesOdds: Double, yesName: String, noName: String) -> [PickOption] {
+func pickemOneSidedQuotes(yesOdds: Double, yesName: String, noName: String, eventPropShade: Bool = false) -> [PickOption] {
     let fairOdds: Double
-    if yesOdds >= 100 {
+    if eventPropShade {
+        // Event props ("to homer", "to score a TD"): books hide a much
+        // bigger margin than moneylines — roughly a flat ~7 probability
+        // points off the true chance (Ohtani posted ~+190 implies 34.5%
+        // vs a true any-HR rate near 27% → fair ~+270). Subtract in
+        // probability space, floored so deep longshots don't explode.
+        let pImplied = pickemImpliedProb(yesOdds)
+        let pFair = min(0.99, max(0.02, max(pImplied * 0.5, pImplied - 0.07)))
+        fairOdds = pickemAmericanOdds(fromProb: pFair)
+    } else if yesOdds >= 100 {
         // Longshot shade calibrated against real DK two-sided pairs:
         // -172/+141 has its juice-free middle at ~+156 (1.10x the dog),
         // -710/+486 at ~+600 (1.24x) — so scale from 1.10 at +100 to
@@ -137,7 +146,7 @@ func pickemOneSidedQuotes(yesOdds: Double, yesName: String, noName: String) -> [
 }
 
 func pickemYesNoQuotes(yesOdds: Double) -> [PickOption] {
-    pickemOneSidedQuotes(yesOdds: yesOdds, yesName: "Yes", noName: "No")
+    pickemOneSidedQuotes(yesOdds: yesOdds, yesName: "Yes", noName: "No", eventPropShade: true)
 }
 
 func pickemImpliedProb(_ odds: Double) -> Double {
