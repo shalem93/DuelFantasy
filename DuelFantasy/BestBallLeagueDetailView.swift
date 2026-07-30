@@ -53,6 +53,17 @@ struct BestBallLeagueDetailView: View {
         .navigationTitle(league?.title ?? "League")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if let league {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Text(league.entryFee > 0 ? "\(league.entryFee) RR" : "FREE")
+                        .font(.caption.weight(.bold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.green.opacity(0.12))
+                        .foregroundStyle(Color(red: 0.1, green: 0.55, blue: 0.25))
+                        .clipShape(Capsule())
+                }
+            }
             if let league, league.status == "open", viewModel.isCommish {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {

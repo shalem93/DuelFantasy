@@ -1558,3 +1558,9 @@ drop policy if exists "frl_select_own" on public.fantasy_rr_ledger;
 drop policy if exists "frl_select_all" on public.fantasy_rr_ledger;
 create policy "frl_select_all" on public.fantasy_rr_ledger
   for select to authenticated using (true);
+
+
+-- Jul 2026: grandfathered pre-fee leagues (entry_fee 0) become standard
+-- 10 RR leagues per admin decision; lazy ledger charging picks them up.
+update bestball_leagues set entry_fee = 10 where entry_fee = 0;
+alter table bestball_leagues alter column entry_fee set default 10;
