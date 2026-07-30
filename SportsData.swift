@@ -117,12 +117,14 @@ func pickemOneSidedQuotes(yesOdds: Double, yesName: String, noName: String, even
     let fairOdds: Double
     if eventPropShade {
         // Event props ("to homer", "to score a TD"): books hide a much
-        // bigger margin than moneylines — roughly a flat ~7 probability
-        // points off the true chance (Ohtani posted ~+190 implies 34.5%
-        // vs a true any-HR rate near 27% → fair ~+270). Subtract in
-        // probability space, floored so deep longshots don't explode.
+        // bigger margin than moneylines, but it SCALES with the implied
+        // probability — ~7 points on an Ohtani-tier ~35% price, only
+        // ~4.5 on a Yandy-Diaz-tier ~14% (true ~9.5%). A flat 7-point
+        // subtract overpaid Yes on low-power longshots (+127 quoted
+        // where fair was ~+90). Margin = 30% of implied, capped at 7pts.
         let pImplied = pickemImpliedProb(yesOdds)
-        let pFair = min(0.99, max(0.02, max(pImplied * 0.5, pImplied - 0.07)))
+        let margin = min(0.07, 0.30 * pImplied)
+        let pFair = min(0.99, max(0.02, pImplied - margin))
         fairOdds = pickemAmericanOdds(fromProb: pFair)
     } else if yesOdds >= 100 {
         // Longshot shade calibrated against real DK two-sided pairs:
