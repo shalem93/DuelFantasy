@@ -4083,6 +4083,12 @@ final class DFSViewModel {
     }
 
     func refreshLive() async {
+        // A late-swap edit sheet is open: this refresh re-parses every box
+        // score, recomputes full 2000-entry leaderboards, and runs the bot
+        // late-swap optimizer — all on the main actor. Landing mid-scroll
+        // it froze the player list hard enough to force-quit. Scores can
+        // wait the few minutes until the sheet closes.
+        if editingLineupNumber != nil { return }
         // PGA self-heal for orphaned past tournaments runs BEFORE the
         // `guard let tournament` below, because the bug we're fixing is
         // exactly when this VM has no active tournament (mid-week, or
@@ -5254,12 +5260,20 @@ final class DFSViewModel {
             _ = applyLateSwapBotOptimization()
         }
 
-        let leaderboard = DFSEngine.computeLeaderboard(
-            fieldEntries: fieldEntries,
-            playersByID: playersByID,
-            scoreSnapshot: effectiveSnapshot,
-            isSingleGame: tournament.isSingleGame
-        )
+        // Off the main actor: sorting/scoring a 2000-entry field takes long
+        // enough to visibly hitch scrolling when the 60s refresh lands.
+        let lbEntries = fieldEntries
+        let lbPlayers = playersByID
+        let lbSnapshot = effectiveSnapshot
+        let lbIsSG = tournament.isSingleGame
+        let leaderboard = await Task.detached(priority: .userInitiated) {
+            DFSEngine.computeLeaderboard(
+                fieldEntries: lbEntries,
+                playersByID: lbPlayers,
+                scoreSnapshot: lbSnapshot,
+                isSingleGame: lbIsSG
+            )
+        }.value
         leaderboardEntries = leaderboard
 
         // Cache live ranks for user lineups in THIS tournament.
@@ -5326,10 +5340,14 @@ final class DFSViewModel {
                 playerFantasyPoints: livePlayerPoints,
                 playerLiveStats: [:], gameLiveInfo: [:], allGamesFinal: false
             )
-            let lb = DFSEngine.computeLeaderboard(
-                fieldEntries: cache.fieldEntries, playersByID: pByID,
-                scoreSnapshot: snap, isSingleGame: tObj.isSingleGame
-            )
+            let cachedEntries = cache.fieldEntries
+            let isSGT = tObj.isSingleGame
+            let lb = await Task.detached(priority: .utility) {
+                DFSEngine.computeLeaderboard(
+                    fieldEntries: cachedEntries, playersByID: pByID,
+                    scoreSnapshot: snap, isSingleGame: isSGT
+                )
+            }.value
             // Update cache with fresh leaderboard
             liveContestCache[tid] = LiveContestCache(
                 fieldEntries: cache.fieldEntries, leaderboard: lb,
