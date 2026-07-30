@@ -97,6 +97,79 @@ struct BestBallPlayer: Identifiable, Hashable {
     let projectedPoints: Double
     let sport: String
     let lastSeasonHR: Int
+    /// Market average draft position (FantasyFootballCalculator). PPR is
+    /// the 1-QB board; 2QB is the superflex board where QBs rise. NFL only.
+    var adpPPR: Double? = nil
+    var adp2QB: Double? = nil
+
+    /// The board-relevant ADP for a league's format.
+    func adp(superflex: Bool) -> Double? {
+        superflex ? (adp2QB ?? adpPPR) : adpPPR
+    }
+}
+
+/// "Ja'Marr Chase Jr." -> "jamarrchase" for cross-source matching.
+func bbNormalizeName(_ name: String) -> String {
+    var s = name.lowercased()
+    for suffix in [" jr.", " jr", " sr.", " sr", " iii", " ii", " iv", " v"] {
+        if s.hasSuffix(suffix) { s = String(s.dropLast(suffix.count)) }
+    }
+    return s.filter { $0.isLetter }
+}
+
+/// Free NFL ADP from FantasyFootballCalculator (no key): real market
+/// draft position in PPR (1-QB) and 2QB (superflex) formats.
+enum FFCADPProvider {
+    struct Board {
+        /// "normname|POS" -> (pprADP, twoQBADP)
+        var byNamePos: [String: (ppr: Double?, twoQB: Double?)] = [:]
+        /// unique normname -> same (fallback when position labels differ)
+        var byName: [String: (ppr: Double?, twoQB: Double?)] = [:]
+    }
+
+    static func fetchBoard() async -> Board {
+        let year = Calendar.current.component(.year, from: Date())
+        var board = Board()
+        for (formatIndex, format) in ["ppr", "2qb"].enumerated() {
+            var entries: [(name: String, pos: String, adp: Double)] = []
+            for tryYear in [year, year - 1] {
+                entries = await fetchFormat(format: format, year: tryYear)
+                if entries.count >= 50 { break }
+            }
+            for entry in entries {
+                let key = "\(bbNormalizeName(entry.name))|\(entry.pos)"
+                var pair = board.byNamePos[key] ?? (nil, nil)
+                if formatIndex == 0 { pair.ppr = entry.adp } else { pair.twoQB = entry.adp }
+                board.byNamePos[key] = pair
+            }
+        }
+        // Name-only fallback: only for names that map to exactly one
+        // (name, position) entry — same-name different-position players
+        // stay position-keyed only.
+        var posKeysByName: [String: [String]] = [:]
+        for key in board.byNamePos.keys {
+            let norm = key.components(separatedBy: "|").first ?? key
+            posKeysByName[norm, default: []].append(key)
+        }
+        for (norm, keys) in posKeysByName where keys.count == 1 {
+            board.byName[norm] = board.byNamePos[keys[0]]
+        }
+        return board
+    }
+
+    private static func fetchFormat(format: String, year: Int) async -> [(name: String, pos: String, adp: Double)] {
+        guard let url = URL(string: "https://fantasyfootballcalculator.com/api/v1/adp/\(format)?teams=12&year=\(year)"),
+              let (data, _) = try? await URLSession.shared.data(from: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let players = json["players"] as? [[String: Any]] else { return [] }
+        return players.compactMap { p in
+            guard let name = p["name"] as? String,
+                  let pos = p["position"] as? String else { return nil }
+            let adp = (p["adp"] as? Double) ?? (p["adp"] as? Int).map(Double.init) ?? 0
+            guard adp > 0 else { return nil }
+            return (name, pos, adp)
+        }
+    }
 }
 
 struct BestBallWeeklyScore: Identifiable, Equatable {
@@ -663,7 +736,18 @@ enum BestBallBotDrafter {
         if scoringMode == .dingersOnly {
             sorted = candidates.sorted { $0.lastSeasonHR > $1.lastSeasonHR }
         } else {
-            sorted = candidates.sorted { $0.projectedPoints > $1.projectedPoints }
+            // Market ADP is a far truer board than raw projections (and the
+            // 2QB board reorders QBs correctly for superflex leagues).
+            // Players without ADP fall in behind, ordered by projections.
+            let isSuperflex = nflSFLEX >= 1 || nflQB >= 2
+            sorted = candidates.sorted { a, b in
+                switch (a.adp(superflex: isSuperflex), b.adp(superflex: isSuperflex)) {
+                case let (x?, y?): return x < y
+                case (.some, .none): return true
+                case (.none, .some): return false
+                default: return a.projectedPoints > b.projectedPoints
+                }
+            }
         }
 
         // For MLB: fill starter slots (SP + batters) before allowing bench pitchers
@@ -786,6 +870,8 @@ private class BBProjectionCache {
     var leagueHRCounts: [String: Int] = [:]
     /// Whether league-wide projections have been fetched for a given sport key
     var leagueProjectionsFetched: Set<String> = []
+    /// NFL market ADP board (fetched once per session).
+    var nflADPBoard: FFCADPProvider.Board?
 }
 
 struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
@@ -801,7 +887,7 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
         case "NBA": return try await fetchSportPlayers(sport: "basketball", league: "nba", sportName: "NBA", teamLimit: 30)
         case "MLB": return try await fetchSportPlayers(sport: "baseball", league: "mlb", sportName: "MLB", teamLimit: 30)
         case "NFL": return try await fetchSportPlayers(sport: "football", league: "nfl", sportName: "NFL", teamLimit: 32)
-        case "CFB": return try await fetchSportPlayers(sport: "football", league: "college-football", sportName: "CFB", teamLimit: 80)
+        case "CFB": return try await fetchSportPlayers(sport: "football", league: "college-football", sportName: "CFB", teamLimit: 140)
         default: return []
         }
     }
@@ -811,14 +897,51 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
         try await fetchLeagueWideProjections(sport: sport, league: league, sportName: sportName)
 
         let teams = try await fetchAllTeams(sport: sport, league: league)
+        // Roster fetches in parallel — the CFB pool is ~130 FBS programs
+        // now, and 2 sequential requests per team took minutes.
         var players: [BestBallPlayer] = []
-        for team in teams.prefix(teamLimit) {
-            // Pre-fetch per-team performance ratings (used as fallback for non-leaders)
-            let ratings = try await fetchTeamPerformanceRatings(sport: sport, league: league, teamID: team.id)
-            let roster = try await fetchRoster(sport: sport, league: league, teamID: team.id, teamAbbr: team.abbreviation, sportName: sportName, ratings: ratings)
-            players.append(contentsOf: roster)
+        let teamList = Array(teams.prefix(teamLimit))
+        await withTaskGroup(of: [BestBallPlayer].self) { group in
+            for team in teamList {
+                group.addTask {
+                    let ratings = (try? await self.fetchTeamPerformanceRatings(sport: sport, league: league, teamID: team.id)) ?? [:]
+                    return (try? await self.fetchRoster(sport: sport, league: league, teamID: team.id, teamAbbr: team.abbreviation, sportName: sportName, ratings: ratings)) ?? []
+                }
+            }
+            for await roster in group {
+                players.append(contentsOf: roster)
+            }
         }
-        return deduplicatePlayers(players).sorted { $0.projectedPoints > $1.projectedPoints }
+        players = deduplicatePlayers(players)
+
+        // NFL: attach real market ADP (PPR + 2QB superflex boards). The
+        // draft board and bots order by ADP; projections are the fallback.
+        if sportName == "NFL" {
+            if cache.nflADPBoard == nil {
+                cache.nflADPBoard = await FFCADPProvider.fetchBoard()
+            }
+            if let board = cache.nflADPBoard {
+                players = players.map { player in
+                    var player = player
+                    let norm = bbNormalizeName(player.name)
+                    let pair = board.byNamePos["\(norm)|\(player.position)"] ?? board.byName[norm]
+                    if let pair {
+                        player.adpPPR = pair.ppr
+                        player.adp2QB = pair.twoQB
+                    }
+                    return player
+                }
+            }
+        }
+
+        return players.sorted { a, b in
+            switch (a.adpPPR, b.adpPPR) {
+            case let (x?, y?): return x < y
+            case (.some, .none): return true
+            case (.none, .some): return false
+            default: return a.projectedPoints > b.projectedPoints
+            }
+        }
     }
 
     private func fetchAllTeams(sport: String, league: String) async throws -> [BBTeamRef] {
@@ -846,7 +969,9 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
         for seasonYear in [year, year - 1] {
             var ids = Set<String>()
             await withTaskGroup(of: [String].self) { group in
-                for groupID in [1, 4, 5, 8, 18] {
+                // ACC 1, Big 12 4, Big Ten 5, SEC 8, Pac-12 9, CUSA 12,
+                // MAC 15, MWC 17, Independents 18, Sun Belt 37, American 151
+                for groupID in [1, 4, 5, 8, 9, 12, 15, 17, 18, 37, 151] {
                     group.addTask {
                         let urlString = "https://sports.core.api.espn.com/v2/sports/football/leagues/college-football/seasons/\(seasonYear)/types/2/groups/\(groupID)/teams?limit=40"
                         guard let url = URL(string: urlString),

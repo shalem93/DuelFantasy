@@ -255,6 +255,10 @@ struct BestBallDraftView: View {
                     Text("'25 HR")
                         .frame(width: 48, alignment: .trailing)
                 } else {
+                    if viewModel.currentLeague?.sport == "NFL" {
+                        Text(isSuperflexLeague ? "ADP·2QB" : "ADP")
+                            .frame(width: 52, alignment: .trailing)
+                    }
                     Text("PROJ")
                         .frame(width: 44, alignment: .trailing)
                 }
@@ -293,6 +297,16 @@ struct BestBallDraftView: View {
                                         .foregroundStyle(player.lastSeasonHR >= 30 ? .orange : .primary)
                                         .frame(width: 48, alignment: .trailing)
                                 } else {
+                                    if viewModel.currentLeague?.sport == "NFL" {
+                                        // Market ADP — the league-format board
+                                        // (2QB when superflex). "-" = undrafted
+                                        // in public drafts.
+                                        let adp = player.adp(superflex: isSuperflexLeague)
+                                        Text(adp.map { String(format: "%.1f", $0) } ?? "–")
+                                            .font(.caption.weight(.semibold).monospacedDigit())
+                                            .foregroundStyle(adp != nil ? brandPurple : Color(.systemGray3))
+                                            .frame(width: 52, alignment: .trailing)
+                                    }
                                     // Display season-total projection (PPG × games).
                                     // Internal `projectedPoints` is per-game so the
                                     // bot drafter and scoring engine stay consistent;
@@ -569,6 +583,13 @@ struct BestBallDraftView: View {
         }
     }
 
+    /// 2+ QB starters (dedicated or superflex) reorder the draft board —
+    /// QBs rise dramatically on the 2QB ADP market.
+    private var isSuperflexLeague: Bool {
+        guard let league = viewModel.currentLeague else { return false }
+        return league.nflSflexStarters >= 1 || league.nflQbStarters >= 2
+    }
+
     private func filteredPlayers(_ state: BestBallDraftState) -> [BestBallPlayer] {
         let pickedIDs = state.pickedPlayerIDs()
         var players = viewModel.availablePlayers.filter { !pickedIDs.contains($0.id) }
@@ -586,6 +607,20 @@ struct BestBallDraftView: View {
             players = players.filter {
                 $0.name.lowercased().contains(query) ||
                 $0.team.lowercased().contains(query)
+            }
+        }
+
+        // NFL: order by the league-format market ADP (2QB board for
+        // superflex), projections for anyone the market doesn't draft.
+        if viewModel.currentLeague?.sport == "NFL" {
+            let superflex = isSuperflexLeague
+            players.sort { a, b in
+                switch (a.adp(superflex: superflex), b.adp(superflex: superflex)) {
+                case let (x?, y?): return x < y
+                case (.some, .none): return true
+                case (.none, .some): return false
+                default: return a.projectedPoints > b.projectedPoints
+                }
             }
         }
 
