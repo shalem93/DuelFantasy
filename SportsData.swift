@@ -1510,11 +1510,25 @@ struct ESPNMatchResultProvider: MatchResultProvider {
                             let byEvent = Dictionary(grouping: propIDs) { mid in
                                 (mid.components(separatedBy: "|").first ?? "").components(separatedBy: "-").last ?? ""
                             }
-                            for (eventID, ids) in byEvent {
-                                guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/\(sport.sportPath)/\(sport.leaguePath)/summary?event=\(eventID)"),
-                                      let (data, response) = try? await timedSession.data(from: url),
-                                      let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-                                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                            // Summaries in parallel — sequential fetches made a
+                            // full prop slate take (events x latency) and picks
+                            // visibly trickled in over minutes.
+                            let summaries: [(String, [String: Any])] = await withTaskGroup(of: (String, [String: Any])?.self) { sg in
+                                for eventID in byEvent.keys {
+                                    sg.addTask { @Sendable in
+                                        guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/\(sport.sportPath)/\(sport.leaguePath)/summary?event=\(eventID)"),
+                                              let (data, response) = try? await timedSession.data(from: url),
+                                              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                                              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+                                        return (eventID, json)
+                                    }
+                                }
+                                var out: [(String, [String: Any])] = []
+                                for await r in sg { if let r { out.append(r) } }
+                                return out
+                            }
+                            for (eventID, json) in summaries {
+                                let ids = byEvent[eventID] ?? []
                                 for mid in ids {
                                     let parts = mid.components(separatedBy: "|")
 

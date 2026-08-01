@@ -1040,6 +1040,11 @@ struct ContentView: View {
         }
         .onChange(of: scenePhase) { _, newPhase in
             guard newPhase == .active else { return }
+            // Returning to the foreground: grade pick'em right away — the 60s
+            // settlement loop keeps sleeping through backgrounding, so games
+            // that finished while the app was closed otherwise wait up to a
+            // full minute before "to hit a HR" and friends resolve.
+            Task { await reconcileCompletedPicks() }
             // Returning to the foreground: immediately re-probe confirmed XIs
             // and re-run bot late-swap for any live contest. Confirmed lineups
             // drop while the app is backgrounded; without this the user had to
