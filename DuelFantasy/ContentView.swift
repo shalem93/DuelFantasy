@@ -3133,7 +3133,9 @@ struct ContentView: View {
                     expandedPropMatchIDs.remove(match.id)
                 } else {
                     expandedPropMatchIDs.insert(match.id)
-                    if propMatchesByBase[match.id] == nil, !loadingPropsFor.contains(match.id) {
+                    // Empty result isn't cached as final — boards post late
+                    // (preseason especially), so re-try on each open.
+                    if propMatchesByBase[match.id]?.isEmpty != false, !loadingPropsFor.contains(match.id) {
                         loadingPropsFor.insert(match.id)
                         Task {
                             let props = await ESPNPropBoardProvider().fetchPropMatches(for: match)

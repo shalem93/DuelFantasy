@@ -863,7 +863,9 @@ struct ESPNPropBoardProvider {
         var milestonesByKey: [String: [(athleteID: String, target: Double, odds: Double)]] = [:]
         // 1st Half game markets (basketball / football).
         var h1MLByTeam: [String: Double] = [:]
-        var h1SpreadByTeam: [String: (line: Double, odds: Double)] = [:]
+        // odds are nil when the book has posted the line but not yet the
+        // prices (preseason boards) — those mint with flat +10/-10.
+        var h1SpreadByTeam: [String: (line: Double, odds: Double?)] = [:]
         var h1TotalSides: [Double] = []
         var h1TotalLine: Double?
         // 1st-5-innings markets (MLB): team-keyed ML, per-team alt run
@@ -895,16 +897,16 @@ struct ESPNPropBoardProvider {
                     }
                     continue
                 case "1st Half Spread":
-                    if let tid = teamID(from: item), let odds = americanOdds(item),
+                    if let tid = teamID(from: item),
                        let line = ((item["current"] as? [String: Any])?["target"] as? [String: Any])?["value"] as? Double {
-                        h1SpreadByTeam[tid] = (line, odds)
+                        h1SpreadByTeam[tid] = (line, americanOdds(item))
                     }
                     continue
                 case "1st Half Total":
+                    if h1TotalLine == nil {
+                        h1TotalLine = ((item["current"] as? [String: Any])?["target"] as? [String: Any])?["value"] as? Double
+                    }
                     if let odds = americanOdds(item) {
-                        if h1TotalLine == nil {
-                            h1TotalLine = ((item["current"] as? [String: Any])?["target"] as? [String: Any])?["value"] as? Double
-                        }
                         h1TotalSides.append(odds)
                     }
                     continue
@@ -1083,10 +1085,19 @@ struct ESPNPropBoardProvider {
                 }
             }
             if let home = h1SpreadByTeam[homeID], let away = h1SpreadByTeam[awayID], home.line == -away.line, home.line != 0 {
-                let options = pickemTwoWayQuotes(
-                    nameA: "\(match.awayTeam) \(pickemSignedLine(away.line))", oddsA: away.odds,
-                    nameB: "\(match.homeTeam) \(pickemSignedLine(home.line))", oddsB: home.odds
-                )
+                let awayLabel = "\(match.awayTeam) \(pickemSignedLine(away.line))"
+                let homeLabel = "\(match.homeTeam) \(pickemSignedLine(home.line))"
+                var options: [PickOption] = []
+                if let awayOdds = away.odds, let homeOdds = home.odds {
+                    options = pickemTwoWayQuotes(
+                        nameA: awayLabel, oddsA: awayOdds,
+                        nameB: homeLabel, oddsB: homeOdds
+                    )
+                }
+                if options.count != 2 {
+                    options = [PickOption(team: awayLabel, gainRR: 10, lossRR: 10),
+                               PickOption(team: homeLabel, gainRR: 10, lossRR: 10)]
+                }
                 if options.count == 2 {
                     out.append(Match(
                         id: "\(match.id)|h1sprd|\(pickemFormatLine(home.line))",
@@ -1100,12 +1111,19 @@ struct ESPNPropBoardProvider {
                 }
             }
         }
-        if let line = h1TotalLine, h1TotalSides.count == 2 {
+        if let line = h1TotalLine {
             let fmt = pickemFormatLine(line)
-            let options = pickemTwoWayQuotes(
-                nameA: "Over \(fmt)", oddsA: h1TotalSides[0],
-                nameB: "Under \(fmt)", oddsB: h1TotalSides[1]
-            )
+            var options: [PickOption] = []
+            if h1TotalSides.count == 2 {
+                options = pickemTwoWayQuotes(
+                    nameA: "Over \(fmt)", oddsA: h1TotalSides[0],
+                    nameB: "Under \(fmt)", oddsB: h1TotalSides[1]
+                )
+            }
+            if options.count != 2 {
+                options = [PickOption(team: "Over \(fmt)", gainRR: 10, lossRR: 10),
+                           PickOption(team: "Under \(fmt)", gainRR: 10, lossRR: 10)]
+            }
             if options.count == 2 {
                 out.append(Match(
                     id: "\(match.id)|h1tot|\(fmt)",
