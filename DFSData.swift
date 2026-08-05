@@ -6774,7 +6774,87 @@ struct ESPNPlayerGameLogProvider {
             return parseNHLGameLog(json: json, limit: limit, isGoalie: isGoalie)
         }
 
+        if cleanedID.hasPrefix("nfl-") || cleanedID.hasPrefix("cfb-") {
+            return parseFootballGameLog(json: json, limit: limit)
+        }
+
         return parseGameLog(json: json, limit: limit)
+    }
+
+    /// Football (NFL/CFB) game log. The gamelog's `names` array gives
+    /// semantic stat names (labels repeat "YDS" across categories), and
+    /// each event's stats align positionally. Field mapping into
+    /// DFSPlayerGameLog (basketball-shaped struct, same trick as PGA/UFC):
+    ///   points=passYds  rebounds=passTD  assists=INT
+    ///   steals=rushYds  blocks=rushTD    turnovers=REC
+    ///   fgm=recYds      fga=recTD        threePM=fumblesLost
+    private func parseFootballGameLog(json: [String: Any], limit: Int) -> [DFSPlayerGameLog] {
+        guard let names = json["names"] as? [String],
+              let eventsMeta = json["events"] as? [String: Any] else { return [] }
+
+        var statsByEvent: [String: [String: Double]] = [:]
+        for seasonType in (json["seasonTypes"] as? [[String: Any]]) ?? [] {
+            for category in (seasonType["categories"] as? [[String: Any]]) ?? [] {
+                for event in (category["events"] as? [[String: Any]]) ?? [] {
+                    guard let eventID = event["eventId"] as? String,
+                          let raw = event["stats"] as? [String] else { continue }
+                    var line: [String: Double] = [:]
+                    for (name, value) in zip(names, raw) {
+                        line[name] = Double(value.replacingOccurrences(of: ",", with: "")) ?? 0
+                    }
+                    statsByEvent[eventID] = line
+                }
+            }
+        }
+        guard !statsByEvent.isEmpty else { return [] }
+
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let displayFormatter = DateFormatter()
+        displayFormatter.dateFormat = "M/d"
+
+        var logs: [DFSPlayerGameLog] = []
+        for (eventID, line) in statsByEvent {
+            guard let meta = eventsMeta[eventID] as? [String: Any] else { continue }
+            let dateStr = (meta["gameDate"] as? String) ?? ""
+            let date = isoFormatter.date(from: dateStr)
+                ?? ISO8601DateFormatter().date(from: dateStr) ?? .distantPast
+            let oppAbbr = ((meta["opponent"] as? [String: Any])?["abbreviation"] as? String) ?? "?"
+            let atVs = (meta["atVs"] as? String) ?? "vs"
+
+            let passYds = line["passingYards"] ?? 0
+            let passTD = line["passingTouchdowns"] ?? 0
+            let ints = line["interceptions"] ?? 0
+            let rushYds = line["rushingYards"] ?? 0
+            let rushTD = line["rushingTouchdowns"] ?? 0
+            let rec = line["receptions"] ?? 0
+            let recYds = line["receivingYards"] ?? 0
+            let recTD = line["receivingTouchdowns"] ?? 0
+            let fumblesLost = line["fumblesLost"] ?? 0
+
+            // DK scoring (+3 bonus at 300 pass / 100 rush / 100 rec yds)
+            var fpts = passYds * 0.04 + passTD * 4 - ints * 1
+                + rushYds * 0.1 + rushTD * 6
+                + rec * 1 + recYds * 0.1 + recTD * 6
+                - fumblesLost * 1
+            if passYds >= 300 { fpts += 3 }
+            if rushYds >= 100 { fpts += 3 }
+            if recYds >= 100 { fpts += 3 }
+
+            logs.append(DFSPlayerGameLog(
+                id: eventID,
+                date: displayFormatter.string(from: date),
+                sortDate: date,
+                opponent: "\(atVs == "@" ? "@" : "vs") \(oppAbbr)",
+                minutes: "",
+                points: Int(passYds), rebounds: Int(passTD), assists: Int(ints),
+                steals: Int(rushYds), blocks: Int(rushTD), turnovers: Int(rec),
+                fgm: Int(recYds), fga: Int(recTD), threePM: Int(fumblesLost),
+                threePA: 0, ftm: 0, fta: 0,
+                fantasyPoints: fpts
+            ))
+        }
+        return Array(logs.sorted { $0.sortDate > $1.sortDate }.prefix(limit))
     }
 
     /// Fetches recent news headlines for a player, filtered to only include articles mentioning the player's name

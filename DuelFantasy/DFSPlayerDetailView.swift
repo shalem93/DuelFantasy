@@ -28,6 +28,8 @@ struct DFSPlayerDetailView: View {
     private var isUFC: Bool { player.id.hasPrefix("ufc-") }
 
     private var isSoccer: Bool { player.id.hasPrefix("epl-") || player.id.hasPrefix("ucl-") || player.id.hasPrefix("wc-") }
+    private var isFootball: Bool { player.id.hasPrefix("nfl-") || player.id.hasPrefix("cfb-") }
+    private var isQB: Bool { player.position.uppercased() == "QB" }
     private var isNASCAR: Bool { player.id.hasPrefix("nascar-") }
     private var isSoccerGK: Bool {
         isSoccer && player.position.uppercased() == "GK"
@@ -77,6 +79,11 @@ struct DFSPlayerDetailView: View {
                             nascarAveragesCard(avgs)
                         }
                         nascarGameLogSection
+                    } else if isFootball {
+                        if !gameLogs.isEmpty {
+                            footballAveragesCard
+                        }
+                        footballGameLogSection
                     } else {
                         if let avgs = averages {
                             averagesCard(avgs)
@@ -1303,6 +1310,121 @@ struct DFSPlayerDetailView: View {
     }
 
     // MARK: - Data Loading
+
+    // MARK: - Football (NFL/CFB)
+    // Field mapping from parseFootballGameLog: points=passYds,
+    // rebounds=passTD, assists=INT, steals=rushYds, blocks=rushTD,
+    // turnovers=REC, fgm=recYds, fga=recTD.
+
+    private var footballAveragesCard: some View {
+        let count = Double(max(gameLogs.count, 1))
+        let passYds = gameLogs.reduce(0.0) { $0 + Double($1.points) } / count
+        let rushYds = gameLogs.reduce(0.0) { $0 + Double($1.steals) } / count
+        let recYds = gameLogs.reduce(0.0) { $0 + Double($1.fgm) } / count
+        let recs = gameLogs.reduce(0.0) { $0 + Double($1.turnovers) } / count
+        let tds = gameLogs.reduce(0.0) { $0 + Double($1.rebounds + $1.blocks + $1.fga) } / count
+        let fpts = gameLogs.reduce(0.0) { $0 + $1.fantasyPoints } / count
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("Last \(gameLogs.count) Games Avg")
+                .font(.headline)
+            HStack(spacing: 0) {
+                if isQB {
+                    avgStat(label: "PaYD", value: String(format: "%.0f", passYds))
+                    avgStat(label: "RuYD", value: String(format: "%.0f", rushYds))
+                } else {
+                    avgStat(label: "RuYD", value: String(format: "%.0f", rushYds))
+                    avgStat(label: "REC", value: String(format: "%.1f", recs))
+                    avgStat(label: "ReYD", value: String(format: "%.0f", recYds))
+                }
+                avgStat(label: "TD", value: String(format: "%.1f", tds))
+                avgStat(label: "FPTS", value: String(format: "%.1f", fpts), highlight: true)
+            }
+        }
+        .padding(16)
+        .background(.white)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .shadow(color: .black.opacity(0.05), radius: 6, y: 3)
+    }
+
+    private var footballGameLogSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Game Log")
+                .font(.headline)
+
+            if isLoading {
+                HStack {
+                    Spacer()
+                    ProgressView()
+                    Spacer()
+                }
+                .padding(.vertical, 24)
+            } else if let errorMessage {
+                Text(errorMessage)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 24)
+            } else {
+                HStack(spacing: 0) {
+                    Text("DATE").frame(width: 40, alignment: .leading)
+                    Text("OPP").frame(width: 52, alignment: .leading)
+                    Spacer()
+                    if isQB {
+                        Text("PaYD").frame(width: 44, alignment: .trailing)
+                        Text("PaTD").frame(width: 38, alignment: .trailing)
+                        Text("INT").frame(width: 30, alignment: .trailing)
+                        Text("RuYD").frame(width: 40, alignment: .trailing)
+                    } else {
+                        Text("RuYD").frame(width: 40, alignment: .trailing)
+                        Text("REC").frame(width: 32, alignment: .trailing)
+                        Text("ReYD").frame(width: 40, alignment: .trailing)
+                        Text("TD").frame(width: 26, alignment: .trailing)
+                    }
+                    Text("FPTS").frame(width: 44, alignment: .trailing)
+                }
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.secondary)
+
+                ForEach(gameLogs) { log in
+                    HStack(spacing: 0) {
+                        Text(log.date)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 40, alignment: .leading)
+                        Text(log.opponent)
+                            .font(.caption.weight(.medium))
+                            .lineLimit(1)
+                            .frame(width: 52, alignment: .leading)
+                        Spacer()
+                        if isQB {
+                            Text("\(log.points)").frame(width: 44, alignment: .trailing)
+                            Text("\(log.rebounds)").frame(width: 38, alignment: .trailing)
+                            Text("\(log.assists)").frame(width: 30, alignment: .trailing)
+                            Text("\(log.steals)").frame(width: 40, alignment: .trailing)
+                        } else {
+                            Text("\(log.steals)").frame(width: 40, alignment: .trailing)
+                            Text("\(log.turnovers)").frame(width: 32, alignment: .trailing)
+                            Text("\(log.fgm)").frame(width: 40, alignment: .trailing)
+                            Text("\(log.blocks + log.fga + log.rebounds)").frame(width: 26, alignment: .trailing)
+                        }
+                        Text(String(format: "%.1f", log.fantasyPoints))
+                            .font(.caption.weight(.semibold).monospacedDigit())
+                            .foregroundStyle(brandPurple)
+                            .frame(width: 44, alignment: .trailing)
+                    }
+                    .font(.caption.monospacedDigit())
+                    .padding(.vertical, 5)
+                    if log.id != gameLogs.last?.id {
+                        Divider()
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .background(.white)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .shadow(color: .black.opacity(0.05), radius: 6, y: 3)
+    }
 
     private func loadGameLogs() async {
         isLoading = true
