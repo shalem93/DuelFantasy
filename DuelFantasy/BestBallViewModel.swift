@@ -220,8 +220,8 @@ final class BestBallViewModel {
                     let oppName = memberRecords.first(where: { $0.id == oppID })?.displayName ?? "Opponent"
 
                     // Records + standing from the standings table ("3-2 · 4th/16").
-                    let standingRecords = (try? await SupabaseService.shared.fetchStandings(leagueID: league.id, accessToken: token)) ?? []
-                    let standings = standingRecords.map { $0.toModel() }
+                    let standingsFetch = try? await SupabaseService.shared.fetchStandings(leagueID: league.id, accessToken: token)
+                    let standings = (standingsFetch ?? []).map { $0.toModel() }
                     let myStandingRow = standings.first(where: { $0.memberID == myMembership.id })
                     let oppStandingRow = standings.first(where: { $0.memberID == oppID })
                     let memberCount = max(memberRecords.count, standings.count)
@@ -247,10 +247,24 @@ final class BestBallViewModel {
                             preview.opponentStanding = "\(bestBallOrdinal(theirs.rank))/\(memberCount)"
                         }
                     }
+                    // Failed standings fetch (nil, not genuinely empty):
+                    // carry the previous pass's records forward instead of
+                    // rendering a record-less card.
+                    if standingsFetch == nil, let prev = leagueMatchupPreviews[league.id] {
+                        preview.myRecord = preview.myRecord ?? prev.myRecord
+                        preview.myStanding = preview.myStanding ?? prev.myStanding
+                        preview.opponentRecord = preview.opponentRecord ?? prev.opponentRecord
+                        preview.opponentStanding = preview.opponentStanding ?? prev.opponentStanding
+                    }
                     previews[league.id] = preview
                 }
             }
-            leagueMatchupPreviews = previews
+            // MERGE, don't replace: a league whose weekly-scores fetch failed
+            // this pass keeps its previous preview — replacing the dict made
+            // that league's matchup card vanish until a later pass succeeded.
+            for (id, preview) in previews {
+                leagueMatchupPreviews[id] = preview
+            }
 
             // Entry fees + payouts (idempotent; see reconcileFantasyLedger)
             await reconcileFantasyLedger(token: token)
@@ -382,7 +396,12 @@ final class BestBallViewModel {
     /// Completed leagues pay the top of the standings in fee multiples.
     private func reconcileFantasyLedger(token: String) async {
         guard let uid = userID else { return }
-        var ledger = (try? await SupabaseService.shared.fetchFantasyLedger(userID: uid, accessToken: token)) ?? []
+        // A FAILED fetch (nil) must never masquerade as an EMPTY one: with
+        // `?? []` a single network hiccup computed total=0 and clobbered
+        // the persisted fantasy_rr_delta — the home-pill Fantasy bucket
+        // vanished until a later pass happened to succeed.
+        guard let fetchedLedger = try? await SupabaseService.shared.fetchFantasyLedger(userID: uid, accessToken: token) else { return }
+        var ledger = fetchedLedger
         func hasRow(_ ref: String, _ kind: String) -> Bool {
             ledger.contains { $0.refID == ref && $0.kind == kind }
         }
@@ -422,7 +441,7 @@ final class BestBallViewModel {
         // into dfs_tournament_results under fantasy tids, which the DFS
         // bucket deliberately filters out — fold the newest row per contest
         // into the fantasy bucket and publish display rows for Profile.
-        let serverRows = (try? await SupabaseService.shared.fetchUserDFSHistory(userID: uid, limit: 500, accessToken: token)) ?? []
+        guard let serverRows = try? await SupabaseService.shared.fetchUserDFSHistory(userID: uid, limit: 500, accessToken: token) else { return }
         var newestByTid: [String: DFSTournamentResultRecord] = [:]
         for row in serverRows {
             let tid = row.tournamentID
