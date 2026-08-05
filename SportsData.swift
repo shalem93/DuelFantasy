@@ -746,6 +746,21 @@ struct ESPNPropBoardProvider {
                 PropStatType(espnName: "Total Runs Scored", key: "r", shortLabel: "Runs")
             ]
         }
+        // NHL/soccer type names are pattern-based (no live boards to
+        // verify against pre-season) — same approach as football; fix
+        // names here if a posted board's rows don't appear.
+        if sportKey == "icehockey_nhl" {
+            return [
+                PropStatType(espnName: "Total Shots on Goal", key: "sog", shortLabel: "SOG"),
+                PropStatType(espnName: "Total Saves", key: "sv", shortLabel: "Saves")
+            ]
+        }
+        if sportKey.hasPrefix("soccer_") {
+            return [
+                PropStatType(espnName: "Total Shots", key: "sh", shortLabel: "Shots"),
+                PropStatType(espnName: "Total Shots on Target", key: "st", shortLabel: "SOT")
+            ]
+        }
         return []
     }
 
@@ -782,6 +797,18 @@ struct ESPNPropBoardProvider {
                 MilestoneType(espnName: "Receiving Yards Milestones", key: "reyds", shortLabel: "Rec Yds", cap: 8),
                 MilestoneType(espnName: "Receptions Milestones", key: "rec", shortLabel: "Receptions", cap: 6),
                 MilestoneType(espnName: "Touchdowns Milestones", key: "anytd", shortLabel: "To Score a TD", yesNo: true, cap: 10)
+            ]
+        }
+        if sportKey == "icehockey_nhl" {
+            return [
+                MilestoneType(espnName: "Goals Milestones", key: "g", shortLabel: "To Score a Goal", yesNo: true, cap: 8),
+                MilestoneType(espnName: "Points Milestones", key: "hpts", shortLabel: "Pts", cap: 6)
+            ]
+        }
+        if sportKey.hasPrefix("soccer_") {
+            return [
+                MilestoneType(espnName: "Anytime Goal Scorer", key: "g", shortLabel: "To Score a Goal", yesNo: true, cap: 10),
+                MilestoneType(espnName: "Goals Milestones", key: "g", shortLabel: "To Score a Goal", yesNo: true, cap: 10)
             ]
         }
         return []
@@ -916,7 +943,10 @@ struct ESPNPropBoardProvider {
             }
 
             if let milestone = milestoneByName[typeName] {
-                let target = ((item["current"] as? [String: Any])?["target"] as? [String: Any])?["value"] as? Double
+                // Yes/No event props (anytime goal/TD) often post WITHOUT a
+                // target — the market IS "1+"; default the target to 1.
+                let rawTarget = ((item["current"] as? [String: Any])?["target"] as? [String: Any])?["value"] as? Double
+                let target = rawTarget ?? (milestone.yesNo ? 1.0 : nil)
                 let odds = americanOdds(item)
                 let athleteID = ((item["athlete"] as? [String: Any])?["$ref"] as? String)?
                     .split(separator: "?").first
@@ -1198,9 +1228,13 @@ struct ESPNPropBoardProvider {
         // Milestone markets. Yes/No styles (HR, anytime TD) use the
         // target-1 item; the rest pick each athlete's target priced
         // closest to even and render as an O/U at target - 0.5.
+        var emittedMilestoneKeys = Set<String>()
         for milestone in Self.milestoneTypes(forSportKey: sportKey) {
             let items = milestonesByKey[milestone.key] ?? []
             guard !items.isEmpty else { continue }
+            // Alias entries (e.g. soccer's two possible anytime-goal names)
+            // share a key — emit each key's rows once.
+            guard emittedMilestoneKeys.insert(milestone.key).inserted else { continue }
             if milestone.yesNo {
                 let candidates = items.filter { $0.target == 1.0 }.sorted { $0.odds < $1.odds }
                 for item in candidates.prefix(milestone.cap) {
@@ -1251,6 +1285,10 @@ struct ESPNPropBoardProvider {
         appendPairs(key: "hrr", cap: 6)
         appendPairs(key: "r", cap: 6)
         appendPairs(key: "k", cap: 4)
+        appendPairs(key: "sog", cap: 8)
+        appendPairs(key: "sv", cap: 2)
+        appendPairs(key: "sh", cap: 6)
+        appendPairs(key: "st", cap: 6)
         return out
     }
 }
@@ -1388,6 +1426,20 @@ func pickemPropStat(summary: [String: Any], athleteID: String, statKey: String) 
         let recv = statLine(groupType: "receiving", labelsWanted: ["TD"])?["TD"]
         guard rush != nil || recv != nil else { return nil }
         return (rush ?? 0) + (recv ?? 0)
+    case "g":
+        // Goals — NHL skaters and soccer players both box under "G".
+        return statLine(groupType: nil, labelsWanted: ["G"])?["G"]
+    case "sog":
+        return statLine(groupType: nil, labelsWanted: ["SOG"])?["SOG"]
+    case "sv":
+        return statLine(groupType: nil, labelsWanted: ["SV"])?["SV"]
+    case "hpts":
+        guard let line = statLine(groupType: nil, labelsWanted: ["G", "A"]) else { return nil }
+        return (line["G"] ?? 0) + (line["A"] ?? 0)
+    case "sh":
+        return statLine(groupType: nil, labelsWanted: ["SH"])?["SH"]
+    case "st":
+        return statLine(groupType: nil, labelsWanted: ["ST"])?["ST"]
     default:
         return nil
     }
@@ -1603,8 +1655,8 @@ struct ESPNMatchResultProvider: MatchResultProvider {
                                         results[mid] = "PUSH"   // DNP / not in box — void
                                         continue
                                     }
-                                    // Milestone props ("to hit a HR", "to score a TD") are Yes/No
-                                    let isYesNo = statKey == "hr" || statKey == "anytd"
+                                    // Milestone props ("to hit a HR", "to score a TD/goal") are Yes/No
+                                    let isYesNo = statKey == "hr" || statKey == "anytd" || statKey == "g"
                                     let overLabel = isYesNo ? "Yes" : "Over \(pickemFormatLine(line))"
                                     let underLabel = isYesNo ? "No" : "Under \(pickemFormatLine(line))"
                                     if value > line {
