@@ -441,7 +441,10 @@ final class BestBallViewModel {
         // into dfs_tournament_results under fantasy tids, which the DFS
         // bucket deliberately filters out — fold the newest row per contest
         // into the fantasy bucket and publish display rows for Profile.
-        guard let serverRows = try? await SupabaseService.shared.fetchUserDFSHistory(userID: uid, limit: 500, accessToken: token) else { return }
+        // limit 1000: the query is newest-first, and heavy daily DFS play can
+        // push month-old tiers rows past a 500-row window — silently
+        // shrinking the tiers component of the bucket.
+        guard let serverRows = try? await SupabaseService.shared.fetchUserDFSHistory(userID: uid, limit: 1000, accessToken: token) else { return }
         var newestByTid: [String: DFSTournamentResultRecord] = [:]
         for row in serverRows {
             let tid = row.tournamentID

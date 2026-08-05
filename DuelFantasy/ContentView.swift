@@ -744,6 +744,15 @@ struct ContentView: View {
         }
         .task {
             syncAuthToViewModel()
+            // Restore the Fantasy RR bucket at LAUNCH. The reconcile only
+            // ran from the Fantasy hub / Profile sync, so a clobbered
+            // fantasy_rr_delta stayed wrong on the home pill until the user
+            // happened to visit one of those tabs.
+            Task { @MainActor in
+                if bestBallViewModel.myLeagues.isEmpty {
+                    await bestBallViewModel.loadMyLeagues()
+                }
+            }
             // Run leaderboard sync and pick settlement concurrently.
             // Settlement uses resolvedMatches (populated by leaderboard) to avoid
             // double-counting, but settlePick itself is idempotent on the server
