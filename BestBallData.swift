@@ -57,6 +57,15 @@ struct BestBallLeague: Identifiable, Equatable, Hashable {
     // in the bot drafter so it doesn't run out of QBs.
     var nflSflexStarters: Int = 0
 
+    // NBA positional lineup (nil = legacy league from before positional
+    // config existed: 1 of each position + (starters−5) FLEX).
+    var nbaPgStarters: Int? = nil
+    var nbaSgStarters: Int? = nil
+    var nbaSfStarters: Int? = nil
+    var nbaPfStarters: Int? = nil
+    var nbaCStarters: Int? = nil
+    var nbaFlexStarters: Int? = nil
+
     var memberCount: Int { draftOrder.count }
     var isFull: Bool { draftOrder.count >= maxMembers }
     var isDingersOnly: Bool { scoringMode == .dingersOnly }
@@ -326,7 +335,24 @@ enum BestBallLineupConfig {
     /// Convenience overload that pulls NFL config straight off the
     /// league object so callers don't have to hand-thread five Ints.
     static func requirements(for league: BestBallLeague) -> (starters: Int, constraints: [BestBallPositionRequirement]) {
-        requirements(
+        // NBA positional config (new leagues persist explicit counts;
+        // pre-config leagues fall through to the legacy shape below).
+        if league.sport == "NBA", let pg = league.nbaPgStarters {
+            let sg = league.nbaSgStarters ?? 1
+            let sf = league.nbaSfStarters ?? 1
+            let pf = league.nbaPfStarters ?? 1
+            let c = league.nbaCStarters ?? 1
+            let flex = league.nbaFlexStarters ?? 3
+            var constraints: [BestBallPositionRequirement] = []
+            if pg > 0 { constraints.append(BestBallPositionRequirement(label: "PG", count: pg, eligible: ["PG"])) }
+            if sg > 0 { constraints.append(BestBallPositionRequirement(label: "SG", count: sg, eligible: ["SG"])) }
+            if sf > 0 { constraints.append(BestBallPositionRequirement(label: "SF", count: sf, eligible: ["SF"])) }
+            if pf > 0 { constraints.append(BestBallPositionRequirement(label: "PF", count: pf, eligible: ["PF"])) }
+            if c > 0 { constraints.append(BestBallPositionRequirement(label: "C", count: c, eligible: ["C"])) }
+            if flex > 0 { constraints.append(BestBallPositionRequirement(label: "FLEX", count: flex, eligible: ["PG", "SG", "SF", "PF", "C"])) }
+            return (pg + sg + sf + pf + c + flex, constraints)
+        }
+        return requirements(
             for: league.sport,
             pitcherSlots: league.pitcherSlots,
             batterSlots: league.batterSlots,

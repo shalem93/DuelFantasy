@@ -20,6 +20,13 @@ struct BestBallBrowseView: View {
     @State private var newNflTE: Int = 1
     @State private var newNflFLEX: Int = 2
     @State private var newNflSFLEX: Int = 0
+    // NBA positional lineup config.
+    @State private var newNbaPG: Int = 1
+    @State private var newNbaSG: Int = 1
+    @State private var newNbaSF: Int = 1
+    @State private var newNbaPF: Int = 1
+    @State private var newNbaC: Int = 1
+    @State private var newNbaFLEX: Int = 3
     @State private var inviteCode: String = ""
     @State private var isJoiningByCode: Bool = false
 
@@ -592,14 +599,21 @@ struct BestBallBrowseView: View {
                         }
                     }
                 } else if newLeagueSport == "NBA" {
-                    Section("Scoring Starters") {
-                        Stepper("Starters: \(newPitcherSlots + newBatterSlots)", value: Binding(
-                            get: { newPitcherSlots + newBatterSlots },
-                            set: { newVal in
-                                newPitcherSlots = 0
-                                newBatterSlots = newVal
-                            }
-                        ), in: 6...12)
+                    Section("Starting Lineup") {
+                        Stepper("PG: \(newNbaPG)", value: $newNbaPG, in: 0...3)
+                        Stepper("SG: \(newNbaSG)", value: $newNbaSG, in: 0...3)
+                        Stepper("SF: \(newNbaSF)", value: $newNbaSF, in: 0...3)
+                        Stepper("PF: \(newNbaPF)", value: $newNbaPF, in: 0...3)
+                        Stepper("C: \(newNbaC)", value: $newNbaC, in: 0...2)
+                        Stepper("FLEX (any position): \(newNbaFLEX)", value: $newNbaFLEX, in: 0...5)
+                        HStack {
+                            Text("Total Starters")
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text("\(newNbaPG + newNbaSG + newNbaSF + newNbaPF + newNbaC + newNbaFLEX)")
+                                .font(.subheadline.weight(.bold))
+                                .foregroundStyle(brandPurple)
+                        }
                     }
                 } else if newLeagueSport == "NFL" || newLeagueSport == "CFB" {
                     Section("Starting Lineup") {
@@ -640,7 +654,7 @@ struct BestBallBrowseView: View {
                         let starters: Int = {
                             switch newLeagueSport {
                             case "MLB": return newScoringMode == .dingersOnly ? newBatterSlots : newPitcherSlots + newBatterSlots
-                            case "NBA": return newPitcherSlots + newBatterSlots
+                            case "NBA": return newNbaPG + newNbaSG + newNbaSF + newNbaPF + newNbaC + newNbaFLEX
                             default: return newNflQB + newNflRB + newNflWR + newNflTE + newNflFLEX + newNflSFLEX
                             }
                         }()
@@ -693,7 +707,13 @@ struct BestBallBrowseView: View {
                                 scoringMode: newScoringMode,
                                 nflQB: newNflQB, nflRB: newNflRB,
                                 nflWR: newNflWR, nflTE: newNflTE, nflFLEX: newNflFLEX, nflSFLEX: newNflSFLEX,
-                                entryFee: newLeagueEntryFee
+                                entryFee: newLeagueEntryFee,
+                                nbaPG: newLeagueSport == "NBA" ? newNbaPG : nil,
+                                nbaSG: newLeagueSport == "NBA" ? newNbaSG : nil,
+                                nbaSF: newLeagueSport == "NBA" ? newNbaSF : nil,
+                                nbaPF: newLeagueSport == "NBA" ? newNbaPF : nil,
+                                nbaC: newLeagueSport == "NBA" ? newNbaC : nil,
+                                nbaFLEX: newLeagueSport == "NBA" ? newNbaFLEX : nil
                             )
                             showCreateSheet = false
                             newLeagueTitle = ""

@@ -275,7 +275,7 @@ final class BestBallViewModel {
 
     // MARK: - Create & Join
 
-    func createLeague(title: String, sport: String, isPrivate: Bool = false, maxMembers: Int = 12, rosterSize: Int = 12, pitcherSlots: Int = 2, batterSlots: Int = 6, scoringMode: BestBallScoringMode = .normal, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0, entryFee: Int = 10) async -> BestBallLeague? {
+    func createLeague(title: String, sport: String, isPrivate: Bool = false, maxMembers: Int = 12, rosterSize: Int = 12, pitcherSlots: Int = 2, batterSlots: Int = 6, scoringMode: BestBallScoringMode = .normal, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0, entryFee: Int = 10, nbaPG: Int? = nil, nbaSG: Int? = nil, nbaSF: Int? = nil, nbaPF: Int? = nil, nbaC: Int? = nil, nbaFLEX: Int? = nil) async -> BestBallLeague? {
         guard let uid = userID, let token = accessToken else { return nil }
         guard Self.isSportJoinable(sport) else {
             self.error = "The \(sport) season has already started — leagues for the next season open after it wraps."
@@ -294,6 +294,7 @@ final class BestBallViewModel {
                 scoringMode: scoringMode.rawValue,
                 nflQB: nflQB, nflRB: nflRB, nflWR: nflWR, nflTE: nflTE, nflFLEX: nflFLEX, nflSFLEX: nflSFLEX,
                 entryFee: entryFee,
+                nbaPG: nbaPG, nbaSG: nbaSG, nbaSF: nbaSF, nbaPF: nbaPF, nbaC: nbaC, nbaFLEX: nbaFLEX,
                 createdBy: uid, accessToken: token
             )
             var league = record.toModel()

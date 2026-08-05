@@ -325,6 +325,12 @@ struct BestBallLeagueRecord: Codable, Identifiable {
     let nflFlexStarters: Int?
     let nflSflexStarters: Int?
     let entryFee: Int?
+    let nbaPgStarters: Int?
+    let nbaSgStarters: Int?
+    let nbaSfStarters: Int?
+    let nbaPfStarters: Int?
+    let nbaCStarters: Int?
+    let nbaFlexStarters: Int?
 
     enum CodingKeys: String, CodingKey {
         case id, title, sport, season, status, schedule
@@ -352,6 +358,12 @@ struct BestBallLeagueRecord: Codable, Identifiable {
         case nflTeStarters = "nfl_te_starters"
         case nflFlexStarters = "nfl_flex_starters"
         case nflSflexStarters = "nfl_sflex_starters"
+        case nbaPgStarters = "nba_pg_starters"
+        case nbaSgStarters = "nba_sg_starters"
+        case nbaSfStarters = "nba_sf_starters"
+        case nbaPfStarters = "nba_pf_starters"
+        case nbaCStarters = "nba_c_starters"
+        case nbaFlexStarters = "nba_flex_starters"
     }
 
     func toModel() -> BestBallLeague {
@@ -379,6 +391,12 @@ struct BestBallLeagueRecord: Codable, Identifiable {
         league.nflFlexStarters = nflFlexStarters ?? 2
         league.nflSflexStarters = nflSflexStarters ?? 0
         league.entryFee = entryFee ?? 10
+        league.nbaPgStarters = nbaPgStarters
+        league.nbaSgStarters = nbaSgStarters
+        league.nbaSfStarters = nbaSfStarters
+        league.nbaPfStarters = nbaPfStarters
+        league.nbaCStarters = nbaCStarters
+        league.nbaFlexStarters = nbaFlexStarters
         return league
     }
 }
@@ -2194,6 +2212,7 @@ final class SupabaseService {
         scoringMode: String = "normal",
         nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0,
         entryFee: Int = 10,
+        nbaPG: Int? = nil, nbaSG: Int? = nil, nbaSF: Int? = nil, nbaPF: Int? = nil, nbaC: Int? = nil, nbaFLEX: Int? = nil,
         createdBy: String, accessToken: String
     ) async throws -> BestBallLeagueRecord {
         var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/bestball_leagues"), resolvingAgainstBaseURL: false)
@@ -2223,6 +2242,12 @@ final class SupabaseService {
             let nflFlexStarters: Int
             let nflSflexStarters: Int
             let entryFee: Int
+            let nbaPgStarters: Int?
+            let nbaSgStarters: Int?
+            let nbaSfStarters: Int?
+            let nbaPfStarters: Int?
+            let nbaCStarters: Int?
+            let nbaFlexStarters: Int?
             enum CodingKeys: String, CodingKey {
                 case title, sport, season
                 case entryFee = "entry_fee"
@@ -2241,6 +2266,12 @@ final class SupabaseService {
                 case nflTeStarters = "nfl_te_starters"
                 case nflFlexStarters = "nfl_flex_starters"
                 case nflSflexStarters = "nfl_sflex_starters"
+                case nbaPgStarters = "nba_pg_starters"
+                case nbaSgStarters = "nba_sg_starters"
+                case nbaSfStarters = "nba_sf_starters"
+                case nbaPfStarters = "nba_pf_starters"
+                case nbaCStarters = "nba_c_starters"
+                case nbaFlexStarters = "nba_flex_starters"
             }
         }
         let payload = Payload(
@@ -2254,7 +2285,9 @@ final class SupabaseService {
             nflQbStarters: nflQB, nflRbStarters: nflRB,
             nflWrStarters: nflWR, nflTeStarters: nflTE, nflFlexStarters: nflFLEX,
             nflSflexStarters: nflSFLEX,
-            entryFee: entryFee
+            entryFee: entryFee,
+            nbaPgStarters: nbaPG, nbaSgStarters: nbaSG, nbaSfStarters: nbaSF,
+            nbaPfStarters: nbaPF, nbaCStarters: nbaC, nbaFlexStarters: nbaFLEX
         )
         let results: [BestBallLeagueRecord] = try await request(url: url, method: "POST", body: payload, bearerToken: accessToken, preferReturn: "representation")
         guard let league = results.first else { throw URLError(.badServerResponse) }

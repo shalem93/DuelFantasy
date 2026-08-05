@@ -1564,3 +1564,14 @@ create policy "frl_select_all" on public.fantasy_rr_ledger
 -- 10 RR leagues per admin decision; lazy ledger charging picks them up.
 update bestball_leagues set entry_fee = 10 where entry_fee = 0;
 alter table bestball_leagues alter column entry_fee set default 10;
+
+
+-- NBA positional Best Ball config (Aug 2026): nullable — nil means a
+-- legacy league scored with the old 1-each + flex shape.
+alter table bestball_leagues add column if not exists nba_pg_starters int;
+alter table bestball_leagues add column if not exists nba_sg_starters int;
+alter table bestball_leagues add column if not exists nba_sf_starters int;
+alter table bestball_leagues add column if not exists nba_pf_starters int;
+alter table bestball_leagues add column if not exists nba_c_starters int;
+alter table bestball_leagues add column if not exists nba_flex_starters int;
+select pg_notify('pgrst', 'reload schema');

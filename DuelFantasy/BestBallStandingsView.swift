@@ -144,6 +144,59 @@ struct BestBallStandingsView: View {
 
     // MARK: - Standings Table
 
+    /// Gold/silver/bronze medal circles for the podium, plain numbers below.
+    private func rankBadge(_ rank: Int) -> some View {
+        let medal: [Color]? = {
+            switch rank {
+            case 1: return [Color(red: 1.00, green: 0.84, blue: 0.30), Color(red: 0.90, green: 0.62, blue: 0.10)]
+            case 2: return [Color(red: 0.82, green: 0.84, blue: 0.88), Color(red: 0.62, green: 0.66, blue: 0.72)]
+            case 3: return [Color(red: 0.85, green: 0.58, blue: 0.32), Color(red: 0.65, green: 0.40, blue: 0.18)]
+            default: return nil
+            }
+        }()
+        return Group {
+            if let medal {
+                Text("\(rank)")
+                    .font(.system(size: 12, weight: .heavy).monospacedDigit())
+                    .foregroundStyle(.white)
+                    .frame(width: 24, height: 24)
+                    .background(
+                        LinearGradient(colors: medal, startPoint: .topLeading, endPoint: .bottomTrailing)
+                    )
+                    .clipShape(Circle())
+                    .shadow(color: medal[1].opacity(0.5), radius: 3, y: 1)
+            } else {
+                Text("\(rank)")
+                    .font(.subheadline.weight(.medium).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24)
+            }
+        }
+    }
+
+    /// Colored initials avatar — deterministic per name.
+    private func teamAvatar(_ name: String, isMe: Bool) -> some View {
+        let initials = String(name.prefix(2)).uppercased()
+        let palettes: [[Color]] = [
+            [Color(red: 0.48, green: 0.23, blue: 0.93), Color(red: 0.30, green: 0.35, blue: 0.90)],
+            [Color(red: 0.10, green: 0.55, blue: 0.45), Color(red: 0.05, green: 0.40, blue: 0.55)],
+            [Color(red: 0.85, green: 0.40, blue: 0.20), Color(red: 0.75, green: 0.25, blue: 0.35)],
+            [Color(red: 0.20, green: 0.45, blue: 0.85), Color(red: 0.30, green: 0.25, blue: 0.75)],
+            [Color(red: 0.60, green: 0.20, blue: 0.65), Color(red: 0.40, green: 0.15, blue: 0.70)]
+        ]
+        let palette = isMe
+            ? [brandPurple, Color(red: 0.35, green: 0.18, blue: 0.80)]
+            : palettes[abs(name.hashValue) % palettes.count]
+        return Text(initials)
+            .font(.system(size: 11, weight: .heavy))
+            .foregroundStyle(.white)
+            .frame(width: 28, height: 28)
+            .background(
+                LinearGradient(colors: palette, startPoint: .topLeading, endPoint: .bottomTrailing)
+            )
+            .clipShape(Circle())
+    }
+
     private var standingsTable: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(viewModel.standings.isEmpty ? "Teams" : "Standings")
@@ -189,6 +242,7 @@ struct BestBallStandingsView: View {
                         }
                         .padding(.vertical, 3)
                         .background(isMe ? brandPurple.opacity(0.08) : .clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
                     .buttonStyle(.plain)
                 }
@@ -214,15 +268,14 @@ struct BestBallStandingsView: View {
 
                 ForEach(filteredStandings) { standing in
                     let isMe = standing.memberID == viewModel.myMemberID
+                    let name = viewModel.memberName(for: standing.memberID)
                     NavigationLink {
                         BestBallRosterView(viewModel: viewModel, memberID: standing.memberID)
                     } label: {
-                        HStack {
-                            Text("\(standing.rank)")
-                                .font(.subheadline.weight(.medium).monospacedDigit())
-                                .foregroundStyle(standing.rank <= 3 ? Color(red: 0.95, green: 0.78, blue: 0.20) : .secondary)
-                                .frame(width: 24, alignment: .leading)
-                            Text(viewModel.memberName(for: standing.memberID))
+                        HStack(spacing: 8) {
+                            rankBadge(standing.rank)
+                            teamAvatar(name, isMe: isMe)
+                            Text(name)
                                 .font(.subheadline.weight(isMe ? .bold : .medium))
                                 .foregroundStyle(isMe ? brandPurple : .primary)
                                 .lineLimit(1)
@@ -242,6 +295,7 @@ struct BestBallStandingsView: View {
                         }
                         .padding(.vertical, 3)
                         .background(isMe ? brandPurple.opacity(0.08) : .clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
                     .buttonStyle(.plain)
                 }
@@ -336,54 +390,54 @@ struct BestBallStandingsView: View {
         let hasScores = matchup.member1Score > 0 || matchup.member2Score > 0
         let isMyMatchup = matchup.member1ID == viewModel.myMemberID || matchup.member2ID == viewModel.myMemberID
 
-        return HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    if matchup.winnerID == matchup.member1ID {
-                        Image(systemName: "crown.fill")
-                            .font(.caption2)
-                            .foregroundStyle(.yellow)
-                    }
-                    Text(m1Name)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(matchup.member1ID == viewModel.myMemberID ? brandPurple : .primary)
+        func sideRow(name: String, memberID: String, score: Double) -> some View {
+            HStack(spacing: 8) {
+                teamAvatar(name, isMe: memberID == viewModel.myMemberID)
+                if matchup.winnerID == memberID {
+                    Image(systemName: "crown.fill")
+                        .font(.caption2)
+                        .foregroundStyle(Color(red: 0.95, green: 0.78, blue: 0.20))
                 }
-                HStack(spacing: 6) {
-                    if matchup.winnerID == matchup.member2ID {
-                        Image(systemName: "crown.fill")
-                            .font(.caption2)
-                            .foregroundStyle(.yellow)
-                    }
-                    Text(m2Name)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(matchup.member2ID == viewModel.myMemberID ? brandPurple : .primary)
+                Text(name)
+                    .font(.subheadline.weight(memberID == viewModel.myMemberID ? .bold : .medium))
+                    .foregroundStyle(memberID == viewModel.myMemberID ? brandPurple : .primary)
+                    .lineLimit(1)
+                Spacer()
+                if hasScores {
+                    Text(String(format: "%.1f", score))
+                        .font(.subheadline.weight(.bold).monospacedDigit())
+                        .foregroundStyle(matchup.winnerID == memberID ? brandPurple : .primary)
                 }
             }
+        }
 
-            Spacer()
-
-            if hasScores {
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text(String(format: "%.1f", matchup.member1Score))
-                        .font(.subheadline.weight(.bold).monospacedDigit())
-                        .foregroundStyle(matchup.winnerID == matchup.member1ID ? brandPurple : .primary)
-                    Text(String(format: "%.1f", matchup.member2Score))
-                        .font(.subheadline.weight(.bold).monospacedDigit())
-                        .foregroundStyle(matchup.winnerID == matchup.member2ID ? brandPurple : .primary)
+        return HStack(spacing: 10) {
+            VStack(spacing: 8) {
+                sideRow(name: m1Name, memberID: matchup.member1ID, score: matchup.member1Score)
+                HStack(spacing: 8) {
+                    Rectangle()
+                        .fill(Color(.systemGray4))
+                        .frame(height: 1)
+                    Text("VS")
+                        .font(.system(size: 8, weight: .heavy))
+                        .foregroundStyle(.tertiary)
+                    Rectangle()
+                        .fill(Color(.systemGray4))
+                        .frame(height: 1)
                 }
-            } else {
-                Text("vs")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(.secondary)
+                sideRow(name: m2Name, memberID: matchup.member2ID, score: matchup.member2Score)
             }
-
             Image(systemName: "chevron.right")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
         .padding(12)
         .background(isMyMatchup ? brandPurple.opacity(0.06) : Color(.systemGray6).opacity(0.5))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(isMyMatchup ? brandPurple.opacity(0.25) : Color.clear, lineWidth: 1.5)
+        )
     }
 
     private func sportIcon(_ sport: String) -> String {
