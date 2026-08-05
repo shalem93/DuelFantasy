@@ -170,8 +170,10 @@ struct BestBallBrowseView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 12) {
-                // Sport filter pills
+            VStack(spacing: 14) {
+                heroBanner
+
+                // Sport filter chips
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         filterPill("All", sport: nil)
@@ -197,13 +199,17 @@ struct BestBallBrowseView: View {
                         HStack {
                             Image(systemName: "plus.circle.fill")
                             Text("Create League")
-                                .font(.subheadline.weight(.semibold))
+                                .font(.subheadline.weight(.bold))
                         }
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                        .background(brandPurple)
+                        .padding(.vertical, 13)
+                        .background(
+                            LinearGradient(colors: [brandPurple, Color(red: 0.35, green: 0.18, blue: 0.80)],
+                                           startPoint: .topLeading, endPoint: .bottomTrailing)
+                        )
                         .foregroundStyle(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .clipShape(RoundedRectangle(cornerRadius: 13))
+                        .shadow(color: brandPurple.opacity(0.35), radius: 8, y: 4)
                     }
 
                     Button {
@@ -211,15 +217,19 @@ struct BestBallBrowseView: View {
                         showJoinByCode = true
                     } label: {
                         HStack {
-                            Image(systemName: "ticket")
+                            Image(systemName: "ticket.fill")
                             Text("Join by Code")
-                                .font(.subheadline.weight(.semibold))
+                                .font(.subheadline.weight(.bold))
                         }
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                        .background(Color(.systemGray5))
-                        .foregroundStyle(.primary)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .padding(.vertical, 13)
+                        .background(.white)
+                        .foregroundStyle(brandPurple)
+                        .clipShape(RoundedRectangle(cornerRadius: 13))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 13)
+                                .strokeBorder(brandPurple.opacity(0.35), lineWidth: 1.5)
+                        )
                     }
                 }
 
@@ -228,19 +238,19 @@ struct BestBallBrowseView: View {
                     ProgressView()
                         .padding(.top, 40)
                 } else if viewModel.openLeagues.isEmpty {
-                    VStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass")
-                            .font(.title2)
+                    emptyState
+                } else {
+                    HStack {
+                        Text("OPEN LEAGUES")
+                            .font(.caption.weight(.bold))
                             .foregroundStyle(.secondary)
-                        Text("No open leagues")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                        Text("Create one to get started!")
-                            .font(.caption)
+                        Spacer()
+                        Text("\(viewModel.openLeagues.count) joinable")
+                            .font(.caption2.weight(.semibold))
                             .foregroundStyle(.tertiary)
                     }
-                    .padding(.top, 40)
-                } else {
+                    .padding(.horizontal, 4)
+                    .padding(.top, 4)
                     ForEach(viewModel.openLeagues) { league in
                         NavigationLink {
                             BestBallLeagueDetailView(viewModel: viewModel, leagueID: league.id)
@@ -253,6 +263,13 @@ struct BestBallBrowseView: View {
             }
             .padding(16)
         }
+        .background(
+            LinearGradient(
+                colors: [Color(red: 0.95, green: 0.94, blue: 1.00), Color(red: 0.97, green: 0.98, blue: 1.00)],
+                startPoint: .top, endPoint: .bottom
+            )
+            .ignoresSafeArea()
+        )
         .sheet(isPresented: $showCreateSheet) {
             createLeagueSheet
         }
@@ -261,22 +278,110 @@ struct BestBallBrowseView: View {
         }
     }
 
+    // MARK: - Hero Banner
+
+    private var heroBanner: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "trophy.fill")
+                    .font(.title3)
+                    .foregroundStyle(Color(red: 0.98, green: 0.82, blue: 0.30))
+                Text("Season-Long Best Ball")
+                    .font(.title3.bold())
+                    .foregroundStyle(.white)
+                Spacer()
+                HStack(spacing: 6) {
+                    Image(systemName: "football.fill")
+                    Image(systemName: "figure.baseball")
+                }
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.85))
+            }
+            Text("Draft once — your best lineup scores itself every week. Winner takes the pot.")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.85))
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 6) {
+                ForEach(BestBallViewModel.entryFeeTiers, id: \.self) { fee in
+                    Text("\(fee)")
+                        .font(.system(size: 10, weight: .heavy).monospacedDigit())
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(.white.opacity(0.18))
+                        .foregroundStyle(.white)
+                        .clipShape(Capsule())
+                }
+                Text("RR ENTRIES")
+                    .font(.system(size: 8, weight: .heavy))
+                    .foregroundStyle(.white.opacity(0.6))
+                Spacer()
+            }
+            .padding(.top, 2)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            LinearGradient(
+                colors: [Color(red: 0.30, green: 0.12, blue: 0.70),
+                         Color(red: 0.48, green: 0.23, blue: 0.93),
+                         Color(red: 0.20, green: 0.35, blue: 0.85)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            )
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 18))
+        .shadow(color: brandPurple.opacity(0.35), radius: 10, y: 5)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "sportscourt")
+                .font(.system(size: 34))
+                .foregroundStyle(brandPurple.opacity(0.5))
+            Text("No open leagues right now")
+                .font(.subheadline.weight(.semibold))
+            Text("Start one and the lobby fills from here — or grab an invite code from a friend.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 36)
+        .padding(.horizontal, 24)
+        .background(.white.opacity(0.7))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+    }
+
     // MARK: - Filter Pill
 
     private func filterPill(_ label: String, sport: String?) -> some View {
         let isSelected = viewModel.sportFilter == sport
+        let gradient: [Color] = sport.map { sportOption(for: $0).gradient }
+            ?? [brandPurple, Color(red: 0.35, green: 0.18, blue: 0.80)]
+        let icon: String? = sport.map { sportOption(for: $0).icon }
         return Button {
             Haptics.light()
             viewModel.sportFilter = sport
             Task { await viewModel.loadOpenLeagues() }
         } label: {
-            Text(label)
-                .font(.subheadline.weight(.semibold))
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(isSelected ? brandPurple : Color(.systemGray6))
-                .foregroundStyle(isSelected ? .white : .primary)
-                .clipShape(Capsule())
+            HStack(spacing: 5) {
+                if let icon {
+                    Image(systemName: icon)
+                        .font(.caption2)
+                }
+                Text(label)
+                    .font(.subheadline.weight(.semibold))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(
+                isSelected
+                    ? AnyShapeStyle(LinearGradient(colors: gradient, startPoint: .topLeading, endPoint: .bottomTrailing))
+                    : AnyShapeStyle(Color.white)
+            )
+            .foregroundStyle(isSelected ? .white : .primary)
+            .clipShape(Capsule())
+            .shadow(color: isSelected ? (gradient.last ?? brandPurple).opacity(0.35) : .black.opacity(0.05), radius: 4, y: 2)
         }
         .buttonStyle(.plain)
     }
@@ -284,52 +389,91 @@ struct BestBallBrowseView: View {
     // MARK: - Open League Card
 
     private func openLeagueCard(_ league: BestBallLeague) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(league.title)
-                    .font(.subheadline.weight(.semibold))
+        let option = sportOption(for: league.sport)
+        let filled = viewModel.leagueMemberCounts[league.id] ?? league.draftOrder.count
+        let capacity = max(league.maxMembers, 1)
+        let fillFraction = min(1.0, Double(filled) / Double(capacity))
+        let spotsLeft = max(0, capacity - filled)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                // Sport tile
+                Image(systemName: option.icon)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 46, height: 46)
+                    .background(
+                        LinearGradient(colors: option.gradient, startPoint: .topLeading, endPoint: .bottomTrailing)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(league.title)
+                        .font(.subheadline.weight(.bold))
+                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(league.sport)
+                            .font(.caption2.weight(.heavy))
+                            .foregroundStyle(option.gradient.last ?? brandPurple)
+                        Text("•")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        Text(option.seasonNote)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
                 Spacer()
-                Text(league.entryFee > 0 ? "\(league.entryFee) RR" : "FREE")
-                    .font(.caption.weight(.bold))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background((league.entryFee > 0 ? brandPurple : Color.green).opacity(0.12))
-                    .foregroundStyle(league.entryFee > 0 ? brandPurple : .green)
-                    .clipShape(Capsule())
-                if league.isDingersOnly {
-                    Text("HR")
-                        .font(.caption.weight(.bold))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(Color.orange.opacity(0.15))
-                        .foregroundStyle(.orange)
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(league.entryFee > 0 ? "\(league.entryFee) RR" : "FREE")
+                        .font(.caption.weight(.heavy))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(
+                            (league.entryFee > 0 ? brandPurple : Color.green).opacity(0.12)
+                        )
+                        .foregroundStyle(league.entryFee > 0 ? brandPurple : .green)
                         .clipShape(Capsule())
+                    if league.isDingersOnly {
+                        Text("HR ONLY")
+                            .font(.system(size: 8, weight: .heavy))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.orange.opacity(0.15))
+                            .foregroundStyle(.orange)
+                            .clipShape(Capsule())
+                    }
                 }
-                Text(league.sport)
-                    .font(.caption.weight(.bold))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(brandPurple.opacity(0.15))
-                    .foregroundStyle(brandPurple)
-                    .clipShape(Capsule())
             }
-            HStack {
-                Label(league.season, systemImage: "calendar")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                HStack(spacing: 4) {
-                    Image(systemName: "person.2")
-                        .font(.caption)
-                    Text("\(viewModel.leagueMemberCounts[league.id] ?? league.draftOrder.count)/\(league.maxMembers)")
-                        .font(.caption.weight(.medium))
+
+            // Fill bar: how close this league is to drafting
+            VStack(alignment: .leading, spacing: 4) {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(Color(.systemGray5))
+                        Capsule()
+                            .fill(
+                                LinearGradient(colors: option.gradient, startPoint: .leading, endPoint: .trailing)
+                            )
+                            .frame(width: max(6, geo.size.width * fillFraction))
+                    }
                 }
-                .foregroundStyle(.secondary)
+                .frame(height: 6)
+                HStack {
+                    Text("\(filled)/\(capacity) drafters")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(spotsLeft == 0 ? "FULL — drafting soon" : "\(spotsLeft) \(spotsLeft == 1 ? "spot" : "spots") left")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(spotsLeft <= 2 ? .orange : brandPurple)
+                }
             }
         }
         .padding(14)
         .background(.white)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
         .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
     }
 
