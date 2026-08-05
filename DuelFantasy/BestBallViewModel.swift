@@ -277,6 +277,10 @@ final class BestBallViewModel {
 
     func createLeague(title: String, sport: String, isPrivate: Bool = false, maxMembers: Int = 12, rosterSize: Int = 12, pitcherSlots: Int = 2, batterSlots: Int = 6, scoringMode: BestBallScoringMode = .normal, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0, entryFee: Int = 10) async -> BestBallLeague? {
         guard let uid = userID, let token = accessToken else { return nil }
+        guard Self.isSportJoinable(sport) else {
+            self.error = "The \(sport) season has already started — leagues for the next season open after it wraps."
+            return nil
+        }
         if let reason = entryDenialReason(fee: entryFee) {
             self.error = reason
             return nil
@@ -351,6 +355,20 @@ final class BestBallViewModel {
     }
 
     /// nil = allowed; otherwise a user-facing reason (shared by join+create).
+    /// A sport is joinable until the day before its season starts —
+    /// mid-season entries (e.g. MLB in August) draft against a schedule
+    /// that's already half burned.
+    static func isSportJoinable(_ sport: String) -> Bool {
+        Date() < BestBallSeasonHelper.seasonStartDate(for: sport)
+    }
+
+    static func joinDeadlineNote(for sport: String) -> String {
+        let start = BestBallSeasonHelper.seasonStartDate(for: sport)
+        let fmt = DateFormatter()
+        fmt.dateFormat = "MMM d"
+        return "Join by \(fmt.string(from: start.addingTimeInterval(-24 * 3600)))"
+    }
+
     func entryDenialReason(fee: Int) -> String? {
         guard fee > 0 else { return nil }
         // Persisted profile RR (kept at the derived total by the
@@ -501,6 +519,10 @@ final class BestBallViewModel {
 
     func joinLeague(_ league: BestBallLeague) async -> Bool {
         guard let uid = userID, let token = accessToken else { return false }
+        guard Self.isSportJoinable(league.sport) else {
+            self.error = "The \(league.sport) season has already started — this league can no longer be joined."
+            return false
+        }
         if let reason = entryDenialReason(fee: league.entryFee) {
             self.error = reason
             return false

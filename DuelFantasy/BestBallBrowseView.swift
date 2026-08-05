@@ -27,11 +27,14 @@ struct BestBallBrowseView: View {
         Color(red: 0.48, green: 0.23, blue: 0.93)
     }
 
-    // NBA is hidden during the off-season (Apr–Sep) — the league wrapped
-    // in June and there's no live data to score against until tip-off in
-    // mid-October. Re-add once the 2026-27 season is on the schedule.
-    // NFL leads (kickoff is next up), CFB alongside it, MLB in-season.
-    private let sports = ["NFL", "CFB", "MLB"]
+    // Sports are offered ONLY until the day before their season starts:
+    // a Best Ball drafted mid-season plays against a half-burned schedule.
+    // NBA re-enters the list automatically ahead of its October tip-off,
+    // MLB drops out after Opening Day, NFL/CFB run up to kickoff week.
+    private let allSports = ["NFL", "CFB", "MLB", "NBA"]
+    private var sports: [String] {
+        allSports.filter { BestBallViewModel.isSportJoinable($0) }
+    }
 
     /// Display metadata for the create-sheet sport cards.
     private struct SportOption {
@@ -240,18 +243,21 @@ struct BestBallBrowseView: View {
                 } else if viewModel.openLeagues.isEmpty {
                     emptyState
                 } else {
+                    let joinableLeagues = viewModel.openLeagues.filter {
+                        BestBallViewModel.isSportJoinable($0.sport)
+                    }
                     HStack {
                         Text("OPEN LEAGUES")
                             .font(.caption.weight(.bold))
                             .foregroundStyle(.secondary)
                         Spacer()
-                        Text("\(viewModel.openLeagues.count) joinable")
+                        Text("\(joinableLeagues.count) joinable")
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(.tertiary)
                     }
                     .padding(.horizontal, 4)
                     .padding(.top, 4)
-                    ForEach(viewModel.openLeagues) { league in
+                    ForEach(joinableLeagues) { league in
                         NavigationLink {
                             BestBallLeagueDetailView(viewModel: viewModel, leagueID: league.id)
                         } label: {
@@ -417,10 +423,11 @@ struct BestBallBrowseView: View {
                         Text("•")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
-                        Text(option.seasonNote)
+                        Text("\(option.seasonNote) · \(BestBallViewModel.joinDeadlineNote(for: league.sport))")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
+                            .minimumScaleFactor(0.8)
                     }
                 }
                 Spacer()
