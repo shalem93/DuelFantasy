@@ -490,7 +490,26 @@ final class BestBallViewModel {
         if UserDefaults.standard.integer(forKey: "fantasy_tiers_delta") != tiersDelta {
             UserDefaults.standard.set(tiersDelta, forKey: "fantasy_tiers_delta")
         }
-        let total = ledger.reduce(0) { $0 + $1.rrDelta } + tiersDelta
+
+        // Best Ball entry fees are committed when the league starts (the
+        // row locks the fee) but only COUNT against RR once the league
+        // completes — a 250 RR season-long entry shouldn't ding the pill
+        // in week 1. Payouts and everything else count immediately.
+        let completedLeagueIDs = Set(myLeagues.filter { $0.status == "completed" }.map(\.id))
+        let bestballNet = ledger.reduce(0) { sum, row in
+            guard row.kind.hasPrefix("bestball") else { return sum }
+            if row.kind == "bestball_entry", !completedLeagueIDs.contains(row.refID) {
+                return sum   // league still running — fee not realized yet
+            }
+            return sum + row.rrDelta
+        }
+        let survivorNet = ledger.filter { $0.kind.hasPrefix("survivor") }.reduce(0) { $0 + $1.rrDelta }
+        // Persist the component so SurvivorViewModel (which can't see
+        // league statuses) recomposes the same total.
+        if UserDefaults.standard.integer(forKey: "fantasy_bestball_delta") != bestballNet {
+            UserDefaults.standard.set(bestballNet, forKey: "fantasy_bestball_delta")
+        }
+        let total = bestballNet + survivorNet + tiersDelta
         fantasyLedgerDelta = total
         // Mirror into UserDefaults so ContentView's @AppStorage pill bucket
         // updates reactively; equality-guarded to avoid churn.

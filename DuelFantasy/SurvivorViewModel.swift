@@ -323,7 +323,14 @@ final class SurvivorViewModel {
     private func refreshFantasyDelta() async {
         guard let uid = userID, let token = accessToken else { return }
         guard let ledger = try? await SupabaseService.shared.fetchFantasyLedger(userID: uid, accessToken: token) else { return }
-        let total = ledger.reduce(0) { $0 + $1.rrDelta } + UserDefaults.standard.integer(forKey: "fantasy_tiers_delta")
+        // Only the survivor component is computed here — Best Ball entry
+        // fees don't count until their league completes, and this VM
+        // can't see league statuses. Recompose from the persisted
+        // components BestBallViewModel.reconcileFantasyLedger maintains.
+        let survivorNet = ledger.filter { $0.kind.hasPrefix("survivor") }.reduce(0) { $0 + $1.rrDelta }
+        let total = survivorNet
+            + UserDefaults.standard.integer(forKey: "fantasy_bestball_delta")
+            + UserDefaults.standard.integer(forKey: "fantasy_tiers_delta")
         if UserDefaults.standard.integer(forKey: "fantasy_rr_delta") != total {
             UserDefaults.standard.set(total, forKey: "fantasy_rr_delta")
         }
