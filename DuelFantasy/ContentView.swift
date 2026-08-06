@@ -3107,6 +3107,8 @@ struct ContentView: View {
             Text(label)
                 .font(.system(size: 8, weight: .heavy))
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
                 .frame(width: 42, alignment: .leading)
             ForEach(market.options) { option in
                 compactPickButton(match: market, option: option, width: nil)
@@ -3166,11 +3168,19 @@ struct ContentView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
-                        let f5Rows = props.filter { $0.id.contains("|f5") || $0.id.contains("|h1") }
+                        let f5Rows = props.filter { $0.id.contains("|f5") || $0.id.contains("|h1") || $0.id.contains("|ttot|") }
                         let playerRows = props.filter { $0.id.contains("|prop|") }
                         VStack(spacing: 6) {
                             ForEach(f5Rows) { market in
-                                compactMarketRow(market, label: f5MarketLabel(market.id))
+                                // Team totals label with the team ("CARDINALS"),
+                                // not a generic tag — two rows would otherwise
+                                // be indistinguishable.
+                                let label: String = market.id.contains("|ttot|")
+                                    ? (market.awayTeam
+                                        .replacingOccurrences(of: " Total", with: "")
+                                        .split(separator: " ").last.map { String($0).uppercased() } ?? "TEAM")
+                                    : f5MarketLabel(market.id)
+                                compactMarketRow(market, label: label)
                             }
                             ForEach(playerRows) { prop in
                                 HStack(spacing: 6) {
@@ -4986,6 +4996,9 @@ private func matchDisplayName(for match: Match) -> String {
     }
     if match.id.contains("|h1tot|") {
         return "\(match.awayTeam) @ \(match.homeTeam) — 1st Half Total"
+    }
+    if match.id.contains("|ttot|") {
+        return match.awayTeam   // "Cardinals Total"
     }
     if match.id.contains("|sprd|") {
         return "\(match.awayTeam) @ \(match.homeTeam) — Spread"

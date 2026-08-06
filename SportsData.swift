@@ -890,6 +890,10 @@ struct ESPNPropBoardProvider {
         var milestonesByKey: [String: [(athleteID: String, target: Double, odds: Double)]] = [:]
         // 1st Half game markets (basketball / football).
         var h1MLByTeam: [String: Double] = [:]
+        // Team totals: per (team, line) → [over odds?, under odds?] in
+        // feed order. Mode line = the one appearing most (alt lines list
+        // the primary twice on some boards); prefer priced pairs.
+        var teamTotalItems: [(teamID: String, line: Double, odds: Double?)] = []
         // odds are nil when the book has posted the line but not yet the
         // prices (preseason boards) — those mint with flat +10/-10.
         var h1SpreadByTeam: [String: (line: Double, odds: Double?)] = [:]
@@ -927,6 +931,12 @@ struct ESPNPropBoardProvider {
                     if let tid = teamID(from: item),
                        let line = ((item["current"] as? [String: Any])?["target"] as? [String: Any])?["value"] as? Double {
                         h1SpreadByTeam[tid] = (line, americanOdds(item))
+                    }
+                    continue
+                case "Team Total Points", "Team Total Runs", "Team Total Goals":
+                    if let tid = teamID(from: item),
+                       let line = ((item["current"] as? [String: Any])?["target"] as? [String: Any])?["value"] as? Double {
+                        teamTotalItems.append((tid, line, americanOdds(item)))
                     }
                     continue
                 case "1st Half Total":
@@ -1005,6 +1015,7 @@ struct ESPNPropBoardProvider {
         }
         let hasF5 = !f5MLByTeam.isEmpty || !f5RunLines.isEmpty || !f5TotalsByLine.isEmpty
         let hasH1 = !h1MLByTeam.isEmpty || !h1SpreadByTeam.isEmpty || !h1TotalSides.isEmpty
+            || !teamTotalItems.isEmpty
         let hasMilestones = milestonesByKey.values.contains { !$0.isEmpty }
         guard !complete.isEmpty || hasMilestones || hasF5 || hasH1 else { return [] }
 
@@ -1159,6 +1170,40 @@ struct ESPNPropBoardProvider {
                     id: "\(match.id)|h1tot|\(fmt)",
                     league: match.league,
                     awayTeam: match.awayTeam, homeTeam: match.homeTeam,
+                    startsAt: match.startsAt, state: match.state,
+                    statusDetail: match.statusDetail,
+                    awayScore: nil, homeScore: nil,
+                    options: options
+                ))
+            }
+        }
+
+        // Team totals: one row per team at its most-posted line.
+        if !teamTotalItems.isEmpty, let homeID = homeTeamID, let awayID = awayTeamID {
+            for (tid, teamName) in [(awayID, match.awayTeam), (homeID, match.homeTeam)] {
+                let mine = teamTotalItems.filter { $0.teamID == tid }
+                guard !mine.isEmpty else { continue }
+                var countByLine: [Double: Int] = [:]
+                for item in mine { countByLine[item.line, default: 0] += 1 }
+                guard let line = countByLine.max(by: { ($0.value, -$0.key) < ($1.value, -$1.key) })?.key else { continue }
+                let prices = mine.filter { $0.line == line }.compactMap(\.odds)
+                let fmt = pickemFormatLine(line)
+                var options: [PickOption] = []
+                if prices.count >= 2 {
+                    options = pickemTwoWayQuotes(
+                        nameA: "Over \(fmt)", oddsA: prices[0],
+                        nameB: "Under \(fmt)", oddsB: prices[1]
+                    )
+                }
+                if options.count != 2 {
+                    options = [PickOption(team: "Over \(fmt)", gainRR: 10, lossRR: 10),
+                               PickOption(team: "Under \(fmt)", gainRR: 10, lossRR: 10)]
+                }
+                out.append(Match(
+                    id: "\(match.id)|ttot|\(tid)|\(fmt)",
+                    league: match.league,
+                    awayTeam: "\(teamName) Total",
+                    homeTeam: "",
                     startsAt: match.startsAt, state: match.state,
                     statusDetail: match.statusDetail,
                     awayScore: nil, homeScore: nil,
@@ -1526,6 +1571,30 @@ struct ESPNMatchResultProvider: MatchResultProvider {
                                             if total > line {
                                                 results[derivedID] = "Over \(pickemFormatLine(line))"
                                             } else if total < line {
+                                                results[derivedID] = "Under \(pickemFormatLine(line))"
+                                            } else {
+                                                results[derivedID] = "PUSH"
+                                            }
+                                        case "ttot":
+                                            // base|ttot|<teamID>|<line>
+                                            guard parts.count >= 4,
+                                                  let line = Double(parts[3]) else { continue }
+                                            let teamID = parts[2]
+                                            let teamScore: Int?
+                                            if away?.team.id == teamID {
+                                                teamScore = awayScore
+                                            } else if home?.team.id == teamID {
+                                                teamScore = homeScore
+                                            } else {
+                                                teamScore = nil
+                                            }
+                                            guard let teamScore else {
+                                                results[derivedID] = "PUSH"
+                                                continue
+                                            }
+                                            if Double(teamScore) > line {
+                                                results[derivedID] = "Over \(pickemFormatLine(line))"
+                                            } else if Double(teamScore) < line {
                                                 results[derivedID] = "Under \(pickemFormatLine(line))"
                                             } else {
                                                 results[derivedID] = "PUSH"
@@ -2721,6 +2790,9 @@ private struct ESPNRecord: Codable {
 
 private struct ESPNCompetitorTeam: Codable {
     let displayName: String
+    /// ESPN team id — needed to grade team-total derived markets whose
+    /// ids embed the team id ("...|ttot|22|17.5").
+    let id: String?
 }
 
 private struct ESPNCompetitionOdds: Codable {
