@@ -473,6 +473,10 @@ struct ContentView: View {
     /// Fantasy RR ledger sum (Best Ball entry fees + payouts), mirrored
     /// from the server ledger by BestBallViewModel.reconcileFantasyLedger.
     @AppStorage("fantasy_rr_delta") private var fantasyRRDelta: Int = 0
+    /// Simple Pick'em: hide every extra market (margins, totals, player
+    /// props, 1st-half/F5 rows) — just game winners. A calmer view for
+    /// users who find the full board overwhelming.
+    @AppStorage("pickem_simple_mode") private var pickemSimpleMode: Bool = false
 
     private var winRate: Int {
         let total = wins + losses
@@ -2088,6 +2092,26 @@ struct ContentView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                     .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
 
+                    // Preferences
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Preferences")
+                            .font(.headline)
+                        Toggle(isOn: $pickemSimpleMode) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Simple Pick'em")
+                                    .font(.subheadline.weight(.medium))
+                                Text("Show only match winners — hides margins, totals, and player props")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .tint(brandPurple)
+                    }
+                    .padding(16)
+                    .background(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
+
                     // Sign out
                     Button {
                         Haptics.medium()
@@ -3331,12 +3355,15 @@ struct ContentView: View {
                 }
             }
 
-            // Derived markets: spread & total rows, then player props
-            let extraMarkets = matches.filter { $0.id.hasPrefix(match.id + "|") && !$0.id.contains("|prop|") }
-            ForEach(extraMarkets) { market in
-                compactMarketRow(market, label: market.id.contains("|sprd|") ? "MARGIN" : "TOTAL")
+            // Derived markets: margin & total rows, then player props.
+            // Hidden entirely in Simple Pick'em mode — winners only.
+            if !pickemSimpleMode {
+                let extraMarkets = matches.filter { $0.id.hasPrefix(match.id + "|") && !$0.id.contains("|prop|") }
+                ForEach(extraMarkets) { market in
+                    compactMarketRow(market, label: market.id.contains("|sprd|") ? "MARGIN" : "TOTAL")
+                }
+                propsDisclosure(for: match)
             }
-            propsDisclosure(for: match)
 
             // Status text
             if let selected = picksByMatch[match.id] {
