@@ -317,7 +317,9 @@ final class DFSViewModel {
                 return pastName
             }
         }
-        return nil
+        // Last resort: slugified stub ids ("nfl-justin-fields-...") decode
+        // to a readable name — better than rendering the raw id.
+        return decodedStubName(for: playerID)
     }
 
     /// Last-resort name resolver for a player id. Use after every other
@@ -3332,6 +3334,21 @@ final class DFSViewModel {
         // Soccer pools are tiny (~22 starters for 8 slots) so excluding 3-6 players
         // is the strongest lever for lineup diversity.
         var sgExcludedIDs = Set<String>()
+        // Football SG: salary is the weighting signal, but the priciest
+        // player can be a healthy scratch (preseason: Jeremiyah Love,
+        // $14.1K, 99% MVP-owned, never played). Cap concentration by
+        // excluding the top salaries from a probabilistic share of bots —
+        // top1 from ~55%, top2 ~35%, top3 ~20% — for ALL styles, so no
+        // single player can approach full-field ownership.
+        if isSingleGame && (effectiveSport == "NFL" || effectiveSport == "CFB") && botPool.count > lineupSize + 3 {
+            let topBySalary = botPool.sorted { $0.salary > $1.salary }
+            let dropProbabilities: [Double] = [0.55, 0.35, 0.20]
+            for (index, probability) in dropProbabilities.enumerated() where index < topBySalary.count {
+                if Double.random(in: 0...1) < probability {
+                    sgExcludedIDs.insert(topBySalary[index].id)
+                }
+            }
+        }
         if isSingleGame && botPool.count > lineupSize + 2 {
             // MLB single-game: exclude 2-4 starters for maximum diversity with ~18 batters.
             // NHL: stricter — only 60% of bots get an exclusion at all, and
