@@ -29,6 +29,9 @@ struct DFSPastStandingsView: View {
     private var isNHL: Bool {
         result.tournamentId?.hasPrefix("nhl-") == true
     }
+    private var isFootball: Bool {
+        result.tournamentId?.hasPrefix("nfl-") == true || result.tournamentId?.hasPrefix("cfb-") == true
+    }
     private var isSingleGameTournament: Bool {
         // UFC main slates are captain mode (MVP + 5 FLEX) even without a "-sg-"
         // in the tid, so treat any UFC contest as single-game for MVP scoring
@@ -588,6 +591,8 @@ struct DFSPastStandingsView: View {
                         soccerExpandedLineup(record: record)
                     } else if isUFC {
                         ufcExpandedLineup(record: record)
+                    } else if isFootball {
+                        footballExpandedLineup(record: record)
                     } else {
                         basketballExpandedLineup(record: record)
                     }
@@ -597,6 +602,110 @@ struct DFSPastStandingsView: View {
         }
         .background(entry.isCurrentUser ? brandPurple.opacity(0.08) : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    // MARK: - Football Expanded Lineup
+    // DFSPlayerLiveStats field mapping (see ESPNNFLDFSLiveScoringProvider):
+    // points=passYds, rebounds=rushYds, assists=REC, steals=passTD,
+    // blocks=rushTD, threePM=recTD, turnovers=INT+FumL.
+
+    @ViewBuilder
+    private func footballExpandedLineup(record: DFSTournamentResultRecord) -> some View {
+        HStack(spacing: 0) {
+            Text("PLAYER")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("PaYD")
+                .frame(width: 36, alignment: .trailing)
+            Text("RuYD")
+                .frame(width: 36, alignment: .trailing)
+            Text("REC")
+                .frame(width: 28, alignment: .trailing)
+            Text("TD")
+                .frame(width: 24, alignment: .trailing)
+            Text("TO")
+                .frame(width: 24, alignment: .trailing)
+            Text("FPTS")
+                .frame(width: 38, alignment: .trailing)
+        }
+        .font(.system(size: 9, weight: .bold))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+
+        let playerIDs = record.lineupPlayerIDs
+        let playerNames = record.lineupPlayerNames
+        let perPlayerPts = resolvePlayerPoints(for: record)
+        let isSingleGame = isSingleGameTournament
+
+        ForEach(Array(playerIDs.enumerated()), id: \.offset) { index, playerID in
+            let storedName = index < playerNames.count ? playerNames[index] : playerID
+            let name = resolvePlayerName(storedName: storedName, playerID: playerID)
+            let isMVP = isSingleGame && index == 0
+            let fpts = perPlayerPts[playerID] ?? 0
+            let stats = viewModel.pastTournamentPlayerStats[playerID]
+            let fbPos = slotPosition(for: playerID)
+            let slotLabel = isMVP ? "MVP" : (isSingleGame ? "FLEX" : (fbPos.isEmpty ? "\(index + 1)" : fbPos))
+            let isWideSlot = isMVP || slotLabel == "FLEX" || slotLabel.count > 2
+
+            HStack(spacing: 0) {
+                HStack(spacing: 4) {
+                    Text(slotLabel)
+                        .font(.system(size: isMVP ? 7 : 8, weight: .bold))
+                        .foregroundStyle(isMVP ? .black : .white)
+                        .lineLimit(1)
+                        .frame(width: isWideSlot ? 28 : 18, height: 18)
+                        .background(isMVP ? Color.yellow : brandPurple.opacity(0.7))
+                        .clipShape(isWideSlot ? AnyShape(Capsule()) : AnyShape(Circle()))
+
+                    Text(lastName(name))
+                        .font(.caption.weight(.medium))
+                        .lineLimit(1)
+
+                    if let sal = salaryForPlayer(playerID, in: record) {
+                        Text("$\(viewModel.formatSalary(sal))")
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if let pct = ownershipByPlayerID[playerID] {
+                        Text("\(pct)%")
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundStyle(.orange)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                if let stats {
+                    let tds = stats.steals + stats.blocks + stats.threePM
+                    Text("\(stats.points)")
+                        .frame(width: 36, alignment: .trailing)
+                    Text("\(stats.rebounds)")
+                        .frame(width: 36, alignment: .trailing)
+                    Text("\(stats.assists)")
+                        .frame(width: 28, alignment: .trailing)
+                    Text("\(tds)")
+                        .frame(width: 24, alignment: .trailing)
+                    Text("\(stats.turnovers)")
+                        .frame(width: 24, alignment: .trailing)
+                } else {
+                    Text("-").frame(width: 36, alignment: .trailing)
+                    Text("-").frame(width: 36, alignment: .trailing)
+                    Text("-").frame(width: 28, alignment: .trailing)
+                    Text("-").frame(width: 24, alignment: .trailing)
+                    Text("-").frame(width: 24, alignment: .trailing)
+                }
+
+                Text(String(format: "%.1f", fpts))
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(brandPurple)
+                    .frame(width: 38, alignment: .trailing)
+            }
+            .font(.caption.monospacedDigit())
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+        }
+
+        lineupTotalsRow(record: record)
     }
 
     // MARK: - Basketball Expanded Lineup

@@ -7162,15 +7162,32 @@ final class DFSViewModel {
                     guard let url = URL(string: urlString) else {
                         return (pid, nil, nil)
                     }
-                    guard let (data, response) = try? await URLSession.shared.data(from: url),
+                    var fetched: (Data, URLResponse)? = try? await URLSession.shared.data(from: url)
+                    if let (_, response) = fetched,
+                       let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode),
+                       !isSoccerResolve {
+                        // v2 has dropped some athletes (bench/DNP players hit
+                        // this — Jacoby Brissett rendered as a raw nfl-XXXX id
+                        // in preseason standings). The v3 common endpoint still
+                        // serves them; same fallback the settle path uses.
+                        if let v3URL = URL(string: "https://site.web.api.espn.com/apis/common/v3/sports/\(capturedESPNSportResolve)/athletes/\(athleteID)") {
+                            fetched = try? await URLSession.shared.data(from: v3URL)
+                        }
+                    }
+                    guard let (data, response) = fetched,
                           let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
                           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                         return (pid, nil, nil)
                     }
-                    // v3 nests under "athlete", v2 is top-level
+                    // v3 nests under "athlete", v2 is top-level. The v2→v3
+                    // fallback above means non-soccer responses can be either
+                    // shape — check the nested form first.
                     let name: String?
                     let posAbbr: String?
-                    if isSoccerResolve {
+                    if let athlete = json["athlete"] as? [String: Any] {
+                        name = athlete["displayName"] as? String
+                        posAbbr = (athlete["position"] as? [String: Any])?["abbreviation"] as? String
+                    } else if isSoccerResolve {
                         let athlete = json["athlete"] as? [String: Any]
                         name = athlete?["displayName"] as? String
                         posAbbr = (athlete?["position"] as? [String: Any])?["abbreviation"] as? String
