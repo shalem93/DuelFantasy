@@ -3607,6 +3607,22 @@ final class DFSViewModel {
                         // Goalie/GK picks: very flat weighting so ownership spreads
                         // across all starting keepers (~6 per slate).
                         w = pow(proj, 0.4)
+                    } else if isSingleGame && (sport == "NFL" || sport == "CFB") {
+                        // Football showdowns weight by SALARY, not stat-based
+                        // projections: DK's showdown price encodes expected
+                        // snaps for THIS game. Stat projections rated resting
+                        // veterans over the actual starters — preseason
+                        // CAR@ARI had starting QB Carson Beck ($9,300, the
+                        // most expensive player on the slate) at 2% owned
+                        // because his rookie stat line projected ~0.
+                        let salaryProj = max(Double(p.salary) / 1000.0, 0.5)
+                        switch botStyle {
+                        case 0: w = pow(salaryProj, 2.2)                             // Sharp
+                        case 1: w = pow(salaryProj, 2.0)                             // Sharp
+                        case 2: w = pow(salaryProj, 1.5)                             // Solid
+                        case 3: w = pow(salaryProj, 1.2)                             // Mild lean
+                        default: w = pow(salaryProj, 0.7)                            // Casual
+                        }
                     } else if isSingleGame {
                         // Sharper SG mix. The previous exponents (0.5, 0.8,
                         // 1.2, 0.6, 1.0) were so flat that every bot drafted
