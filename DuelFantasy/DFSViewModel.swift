@@ -3338,6 +3338,10 @@ final class DFSViewModel {
         let footballRecencyTeams: Set<String> = (effectiveSport == "NFL" || effectiveSport == "CFB")
             ? Set(players.filter { $0.playedRecently }.map(\.team))
             : []
+        // August NFL = preseason (CFB has no preseason; its regular season
+        // starts late Aug and shouldn't be veteran-faded).
+        let isFootballPreseason = effectiveSport == "NFL"
+            && Calendar.current.component(.month, from: Date()) == 8
 
         // Single-game & soccer: randomly exclude players to force different combinations.
         // Soccer pools are tiny (~22 starters for 8 slots) so excluding 3-6 players
@@ -3350,10 +3354,16 @@ final class DFSViewModel {
         // top1 from ~55%, top2 ~35%, top3 ~20% — for ALL styles, so no
         // single player can approach full-field ownership.
         if isSingleGame && (effectiveSport == "NFL" || effectiveSport == "CFB") && botPool.count > lineupSize + 3 {
-            // Rank among players NOT already recency-faded — burning the
-            // ladder on known-resting players left the real chalk uncapped.
+            // Rank among players NOT already faded (recency-resters, and in
+            // August the 10+ GP veterans) — burning the ladder on players
+            // the weights already buried left the real chalk uncapped.
             let recencyTeams: Set<String> = Set(botPool.filter { $0.playedRecently }.map(\.team))
-            let ladderPool = botPool.filter { !(recencyTeams.contains($0.team) && !$0.playedRecently) }
+            let isAugustNFL = effectiveSport == "NFL" && Calendar.current.component(.month, from: Date()) == 8
+            let ladderPool = botPool.filter { p in
+                if recencyTeams.contains(p.team) { return p.playedRecently }
+                if isAugustNFL { return (p.gamesPlayed ?? 0) < 10 }
+                return true
+            }
             let topBySalary = (ladderPool.isEmpty ? botPool : ladderPool).sorted { $0.salary > $1.salary }
             // Top-5 ladder: with only the top-3 covered, the 2nd/3rd
             // priciest no-shows still hit 80-96% ownership on small
@@ -3654,13 +3664,32 @@ final class DFSViewModel {
                         // converged — a regen produced 60 identical lineups
                         // out of 2000.
                         var salaryProj = max(Double(p.salary) / 1000.0, 0.5) * Double.random(in: 0.65...1.35)
-                        // PRESEASON recency fade: when this player's team has a
-                        // readable previous game and he DIDN'T appear in it,
-                        // he's near-certainly resting again — an Aug slate's 7
-                        // priciest players all sat while DK priced them on name
-                        // value. Weight him like a minimum-salary flier.
-                        if footballRecencyTeams.contains(p.team), !p.playedRecently {
-                            salaryProj = 0.5
+                        // PRESEASON weighting, mirroring how a sharp human
+                        // reads August football:
+                        // 1. Team has a readable previous game → whoever sat
+                        //    it is near-certainly resting again. Min-flier.
+                        // 2. No previous game (the league's week 1) → fade by
+                        //    NFL EXPERIENCE: established veterans either sit
+                        //    or play one series — even a Bryce Young who
+                        //    dresses in week 2/3 gets a quarter at most, so
+                        //    he's never preseason DFS value. Rookies and
+                        //    bubble players (0-5 GP last season) get the
+                        //    volume; DK's pricing is decent WITHIN that group
+                        //    (Beck \$9.3K was right).
+                        // Recency, when available, overrides the veteran fade
+                        // in BOTH directions — a vet who genuinely played a
+                        // lot last week (QB competition) stays in the pool.
+                        if isFootballPreseason {
+                            if footballRecencyTeams.contains(p.team) {
+                                if !p.playedRecently { salaryProj = 0.5 }
+                            } else {
+                                let lastSeasonGP = p.gamesPlayed ?? 0
+                                if lastSeasonGP >= 10 {
+                                    salaryProj = 0.5          // established starter — sits or cameo
+                                } else if lastSeasonGP >= 6 {
+                                    salaryProj *= 0.45        // part-timer — dampened
+                                }
+                            }
                         }
                         switch botStyle {
                         case 0: w = pow(salaryProj, 2.2)                             // Sharp
