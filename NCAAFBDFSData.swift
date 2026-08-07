@@ -917,7 +917,8 @@ struct ESPNNCAAFBDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
                 minutes: gameStatus,
                 fgm: stats.completions, fga: stats.passAttempts,
                 threePM: stats.recTDs, threePA: stats.targets,
-                ftm: stats.fgMade, fta: stats.fgAttempted,
+                ftm: stats.fgMade,
+                fta: stats.recYards,   // REC YARDS (kickers aren't rosterable; fgAtt was always 0)
                 fantasyPoints: roundedPts,
                 gameStatus: gameStatus,
                 gameFinal: gameFinal

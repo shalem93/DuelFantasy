@@ -1935,12 +1935,14 @@ final class DFSViewModel {
             print("[DFS-\(sport)] Admin re-grade for \(tid) — no entries found")
             return
         }
-        // forceRegenerateBots=false: saved bots belong to this event; we only
-        // need to re-score (e.g. apply captain MVP). The function aborts safely
-        // if it can't get real scores, so a failed re-grade never blanks results.
+        // forceRegenerateBots=true: the whole point of an admin re-grade is
+        // a bad field (bot weighting bugs, contaminated pools) — keeping the
+        // saved bots made the regen button a visible no-op. The function
+        // aborts safely if it can't get real scores, so a failed re-grade
+        // never blanks results.
         _ = await settleUnsettledPastTournament(
             tournamentID: tid, userEntry: myEntry, token: token,
-            userID: uid, forceRegenerateBots: false
+            userID: uid, forceRegenerateBots: true
         )
         print("[DFS-\(sport)] Admin re-grade for \(tid) — reversed \(staleRR) RR, re-settled via past-event path")
     }

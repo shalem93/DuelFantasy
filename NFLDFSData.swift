@@ -995,7 +995,7 @@ struct ESPNNFLDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
                 threePM: Int(stats.recTDs),             // receiving TDs
                 threePA: Int(stats.targets),            // targets
                 ftm: Int(stats.fgMade),                 // field goals made
-                fta: Int(stats.fgAtt),                  // field goals attempted
+                fta: Int(stats.recYards),               // REC YARDS (kickers aren't rosterable, so fgAtt was always 0 here)
                 fantasyPoints: roundedPts,
                 gameStatus: gameStatus,
                 gameFinal: gameFinal

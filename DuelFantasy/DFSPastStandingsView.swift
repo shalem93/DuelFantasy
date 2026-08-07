@@ -615,15 +615,15 @@ struct DFSPastStandingsView: View {
             Text("PLAYER")
                 .frame(maxWidth: .infinity, alignment: .leading)
             Text("PaYD")
-                .frame(width: 36, alignment: .trailing)
+                .frame(width: 34, alignment: .trailing)
             Text("RuYD")
-                .frame(width: 36, alignment: .trailing)
+                .frame(width: 34, alignment: .trailing)
+            Text("ReYD")
+                .frame(width: 34, alignment: .trailing)
             Text("REC")
-                .frame(width: 28, alignment: .trailing)
+                .frame(width: 26, alignment: .trailing)
             Text("TD")
-                .frame(width: 24, alignment: .trailing)
-            Text("TO")
-                .frame(width: 24, alignment: .trailing)
+                .frame(width: 22, alignment: .trailing)
             Text("FPTS")
                 .frame(width: 38, alignment: .trailing)
         }
@@ -678,21 +678,21 @@ struct DFSPastStandingsView: View {
                 if let stats {
                     let tds = stats.steals + stats.blocks + stats.threePM
                     Text("\(stats.points)")
-                        .frame(width: 36, alignment: .trailing)
+                        .frame(width: 34, alignment: .trailing)
                     Text("\(stats.rebounds)")
-                        .frame(width: 36, alignment: .trailing)
+                        .frame(width: 34, alignment: .trailing)
+                    Text("\(stats.fta)")
+                        .frame(width: 34, alignment: .trailing)
                     Text("\(stats.assists)")
-                        .frame(width: 28, alignment: .trailing)
+                        .frame(width: 26, alignment: .trailing)
                     Text("\(tds)")
-                        .frame(width: 24, alignment: .trailing)
-                    Text("\(stats.turnovers)")
-                        .frame(width: 24, alignment: .trailing)
+                        .frame(width: 22, alignment: .trailing)
                 } else {
-                    Text("-").frame(width: 36, alignment: .trailing)
-                    Text("-").frame(width: 36, alignment: .trailing)
-                    Text("-").frame(width: 28, alignment: .trailing)
-                    Text("-").frame(width: 24, alignment: .trailing)
-                    Text("-").frame(width: 24, alignment: .trailing)
+                    Text("-").frame(width: 34, alignment: .trailing)
+                    Text("-").frame(width: 34, alignment: .trailing)
+                    Text("-").frame(width: 34, alignment: .trailing)
+                    Text("-").frame(width: 26, alignment: .trailing)
+                    Text("-").frame(width: 22, alignment: .trailing)
                 }
 
                 Text(String(format: "%.1f", fpts))
@@ -1680,7 +1680,7 @@ struct DFSPastStandingsView: View {
     /// Resolve player name from stored name, falling back to box score stats
     /// and then to other result records that may have this player's name resolved.
     private func resolvePlayerName(storedName: String, playerID: String) -> String {
-        let rawPrefixes = ["nba-", "pga-", "ncaam-", "mlb-", "nhl-", "epl-", "ucl-", "wc-"]
+        let rawPrefixes = ["nba-", "pga-", "ncaam-", "mlb-", "nhl-", "epl-", "ucl-", "wc-", "nfl-", "cfb-", "wnba-", "ufc-", "nascar-"]
         let needsResolution = rawPrefixes.contains(where: { storedName.hasPrefix($0) })
             || storedName == "Unknown" || storedName.isEmpty
 
