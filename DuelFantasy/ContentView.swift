@@ -1620,7 +1620,7 @@ struct ContentView: View {
                                         }
                                         Spacer()
                                         VStack(alignment: .trailing, spacing: 2) {
-                                            Text(pick.team)
+                                            Text(friendlyPickLabel(pick.team))
                                                 .font(.caption.weight(.semibold))
                                                 .padding(.horizontal, 8)
                                                 .padding(.vertical, 3)
@@ -1659,7 +1659,7 @@ struct ContentView: View {
                                             Text(record.matchName)
                                                 .font(.subheadline)
                                             HStack(spacing: 4) {
-                                                Text("Picked \(record.pickedTeam)")
+                                                Text("Picked \(friendlyPickLabel(record.pickedTeam))")
                                                 Text("•")
                                                 Text(record.loggedAt.formatted(.dateTime.month(.defaultDigits).day()))
                                             }
@@ -3082,7 +3082,7 @@ struct ContentView: View {
             togglePick(match: match, option: option)
         } label: {
             VStack(spacing: 1) {
-                Text(option.team)
+                Text(friendlyPickLabel(option.team))
                     .font(.system(size: 10, weight: .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
@@ -3116,13 +3116,22 @@ struct ContentView: View {
         }
     }
 
+    /// Display-time wording only — internal option strings and grading
+    /// keep "Over/Under" so existing picks and settle comparisons never
+    /// break. "More/Less" reads like a prediction, not a wager.
+    private func friendlyPickLabel(_ raw: String) -> String {
+        if raw.hasPrefix("Over ") { return "More " + raw.dropFirst(5) }
+        if raw.hasPrefix("Under ") { return "Less " + raw.dropFirst(6) }
+        return raw
+    }
+
     private func f5MarketLabel(_ id: String) -> String {
-        if id.contains("|f5ml") { return "F5 ML" }
-        if id.contains("|f5sprd|") { return "F5 LINE" }
-        if id.contains("|f5tot|") { return "F5 TOT" }
-        if id.contains("|h1ml") { return "1H ML" }
-        if id.contains("|h1sprd|") { return "1H LINE" }
-        return "1H TOT"
+        if id.contains("|f5ml") { return "F5 WINNER" }
+        if id.contains("|f5sprd|") { return "F5 MARGIN" }
+        if id.contains("|f5tot|") { return "F5 TOTAL" }
+        if id.contains("|h1ml") { return "1H WINNER" }
+        if id.contains("|h1sprd|") { return "1H MARGIN" }
+        return "1H TOTAL"
     }
 
     @ViewBuilder
@@ -3303,7 +3312,7 @@ struct ContentView: View {
                         togglePick(match: match, option: option)
                     } label: {
                         VStack(spacing: 3) {
-                            Text(option.team)
+                            Text(friendlyPickLabel(option.team))
                                 .font(match.options.count > 2 ? .caption.weight(.semibold) : .subheadline.weight(.semibold))
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.7)
@@ -3325,7 +3334,7 @@ struct ContentView: View {
             // Derived markets: spread & total rows, then player props
             let extraMarkets = matches.filter { $0.id.hasPrefix(match.id + "|") && !$0.id.contains("|prop|") }
             ForEach(extraMarkets) { market in
-                compactMarketRow(market, label: market.id.contains("|sprd|") ? "SPREAD" : "TOTAL")
+                compactMarketRow(market, label: market.id.contains("|sprd|") ? "MARGIN" : "TOTAL")
             }
             propsDisclosure(for: match)
 
@@ -3343,12 +3352,12 @@ struct ContentView: View {
                     HStack(spacing: 4) {
                         Image(systemName: "lock.fill")
                             .font(.caption)
-                        Text("Locked: \(selected)")
+                        Text("Locked: \(friendlyPickLabel(selected))")
                     }
                     .font(.caption)
                     .foregroundStyle(.orange)
                 } else {
-                    Text("Your pick: \(selected)")
+                    Text("Your pick: \(friendlyPickLabel(selected))")
                         .font(.caption)
                         .foregroundStyle(brandPurple)
                 }
@@ -3386,7 +3395,7 @@ struct ContentView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(record.matchName)
                                 .font(.subheadline.weight(.medium))
-                            Text("Picked \(record.pickedTeam) • Winner: \(record.winnerTeam)")
+                            Text("Picked \(friendlyPickLabel(record.pickedTeam)) • Result: \(friendlyPickLabel(record.winnerTeam))")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -4983,7 +4992,7 @@ private func matchDisplayName(for match: Match) -> String {
         return "\(match.awayTeam) @ \(match.homeTeam) — 1st 5 Innings"
     }
     if match.id.contains("|f5sprd|") {
-        return "\(match.awayTeam) @ \(match.homeTeam) — 1st 5 Run Line"
+        return "\(match.awayTeam) @ \(match.homeTeam) — 1st 5 Margin"
     }
     if match.id.contains("|f5tot|") {
         return "\(match.awayTeam) @ \(match.homeTeam) — 1st 5 Total"
@@ -4992,7 +5001,7 @@ private func matchDisplayName(for match: Match) -> String {
         return "\(match.awayTeam) @ \(match.homeTeam) — 1st Half"
     }
     if match.id.contains("|h1sprd|") {
-        return "\(match.awayTeam) @ \(match.homeTeam) — 1st Half Spread"
+        return "\(match.awayTeam) @ \(match.homeTeam) — 1st Half Margin"
     }
     if match.id.contains("|h1tot|") {
         return "\(match.awayTeam) @ \(match.homeTeam) — 1st Half Total"
@@ -5001,7 +5010,7 @@ private func matchDisplayName(for match: Match) -> String {
         return match.awayTeam   // "Cardinals Total"
     }
     if match.id.contains("|sprd|") {
-        return "\(match.awayTeam) @ \(match.homeTeam) — Spread"
+        return "\(match.awayTeam) @ \(match.homeTeam) — Margin"
     }
     if match.id.contains("|tot|") {
         return "\(match.awayTeam) @ \(match.homeTeam) — Total"
