@@ -8791,7 +8791,16 @@ final class DFSViewModel {
         // FLEX) have NO "-sg-" in their ID yet ARE single-game-style scoring, so
         // the ID alone misses them. Trust the draft-time flag so captain contests
         // grade with the 1.5x MVP (and a classic UFC card grades flat).
-        let serverTournament = try? await SupabaseService.shared.fetchTournament(tournamentID: tournamentID, accessToken: token)
+        var serverTournament = try? await SupabaseService.shared.fetchTournament(tournamentID: tournamentID, accessToken: token)
+        if serverTournament == nil || (serverTournament?.playerSalaries?.isEmpty ?? true) {
+            // One retry: a transient fetch miss here empties the stored
+            // salary map, which cascades into OUTCOME-LEAKED salary
+            // estimates below (regen field turns clairvoyant).
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            if let retried = try? await SupabaseService.shared.fetchTournament(tournamentID: tournamentID, accessToken: token) {
+                serverTournament = retried
+            }
+        }
         let isSingleGame = isSingleGameTournament || (serverTournament?.isSingleGame ?? false)
 
         // Compute per-entry user stats for the primary entry (used for backward compat)
@@ -8918,7 +8927,26 @@ final class DFSViewModel {
         // Build salary lookup: tournament salaries (original slate) > user stored > estimate
         // Seed with ALL tournament slate salaries first so DNP players also have prices.
         var salaryByID: [String: Int] = tournamentSalaries
-        let sortedByFPTS = allPlayers.sorted { $0.points > $1.points }
+        // OUTCOME-BLIND estimate ordering. This was sorted by FINAL points —
+        // so when the stored salary map was missing/empty, top scorers got
+        // priced highest, "salary-based" bot generation became hindsight-
+        // based, and a regenerated field drafted near-optimal lineups (user
+        // finished #2000/2000 in a preseason SG). Rank by stored salary
+        // where known, deterministic id-hash otherwise.
+        if !tournamentSalaries.isEmpty {
+            let missing = allPlayers.filter { (tournamentSalaries[$0.id] ?? 0) <= 0 }.count
+            if missing > allPlayers.count / 2 {
+                print("[DFS-\(sport)] ⚠ Settlement regen: \(missing)/\(allPlayers.count) players missing stored salaries — estimates in force")
+            }
+        } else {
+            print("[DFS-\(sport)] ⚠ Settlement regen: NO stored salary map for \(tournamentID) — all salaries estimated")
+        }
+        let sortedByFPTS = allPlayers.sorted { a, b in
+            let aSal = tournamentSalaries[a.id] ?? 0
+            let bSal = tournamentSalaries[b.id] ?? 0
+            if aSal != bSal { return aSal > bSal }
+            return a.id.hashValue < b.id.hashValue
+        }
         for (index, player) in sortedByFPTS.enumerated() {
             if let tSal = tournamentSalaries[player.id], tSal > 0 {
                 salaryByID[player.id] = tSal

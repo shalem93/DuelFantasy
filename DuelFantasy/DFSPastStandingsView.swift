@@ -614,18 +614,8 @@ struct DFSPastStandingsView: View {
         HStack(spacing: 0) {
             Text("PLAYER")
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Text("PaYD")
-                .frame(width: 34, alignment: .trailing)
-            Text("RuYD")
-                .frame(width: 34, alignment: .trailing)
-            Text("ReYD")
-                .frame(width: 34, alignment: .trailing)
-            Text("REC")
-                .frame(width: 26, alignment: .trailing)
-            Text("TD")
-                .frame(width: 22, alignment: .trailing)
             Text("FPTS")
-                .frame(width: 38, alignment: .trailing)
+                .frame(width: 44, alignment: .trailing)
         }
         .font(.system(size: 9, weight: .bold))
         .foregroundStyle(.secondary)
@@ -647,65 +637,78 @@ struct DFSPastStandingsView: View {
             let slotLabel = isMVP ? "MVP" : (isSingleGame ? "FLEX" : (fbPos.isEmpty ? "\(index + 1)" : fbPos))
             let isWideSlot = isMVP || slotLabel == "FLEX" || slotLabel.count > 2
 
-            HStack(spacing: 0) {
-                HStack(spacing: 4) {
-                    Text(slotLabel)
-                        .font(.system(size: isMVP ? 7 : 8, weight: .bold))
-                        .foregroundStyle(isMVP ? .black : .white)
-                        .lineLimit(1)
-                        .frame(width: isWideSlot ? 28 : 18, height: 18)
-                        .background(isMVP ? Color.yellow : brandPurple.opacity(0.7))
-                        .clipShape(isWideSlot ? AnyShape(Capsule()) : AnyShape(Circle()))
+            HStack(alignment: .top, spacing: 0) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Text(slotLabel)
+                            .font(.system(size: isMVP ? 7 : 8, weight: .bold))
+                            .foregroundStyle(isMVP ? .black : .white)
+                            .lineLimit(1)
+                            .frame(width: isWideSlot ? 28 : 18, height: 18)
+                            .background(isMVP ? Color.yellow : brandPurple.opacity(0.7))
+                            .clipShape(isWideSlot ? AnyShape(Capsule()) : AnyShape(Circle()))
 
-                    Text(lastName(name))
-                        .font(.caption.weight(.medium))
-                        .lineLimit(1)
+                        Text(name)
+                            .font(.caption.weight(.medium))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
 
-                    if let sal = salaryForPlayer(playerID, in: record) {
-                        Text("$\(viewModel.formatSalary(sal))")
-                            .font(.system(size: 8, weight: .medium))
-                            .foregroundStyle(.secondary)
+                        if let sal = salaryForPlayer(playerID, in: record) {
+                            Text("$\(viewModel.formatSalary(sal))")
+                                .font(.system(size: 8, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        if let pct = ownershipByPlayerID[playerID] {
+                            Text("\(pct)%")
+                                .font(.system(size: 8, weight: .medium))
+                                .foregroundStyle(.orange)
+                        }
                     }
-
-                    if let pct = ownershipByPlayerID[playerID] {
-                        Text("\(pct)%")
-                            .font(.system(size: 8, weight: .medium))
-                            .foregroundStyle(.orange)
-                    }
+                    // Full stat line: only the components this player actually
+                    // produced, with the pass/rush/rec TD split (4 vs 6 pts).
+                    Text(footballStatLine(stats))
+                        .font(.system(size: 10).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .padding(.leading, 22)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-
-                if let stats {
-                    let tds = stats.steals + stats.blocks + stats.threePM
-                    Text("\(stats.points)")
-                        .frame(width: 34, alignment: .trailing)
-                    Text("\(stats.rebounds)")
-                        .frame(width: 34, alignment: .trailing)
-                    Text("\(stats.fta)")
-                        .frame(width: 34, alignment: .trailing)
-                    Text("\(stats.assists)")
-                        .frame(width: 26, alignment: .trailing)
-                    Text("\(tds)")
-                        .frame(width: 22, alignment: .trailing)
-                } else {
-                    Text("-").frame(width: 34, alignment: .trailing)
-                    Text("-").frame(width: 34, alignment: .trailing)
-                    Text("-").frame(width: 34, alignment: .trailing)
-                    Text("-").frame(width: 26, alignment: .trailing)
-                    Text("-").frame(width: 22, alignment: .trailing)
-                }
 
                 Text(String(format: "%.1f", fpts))
                     .font(.caption.weight(.semibold).monospacedDigit())
                     .foregroundStyle(brandPurple)
-                    .frame(width: 38, alignment: .trailing)
+                    .frame(width: 44, alignment: .trailing)
             }
-            .font(.caption.monospacedDigit())
             .padding(.horizontal, 12)
             .padding(.vertical, 4)
         }
 
         lineupTotalsRow(record: record)
+    }
+
+    /// Compact per-player football stat sentence from the repurposed
+    /// DFSPlayerLiveStats fields: points=PaYd, fgm/fga=Cmp/Att,
+    /// steals=PaTD, rebounds=RuYd, blocks=RuTD, assists=Rec,
+    /// fta=ReYd, threePM=ReTD, turnovers=INT+FumL.
+    private func footballStatLine(_ stats: DFSPlayerLiveStats?) -> String {
+        guard let stats else { return "Did not play" }
+        var parts: [String] = []
+        if stats.fga > 0 || stats.points != 0 {
+            parts.append("\(stats.fgm)/\(stats.fga) · \(stats.points) PaYd")
+            if stats.steals > 0 { parts.append("\(stats.steals) PaTD") }
+        }
+        if stats.rebounds != 0 || stats.blocks > 0 {
+            parts.append("\(stats.rebounds) RuYd")
+            if stats.blocks > 0 { parts.append("\(stats.blocks) RuTD") }
+        }
+        if stats.assists > 0 || stats.fta != 0 || stats.threePM > 0 {
+            parts.append("\(stats.assists) Rec · \(stats.fta) ReYd")
+            if stats.threePM > 0 { parts.append("\(stats.threePM) ReTD") }
+        }
+        if stats.turnovers > 0 { parts.append("\(stats.turnovers) TO") }
+        return parts.isEmpty ? "No stats" : parts.joined(separator: " · ")
     }
 
     // MARK: - Basketball Expanded Lineup
