@@ -3332,6 +3332,13 @@ final class DFSViewModel {
         // their view).
         let botStyle = Int.random(in: 0..<5)
 
+        // Football preseason recency: teams where the slate provider read
+        // last week's box score (playedRecently is meaningful). Empty in
+        // the regular season and in preseason week 1.
+        let footballRecencyTeams: Set<String> = (effectiveSport == "NFL" || effectiveSport == "CFB")
+            ? Set(players.filter { $0.playedRecently }.map(\.team))
+            : []
+
         // Single-game & soccer: randomly exclude players to force different combinations.
         // Soccer pools are tiny (~22 starters for 8 slots) so excluding 3-6 players
         // is the strongest lever for lineup diversity.
@@ -3343,7 +3350,11 @@ final class DFSViewModel {
         // top1 from ~55%, top2 ~35%, top3 ~20% — for ALL styles, so no
         // single player can approach full-field ownership.
         if isSingleGame && (effectiveSport == "NFL" || effectiveSport == "CFB") && botPool.count > lineupSize + 3 {
-            let topBySalary = botPool.sorted { $0.salary > $1.salary }
+            // Rank among players NOT already recency-faded — burning the
+            // ladder on known-resting players left the real chalk uncapped.
+            let recencyTeams: Set<String> = Set(botPool.filter { $0.playedRecently }.map(\.team))
+            let ladderPool = botPool.filter { !(recencyTeams.contains($0.team) && !$0.playedRecently) }
+            let topBySalary = (ladderPool.isEmpty ? botPool : ladderPool).sorted { $0.salary > $1.salary }
             // Top-5 ladder: with only the top-3 covered, the 2nd/3rd
             // priciest no-shows still hit 80-96% ownership on small
             // preseason pools.
@@ -3642,7 +3653,15 @@ final class DFSViewModel {
                         // projections), and without jitter the sharp styles
                         // converged — a regen produced 60 identical lineups
                         // out of 2000.
-                        let salaryProj = max(Double(p.salary) / 1000.0, 0.5) * Double.random(in: 0.65...1.35)
+                        var salaryProj = max(Double(p.salary) / 1000.0, 0.5) * Double.random(in: 0.65...1.35)
+                        // PRESEASON recency fade: when this player's team has a
+                        // readable previous game and he DIDN'T appear in it,
+                        // he's near-certainly resting again — an Aug slate's 7
+                        // priciest players all sat while DK priced them on name
+                        // value. Weight him like a minimum-salary flier.
+                        if footballRecencyTeams.contains(p.team), !p.playedRecently {
+                            salaryProj = 0.5
+                        }
                         switch botStyle {
                         case 0: w = pow(salaryProj, 2.2)                             // Sharp
                         case 1: w = pow(salaryProj, 2.0)                             // Sharp

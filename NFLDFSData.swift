@@ -132,6 +132,39 @@ struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
         guard !allPlayers.isEmpty else {
             throw NSError(domain: "NFLDFS", code: 2, userInfo: [NSLocalizedDescriptionKey: "No NFL players available"])
         }
+        // (recency stamped after salary application below)
+
+        // 4.5 PRESEASON recency: participation is sticky week to week —
+        // the guys who played last week's preseason game play this week,
+        // and the resting starters keep resting. DK preseason pricing is
+        // name-driven and unreliable (an Aug 2026 slate's 7 most expensive
+        // players ALL sat), so mark who actually appeared in each team's
+        // most recent completed game within 14 days and let the bot
+        // weighting fade everyone else. August only — in the regular
+        // season a missed week means injury/bye, not a rest pattern.
+        var recentParticipants = Set<String>()
+        var teamsWithRecency = Set<String>()
+        let month = Calendar.current.component(.month, from: Date())
+        if month == 8 {
+            let participantsByTeam: [(String, Set<String>)] = await withTaskGroup(of: (String, Set<String>).self) { group in
+                for team in teamRefs {
+                    group.addTask {
+                        let ids = await self.fetchRecentGameParticipants(teamID: team.id)
+                        return (team.abbreviation, ids)
+                    }
+                }
+                var out: [(String, Set<String>)] = []
+                for await pair in group { out.append(pair) }
+                return out
+            }
+            for (abbr, ids) in participantsByTeam where !ids.isEmpty {
+                teamsWithRecency.insert(abbr)
+                recentParticipants.formUnion(ids)
+            }
+            if !teamsWithRecency.isEmpty {
+                print("[NFL-DFS] Preseason recency: \(recentParticipants.count) recent participants across \(teamsWithRecency.sorted())")
+            }
+        }
 
         // 5. Apply real DraftKings salaries from RotoGrinders where available
         let realSalaries = await rgSalaries
@@ -185,7 +218,19 @@ struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
             throw NSError(domain: "NFLDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for today's NFL slate"])
         }
 
-        let sortedPlayers = finalPlayers.sorted(by: { $0.salary > $1.salary })
+        var sortedPlayers = finalPlayers.sorted(by: { $0.salary > $1.salary })
+        // Stamp preseason recency: playedRecently only means something for
+        // teams whose previous game we could actually read.
+        if !recentParticipants.isEmpty {
+            sortedPlayers = sortedPlayers.map { player in
+                var p = player
+                if teamsWithRecency.contains(player.team) {
+                    let athleteID = player.id.replacingOccurrences(of: "nfl-", with: "")
+                    p.playedRecently = recentParticipants.contains(athleteID)
+                }
+                return p
+            }
+        }
 
         // 6. Build tournaments using shared builder
         let slateDate = events.first?.date ?? Date()
@@ -211,6 +256,56 @@ struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
         )
         NFLSlateCache.shared.set(slate)
         return slate
+    }
+
+    /// Athlete ids who recorded ANY box-score line in the team's most
+    /// recent completed game within 14 days. Empty when no recent game
+    /// (preseason week 1) — callers must treat that as "no signal".
+    private func fetchRecentGameParticipants(teamID: String) async -> Set<String> {
+        guard let schedURL = URL(string: "https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/\(teamID)/schedule"),
+              let (data, resp) = try? await session.data(from: schedURL),
+              let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let events = json["events"] as? [[String: Any]] else { return [] }
+
+        let iso = ISO8601DateFormatter()
+        let fallbackFormatter = DateFormatter()
+        fallbackFormatter.dateFormat = "yyyy-MM-dd'T'HH:mm'Z'"
+        fallbackFormatter.timeZone = TimeZone(identifier: "UTC")
+        fallbackFormatter.locale = Locale(identifier: "en_US_POSIX")
+
+        var bestEvent: (id: String, date: Date)?
+        let cutoff = Date().addingTimeInterval(-14 * 24 * 3600)
+        for event in events {
+            guard let eventID = event["id"] as? String,
+                  let dateStr = event["date"] as? String,
+                  let date = iso.date(from: dateStr) ?? fallbackFormatter.date(from: dateStr) else { continue }
+            let state = (((event["competitions"] as? [[String: Any]])?.first?["status"] as? [String: Any])?["type"] as? [String: Any])?["state"] as? String
+            guard state == "post", date > cutoff, date < Date() else { continue }
+            if bestEvent == nil || date > bestEvent!.date {
+                bestEvent = (eventID, date)
+            }
+        }
+        guard let game = bestEvent,
+              let sumURL = URL(string: "https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary?event=\(game.id)"),
+              let (sumData, sumResp) = try? await session.data(from: sumURL),
+              let sumHttp = sumResp as? HTTPURLResponse, (200..<300).contains(sumHttp.statusCode),
+              let sumJSON = try? JSONSerialization.jsonObject(with: sumData) as? [String: Any],
+              let box = sumJSON["boxscore"] as? [String: Any],
+              let teams = box["players"] as? [[String: Any]] else { return [] }
+
+        var participants = Set<String>()
+        for team in teams {
+            for group in (team["statistics"] as? [[String: Any]]) ?? [] {
+                for entry in (group["athletes"] as? [[String: Any]]) ?? [] {
+                    if let ath = entry["athlete"] as? [String: Any],
+                       let id = ath["id"] as? String {
+                        participants.insert(id)
+                    }
+                }
+            }
+        }
+        return participants
     }
 
     // MARK: - Fetch NFL Events
