@@ -3344,7 +3344,10 @@ final class DFSViewModel {
         // single player can approach full-field ownership.
         if isSingleGame && (effectiveSport == "NFL" || effectiveSport == "CFB") && botPool.count > lineupSize + 3 {
             let topBySalary = botPool.sorted { $0.salary > $1.salary }
-            let dropProbabilities: [Double] = [0.55, 0.35, 0.20]
+            // Top-5 ladder: with only the top-3 covered, the 2nd/3rd
+            // priciest no-shows still hit 80-96% ownership on small
+            // preseason pools.
+            let dropProbabilities: [Double] = [0.50, 0.38, 0.28, 0.20, 0.14]
             for (index, probability) in dropProbabilities.enumerated() where index < topBySalary.count {
                 if Double.random(in: 0...1) < probability {
                     sgExcludedIDs.insert(topBySalary[index].id)
@@ -3634,7 +3637,12 @@ final class DFSViewModel {
                         // CAR@ARI had starting QB Carson Beck ($9,300, the
                         // most expensive player on the slate) at 2% owned
                         // because his rookie stat line projected ~0.
-                        let salaryProj = max(Double(p.salary) / 1000.0, 0.5)
+                        // Per-evaluation jitter is the diversity source here:
+                        // raw salary is IDENTICAL for every bot (unlike noised
+                        // projections), and without jitter the sharp styles
+                        // converged — a regen produced 60 identical lineups
+                        // out of 2000.
+                        let salaryProj = max(Double(p.salary) / 1000.0, 0.5) * Double.random(in: 0.65...1.35)
                         switch botStyle {
                         case 0: w = pow(salaryProj, 2.2)                             // Sharp
                         case 1: w = pow(salaryProj, 2.0)                             // Sharp
@@ -9340,6 +9348,7 @@ final class DFSViewModel {
             if currentBotCount < targetBots {
                 let botsNeeded = targetBots - currentBotCount
                 print("[DFS] Padding saved bot field with \(botsNeeded) additional bots (had \(currentBotCount), need \(targetBots))")
+                var seenLineupKeys = Set(field.map { $0.playerIDs.sorted().joined(separator: "|") })
                 for i in 0..<botsNeeded {
                     let dfsPlayersForBot: [DFSPlayer] = baseBotPlayers.map { p in
                         // Use salary-based projections to avoid hindsight bias.
@@ -9355,7 +9364,16 @@ final class DFSViewModel {
                         player.isConfirmedActive = p.hasRealSalary
                         return player
                     }
-                    let botPlayerIDs = generateBotLineup(from: dfsPlayersForBot, salaryCap: salaryCap, lineupSize: botLineupSize, rosterSlots: botRosterSlots, isSingleGame: isSingleGame, sportOverride: sportPrefix.uppercased())
+                    // Duplicate-lineup re-roll: identical builds collapse field
+                // variance (60 clones surfaced in one regen) — try a few
+                // fresh rolls before accepting a repeat.
+                var botPlayerIDs = generateBotLineup(from: dfsPlayersForBot, salaryCap: salaryCap, lineupSize: botLineupSize, rosterSlots: botRosterSlots, isSingleGame: isSingleGame, sportOverride: sportPrefix.uppercased())
+                var rerolls = 0
+                while rerolls < 3, seenLineupKeys.contains(botPlayerIDs.sorted().joined(separator: "|")) {
+                    botPlayerIDs = generateBotLineup(from: dfsPlayersForBot, salaryCap: salaryCap, lineupSize: botLineupSize, rosterSlots: botRosterSlots, isSingleGame: isSingleGame, sportOverride: sportPrefix.uppercased())
+                    rerolls += 1
+                }
+                seenLineupKeys.insert(botPlayerIDs.sorted().joined(separator: "|"))
                     let botTotal = lineupTotal(botPlayerIDs)
                     let pnames = botPlayerIDs.map { playerNameLookup[$0] ?? $0 }
                     let ppts = Dictionary(uniqueKeysWithValues: botPlayerIDs.enumerated().map { (i, pid) in
@@ -9387,6 +9405,7 @@ final class DFSViewModel {
             // using them would let bots "know" who performed well and draft accordingly.
             print("[DFS] No saved bot field for \(tournamentID), generating with salary-based projections (no hindsight)")
             let botsToGenerate = max(0, entryCount - totalRealEntries)
+            var seenLineupKeys = Set(field.map { $0.playerIDs.sorted().joined(separator: "|") })
             for i in 0..<botsToGenerate {
                 let dfsPlayersForBot: [DFSPlayer] = baseBotPlayers.map { p in
                     let salaryRatio = Double(p.salary) / Double(salaryCap) * Double(botLineupSize)
@@ -9400,7 +9419,16 @@ final class DFSViewModel {
                     player.isConfirmedActive = p.hasRealSalary
                     return player
                 }
-                let botPlayerIDs = generateBotLineup(from: dfsPlayersForBot, salaryCap: salaryCap, lineupSize: botLineupSize, rosterSlots: botRosterSlots, isSingleGame: isSingleGame, sportOverride: sportPrefix.uppercased())
+                // Duplicate-lineup re-roll: identical builds collapse field
+                // variance (60 clones surfaced in one regen) — try a few
+                // fresh rolls before accepting a repeat.
+                var botPlayerIDs = generateBotLineup(from: dfsPlayersForBot, salaryCap: salaryCap, lineupSize: botLineupSize, rosterSlots: botRosterSlots, isSingleGame: isSingleGame, sportOverride: sportPrefix.uppercased())
+                var rerolls = 0
+                while rerolls < 3, seenLineupKeys.contains(botPlayerIDs.sorted().joined(separator: "|")) {
+                    botPlayerIDs = generateBotLineup(from: dfsPlayersForBot, salaryCap: salaryCap, lineupSize: botLineupSize, rosterSlots: botRosterSlots, isSingleGame: isSingleGame, sportOverride: sportPrefix.uppercased())
+                    rerolls += 1
+                }
+                seenLineupKeys.insert(botPlayerIDs.sorted().joined(separator: "|"))
                 let botTotal = lineupTotal(botPlayerIDs)
                 let pnames = botPlayerIDs.map { playerNameLookup[$0] ?? $0 }
                 let ppts = Dictionary(uniqueKeysWithValues: botPlayerIDs.enumerated().map { (idx, pid) in
