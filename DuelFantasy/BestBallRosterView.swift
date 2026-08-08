@@ -3,6 +3,7 @@ import SwiftUI
 struct BestBallRosterView: View {
     @Bindable var viewModel: BestBallViewModel
     let memberID: String
+    @State private var detailPlayer: BBPlayerRef? = nil
 
     private var brandPurple: Color {
         Color(red: 0.48, green: 0.23, blue: 0.93)
@@ -197,6 +198,9 @@ struct BestBallRosterView: View {
         .navigationTitle(memberName)
         .navigationBarTitleDisplayMode(.inline)
         .background(Color(.systemGroupedBackground))
+        .sheet(item: $detailPlayer) { ref in
+            BestBallPlayerDetailSheet(viewModel: viewModel, player: ref)
+        }
         .task {
             if let league = viewModel.currentLeague {
                 if league.isDingersOnly {
@@ -643,6 +647,14 @@ struct BestBallRosterView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(isScoring ? brandPurple.opacity(0.04) : .clear)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            Haptics.light()
+            detailPlayer = BBPlayerRef(
+                playerID: pick.playerID, name: pick.playerName,
+                team: pick.playerTeam, position: pick.playerPosition
+            )
+        }
     }
 
     // MARK: - Bench Divider

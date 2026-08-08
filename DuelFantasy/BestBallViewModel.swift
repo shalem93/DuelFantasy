@@ -739,6 +739,7 @@ final class BestBallViewModel {
             }
 
             if currentLeague?.status == "active" || currentLeague?.status == "completed" {
+                await loadNFLByeWeeksIfNeeded()
                 // Auto-generate schedule if missing (pre-V2 leagues)
                 if let league = currentLeague, league.schedule.isEmpty, !currentMembers.isEmpty {
                     await generateScheduleAfterDraft(leagueID: leagueID)

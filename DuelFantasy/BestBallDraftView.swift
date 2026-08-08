@@ -11,6 +11,12 @@ struct BestBallDraftView: View {
     /// Set when the user taps a team pill in the recent-picks ticker —
     /// presents a sheet listing that member's drafted players so far.
     @State private var inspectMemberID: String? = nil
+    /// Player game-log sheets. One state per presentation context —
+    /// the roster/inspect sheets must present the detail from within
+    /// their own sheet, not from the root view.
+    @State private var listDetail: BBPlayerRef? = nil
+    @State private var rosterDetail: BBPlayerRef? = nil
+    @State private var inspectDetail: BBPlayerRef? = nil
 
     private var brandPurple: Color {
         Color(red: 0.48, green: 0.23, blue: 0.93)
@@ -43,6 +49,17 @@ struct BestBallDraftView: View {
             set: { inspectMemberID = $0?.id }
         )) { wrapper in
             inspectTeamSheet(memberID: wrapper.id)
+        }
+        .sheet(item: $listDetail) { ref in
+            let canDraft = viewModel.isMyTurn && state?.isDraftComplete == false
+            BestBallPlayerDetailSheet(
+                viewModel: viewModel, player: ref,
+                onDraft: canDraft ? {
+                    if let player = viewModel.availablePlayers.first(where: { $0.id == ref.playerID }) {
+                        Task { await viewModel.makePick(player: player) }
+                    }
+                } : nil
+            )
         }
         .onAppear {
             if let league = viewModel.currentLeague {
@@ -280,9 +297,16 @@ struct BestBallDraftView: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(filteredPlayers(state)) { player in
+                        // Row tap opens the player card (game logs); the
+                        // trailing + is the one-tap draft when it's the
+                        // user's turn.
+                        HStack(spacing: 0) {
                         Button {
-                            Haptics.medium()
-                            Task { await viewModel.makePick(player: player) }
+                            Haptics.light()
+                            listDetail = BBPlayerRef(
+                                playerID: player.id, name: player.name,
+                                team: player.team, position: player.position
+                            )
                         } label: {
                             HStack {
                                 Text(player.name)
@@ -339,12 +363,27 @@ struct BestBallDraftView: View {
                                         .frame(width: 52, alignment: .trailing)
                                 }
                             }
-                            .padding(.horizontal, 16)
+                            .padding(.leading, 16)
+                            .padding(.trailing, viewModel.isMyTurn && !state.isDraftComplete ? 8 : 16)
                             .padding(.vertical, 10)
-                            .background(Color(.systemBackground))
                         }
                         .buttonStyle(.plain)
-                        .disabled(!viewModel.isMyTurn || state.isDraftComplete)
+
+                        if viewModel.isMyTurn && !state.isDraftComplete {
+                            Button {
+                                Haptics.medium()
+                                Task { await viewModel.makePick(player: player) }
+                            } label: {
+                                Image(systemName: "plus.circle.fill")
+                                    .font(.title3)
+                                    .foregroundStyle(brandPurple)
+                                    .padding(.trailing, 14)
+                                    .padding(.vertical, 10)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        }
+                        .background(Color(.systemBackground))
 
                         Divider().padding(.leading, 16)
                     }
@@ -403,6 +442,14 @@ struct BestBallDraftView: View {
                                 .font(.caption.monospacedDigit())
                                 .foregroundStyle(.secondary)
                         }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            Haptics.light()
+                            inspectDetail = BBPlayerRef(
+                                playerID: pick.playerID, name: pick.playerName,
+                                team: pick.playerTeam, position: pick.playerPosition
+                            )
+                        }
                     }
                 }
             }
@@ -413,6 +460,9 @@ struct BestBallDraftView: View {
                     Button("Close") { inspectMemberID = nil }
                 }
             }
+        }
+        .sheet(item: $inspectDetail) { ref in
+            BestBallPlayerDetailSheet(viewModel: viewModel, player: ref)
         }
         .presentationDetents([.medium, .large])
     }
@@ -518,9 +568,25 @@ struct BestBallDraftView: View {
                 }
             }
         }
+        .sheet(item: $rosterDetail) { ref in
+            BestBallPlayerDetailSheet(viewModel: viewModel, player: ref)
+        }
     }
 
     private func rosterSlotRow(slot: String, pick: BestBallPick?) -> some View {
+        rosterSlotRowContent(slot: slot, pick: pick)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                guard let pick else { return }
+                Haptics.light()
+                rosterDetail = BBPlayerRef(
+                    playerID: pick.playerID, name: pick.playerName,
+                    team: pick.playerTeam, position: pick.playerPosition
+                )
+            }
+    }
+
+    private func rosterSlotRowContent(slot: String, pick: BestBallPick?) -> some View {
         HStack(spacing: 12) {
             Text(slot)
                 .font(.caption.weight(.bold))

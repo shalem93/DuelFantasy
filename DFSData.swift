@@ -6705,8 +6705,9 @@ struct ESPNPlayerGameLogProvider {
         self.session = session
     }
 
-    /// Fetches the last 15 game logs for a player given their DFS player ID (e.g. "nba-12345" or "ncaam-67890")
-    func fetchGameLog(playerID: String, position: String = "", limit: Int = 15) async throws -> [DFSPlayerGameLog] {
+    /// Fetches the last 15 game logs for a player given their DFS player ID (e.g. "nba-12345" or "ncaam-67890").
+    /// Pass `season` to pin a specific season (e.g. 2025); nil = ESPN's most recent season with data.
+    func fetchGameLog(playerID: String, position: String = "", limit: Int = 15, season: Int? = nil) async throws -> [DFSPlayerGameLog] {
         // Two-way player SP entries have IDs like "mlb-12345-sp" — strip suffix for ESPN lookup
         let isTwoWaySP = playerID.hasSuffix("-sp")
         let cleanedID = isTwoWaySP ? String(playerID.dropLast(3)) : playerID
@@ -6735,7 +6736,7 @@ struct ESPNPlayerGameLogProvider {
         }
 
         // MLB/NHL require a category parameter
-        let urlString: String
+        var urlString: String
         if isMLB {
             let isPitcher = isTwoWaySP || ["SP", "RP", "P"].contains(position.uppercased())
             let category = isPitcher ? "pitching" : "batting"
@@ -6746,6 +6747,9 @@ struct ESPNPlayerGameLogProvider {
             urlString = "https://site.web.api.espn.com/apis/common/v3/sports/\(sportPath)/athletes/\(espnID)/gamelog"
         } else {
             urlString = "https://site.web.api.espn.com/apis/common/v3/sports/\(sportPath)/athletes/\(espnID)/gamelog"
+        }
+        if let season {
+            urlString += urlString.contains("?") ? "&season=\(season)" : "?season=\(season)"
         }
 
         guard let url = URL(string: urlString) else {
