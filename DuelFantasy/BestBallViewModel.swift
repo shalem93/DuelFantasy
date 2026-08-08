@@ -1,5 +1,67 @@
 import Foundation
 import SwiftUI
+import UserNotifications
+
+/// Local notifications for scheduled Best Ball drafts. There is no push
+/// server — each member's own device schedules reminders whenever their
+/// league list loads, so anyone who has opened the app since the draft
+/// was scheduled gets "5 minutes" and "starting now" alerts even with
+/// the app closed.
+enum BestBallDraftNotifier {
+    private static let idPrefix = "bestball-draft-"
+
+    static func syncScheduledDraftNotifications(leagues: [BestBallLeague]) {
+        let center = UNUserNotificationCenter.current()
+        let upcoming = leagues.filter {
+            $0.status == "open" && ($0.draftStartTime ?? .distantPast) > Date()
+        }
+        center.getPendingNotificationRequests { pending in
+            // Drop reminders for drafts that started, were unscheduled,
+            // or whose league the user left.
+            let wantedIDs = Set(upcoming.flatMap {
+                ["\(idPrefix)\($0.id)-5m", "\(idPrefix)\($0.id)-now"]
+            })
+            let stale = pending.map(\.identifier)
+                .filter { $0.hasPrefix(idPrefix) && !wantedIDs.contains($0) }
+            if !stale.isEmpty {
+                center.removePendingNotificationRequests(withIdentifiers: stale)
+            }
+            guard !upcoming.isEmpty else { return }
+            center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+                guard granted else { return }
+                for league in upcoming {
+                    guard let start = league.draftStartTime else { continue }
+                    schedule(
+                        id: "\(idPrefix)\(league.id)-5m",
+                        title: "Draft starts in 5 minutes",
+                        body: "\"\(league.title)\" — get in the lobby!",
+                        at: start.addingTimeInterval(-300)
+                    )
+                    schedule(
+                        id: "\(idPrefix)\(league.id)-now",
+                        title: "Your draft is starting!",
+                        body: "\"\(league.title)\" is drafting now.",
+                        at: start
+                    )
+                }
+            }
+        }
+    }
+
+    private static func schedule(id: String, title: String, body: String, at date: Date) {
+        guard date > Date() else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let trigger = UNTimeIntervalNotificationTrigger(
+            timeInterval: max(1, date.timeIntervalSinceNow), repeats: false
+        )
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: id, content: content, trigger: trigger)
+        )
+    }
+}
 
 /// Lightweight matchup summary for the league list cards.
 struct LeagueMatchupPreview {
@@ -190,6 +252,7 @@ final class BestBallViewModel {
                 }
             }
             myLeagues = leagues.sorted { $0.createdAt > $1.createdAt }
+            BestBallDraftNotifier.syncScheduledDraftNotifications(leagues: myLeagues)
 
             // Check which completed leagues the user won (rank 1)
             let completedIDs = leagues.filter { $0.status == "completed" }.map(\.id)
@@ -929,9 +992,19 @@ final class BestBallViewModel {
                 leagueID: leagueID, date: date, accessToken: token
             )
             await loadLeagueDetail(leagueID: leagueID)
+            // Refresh the hub list AND re-sync local draft reminders.
+            await loadMyLeagues()
         } catch {
             self.error = error.localizedDescription
         }
+    }
+
+    /// Manual start arms a short lobby countdown instead of starting
+    /// instantly — everyone polling the lobby sees "starting in Xs" and
+    /// has a moment to get in. The scheduled-start ladder fires the real
+    /// start when it hits zero.
+    func beginDraftCountdown(leagueID: String, seconds: TimeInterval = 30) async {
+        await setDraftStartTime(leagueID: leagueID, date: Date().addingTimeInterval(seconds))
     }
 
     /// Fires a scheduled draft once its start time passes while members

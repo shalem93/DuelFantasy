@@ -383,29 +383,39 @@ struct BestBallLeagueDetailView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 14))
                 .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
 
-                // Scheduled draft banner
+                // Scheduled draft banner — live per-second countdown once
+                // the start is under 2 minutes away.
                 if let scheduled = league.draftStartTime {
-                    HStack(spacing: 8) {
-                        Image(systemName: "clock.fill")
-                            .font(.subheadline)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Draft scheduled")
-                                .font(.caption.weight(.bold))
-                            Text(scheduled.formatted(date: .abbreviated, time: .shortened))
-                                .font(.subheadline.weight(.semibold))
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        let remaining = Int(scheduled.timeIntervalSince(context.date).rounded(.up))
+                        HStack(spacing: 10) {
+                            Image(systemName: "clock.fill")
+                                .font(.subheadline)
+                            VStack(alignment: .leading, spacing: 2) {
+                                if remaining <= 0 {
+                                    Text("Draft is starting…")
+                                        .font(.subheadline.weight(.heavy))
+                                } else if remaining <= 120 {
+                                    Text("DRAFT STARTING IN")
+                                        .font(.caption2.weight(.bold))
+                                        .tracking(0.5)
+                                    Text("\(remaining)s")
+                                        .font(.title2.weight(.heavy).monospacedDigit())
+                                } else {
+                                    Text("Draft scheduled")
+                                        .font(.caption.weight(.bold))
+                                    Text(scheduled.formatted(date: .abbreviated, time: .shortened))
+                                        .font(.subheadline.weight(.semibold))
+                                }
+                            }
+                            Spacer()
                         }
-                        Spacer()
-                        if scheduled <= Date() {
-                            Text("Starting…")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.orange)
-                        }
+                        .foregroundStyle(remaining <= 120 ? Color.orange : brandPurple)
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background((remaining <= 120 ? Color.orange : brandPurple).opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
-                    .foregroundStyle(brandPurple)
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(brandPurple.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
 
                 // Action buttons
@@ -425,9 +435,12 @@ struct BestBallLeagueDetailView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
                 } else if viewModel.isHost {
+                    // Countdown already armed and imminent — the ladder
+                    // will start the draft; don't offer a second start.
+                    let countdownArmed = league.draftStartTime.map { $0.timeIntervalSinceNow < 120 } ?? false
                     Button {
                         Haptics.medium()
-                        Task { await viewModel.startDraft(leagueID: league.id) }
+                        Task { await viewModel.beginDraftCountdown(leagueID: league.id) }
                     } label: {
                         VStack(spacing: 4) {
                             if viewModel.isStartingDraft {
@@ -440,10 +453,16 @@ struct BestBallLeagueDetailView: View {
                                 Text("Filling empty slots with bots and loading player pool")
                                     .font(.caption)
                                     .opacity(0.8)
+                            } else if countdownArmed {
+                                Text("Draft starting…")
+                                    .font(.headline)
+                                Text("Members in the lobby are being counted in")
+                                    .font(.caption)
+                                    .opacity(0.8)
                             } else {
                                 Text("Start Draft")
                                     .font(.headline)
-                                Text("Empty slots will be filled by bots")
+                                Text("30-second countdown, then empty slots fill with bots")
                                     .font(.caption)
                                     .opacity(0.8)
                             }
@@ -454,7 +473,7 @@ struct BestBallLeagueDetailView: View {
                         .foregroundStyle(.white)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
-                    .disabled(viewModel.isStartingDraft)
+                    .disabled(viewModel.isStartingDraft || countdownArmed)
                 } else {
                     Text("Waiting for host to start draft...")
                         .font(.subheadline)
