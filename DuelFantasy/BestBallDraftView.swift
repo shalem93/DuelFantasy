@@ -52,7 +52,7 @@ struct BestBallDraftView: View {
             inspectTeamSheet(memberID: wrapper.id)
         }
         .sheet(item: $listDetail) { ref in
-            let canDraft = viewModel.isMyTurn && state?.isDraftComplete == false
+            let canDraft = viewModel.isMyTurn && state?.isDraftComplete == false && viewModel.draftHasOpened
             BestBallPlayerDetailSheet(
                 viewModel: viewModel, player: ref,
                 onDraft: canDraft ? {
@@ -81,6 +81,26 @@ struct BestBallDraftView: View {
 
     private func draftHeader(_ state: BestBallDraftState) -> some View {
         VStack(spacing: 8) {
+            // Pre-draft countdown INSIDE the draft screen: everyone
+            // transitions in first, then pick 1's clock starts — so
+            // nobody loses seconds to the lobby → draft transition.
+            if let opens = viewModel.currentLeague?.draftStartTime, opens > Date() {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    let remaining = max(0, Int(opens.timeIntervalSince(context.date).rounded(.up)))
+                    HStack(spacing: 8) {
+                        Image(systemName: "hourglass")
+                            .font(.subheadline.weight(.bold))
+                        Text(remaining > 0 ? "DRAFT BEGINS IN \(remaining)s" : "HERE WE GO!")
+                            .font(.subheadline.weight(.heavy))
+                            .tracking(0.5)
+                            .monospacedDigit()
+                    }
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color.orange)
+                }
+            }
             // Big gold "ON THE CLOCK" banner when it's the user's pick.
             // The previous "YOUR PICK" caption was easy to miss when the
             // draft was flying by at bot speed.
@@ -376,7 +396,7 @@ struct BestBallDraftView: View {
                         // Quick-draft slot is ALWAYS reserved so the stat
                         // columns never shift when the clock flips to the
                         // user — the button just fades in.
-                        let canDraft = viewModel.isMyTurn && !state.isDraftComplete
+                        let canDraft = viewModel.isMyTurn && !state.isDraftComplete && viewModel.draftHasOpened
                         Button {
                             Haptics.medium()
                             Task { await viewModel.makePick(player: player) }
@@ -744,12 +764,14 @@ struct BestBallDraftView: View {
     }
 
     /// Seconds left on the current pick, derived from the VM's pick
-    /// clock (when the current pick's predecessor landed) — so backing
-    /// out of the draft and re-entering doesn't restart the countdown.
+    /// clock (last pick landing, or draft-open time during the pre-pick
+    /// countdown) — so backing out of the draft and re-entering doesn't
+    /// restart the countdown, and pick 1 gets its full clock after the
+    /// in-draft countdown.
     private func remainingSeconds() -> Int {
         let total = viewModel.currentLeague?.pickTimerSeconds ?? 30
-        let elapsed = Int(Date().timeIntervalSince(viewModel.lastPickActivityAt))
-        return max(0, total - elapsed)
+        let elapsed = Int(Date().timeIntervalSince(viewModel.pickClockStart))
+        return max(0, min(total, total - elapsed))
     }
 
     private func startTimer() {

@@ -211,6 +211,23 @@ final class BestBallViewModel {
         if humans.count <= 1 { lastPickActivityAt = Date() }
     }
 
+    /// The instant the current pick's clock started: the last pick
+    /// landing, or the draft-open time if that's later — startDraft sets
+    /// draft_start_time to now+30s so every device runs the same in-draft
+    /// countdown before pick 1's clock begins.
+    var pickClockStart: Date {
+        if let opens = currentLeague?.draftStartTime, opens > lastPickActivityAt {
+            return opens
+        }
+        return lastPickActivityAt
+    }
+
+    /// False while the in-draft pre-pick countdown is still running.
+    var draftHasOpened: Bool {
+        guard let opens = currentLeague?.draftStartTime else { return true }
+        return Date() >= opens
+    }
+
     init(
         playerProvider: BestBallPlayerProvider? = nil,
         scoringProvider: BestBallWeeklyScoringProvider? = nil
@@ -959,6 +976,14 @@ final class BestBallViewModel {
             // Randomize draft order (member IDs shuffled)
             let shuffledIDs = members.map { $0.id }.shuffled()
 
+            // Arm the in-draft countdown BEFORE flipping status: when
+            // other devices see "drafting" and transition in, the shared
+            // 30s pre-pick clock is already set, so nobody loses pick
+            // time to the screen transition.
+            try? await SupabaseService.shared.updateLeagueDraftStartTime(
+                leagueID: leagueID, date: Date().addingTimeInterval(30), accessToken: token
+            )
+
             // Update league to drafting
             try await SupabaseService.shared.updateLeagueDraft(
                 leagueID: leagueID,
@@ -999,13 +1024,6 @@ final class BestBallViewModel {
         }
     }
 
-    /// Manual start arms a short lobby countdown instead of starting
-    /// instantly — everyone polling the lobby sees "starting in Xs" and
-    /// has a moment to get in. The scheduled-start ladder fires the real
-    /// start when it hits zero.
-    func beginDraftCountdown(leagueID: String, seconds: TimeInterval = 30) async {
-        await setDraftStartTime(leagueID: leagueID, date: Date().addingTimeInterval(seconds))
-    }
 
     /// Fires a scheduled draft once its start time passes while members
     /// sit in the lobby. The host's device starts it right on time; other
@@ -1029,6 +1047,10 @@ final class BestBallViewModel {
     func makePick(player: BestBallPlayer) async {
         guard let state = draftState, !state.isDraftComplete,
               let token = accessToken, let uid = userID else { return }
+        guard draftHasOpened else {
+            self.error = "Draft starts in a few seconds…"
+            return
+        }
 
         // Verify it's the user's turn
         let myMemberID = currentMembers.first(where: { $0.userID == uid })?.id
@@ -1075,6 +1097,9 @@ final class BestBallViewModel {
         let humans = currentMembers.filter { !$0.isBot }.sorted(by: { $0.slotIndex < $1.slotIndex })
         guard let myHumanIndex = humans.firstIndex(where: { $0.userID == uid }) else { return }
 
+        // Nobody (bots included) picks during the in-draft countdown.
+        guard draftHasOpened else { return }
+
         // If draft is already complete (e.g. last pick was human), transition immediately
         if state.isDraftComplete {
             do {
@@ -1105,7 +1130,7 @@ final class BestBallViewModel {
                 break
             }
 
-            let stalledFor = Date().timeIntervalSince(lastPickActivityAt)
+            let stalledFor = Date().timeIntervalSince(pickClockStart)
             if onClockMember.isBot {
                 // Ladder index 0 picks for bots right away; other devices
                 // wait out their failover delay before taking over. Once a

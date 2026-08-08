@@ -435,12 +435,9 @@ struct BestBallLeagueDetailView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
                 } else if viewModel.isHost {
-                    // Countdown already armed and imminent — the ladder
-                    // will start the draft; don't offer a second start.
-                    let countdownArmed = league.draftStartTime.map { $0.timeIntervalSinceNow < 120 } ?? false
                     Button {
                         Haptics.medium()
-                        Task { await viewModel.beginDraftCountdown(leagueID: league.id) }
+                        Task { await viewModel.startDraft(leagueID: league.id) }
                     } label: {
                         VStack(spacing: 4) {
                             if viewModel.isStartingDraft {
@@ -453,16 +450,10 @@ struct BestBallLeagueDetailView: View {
                                 Text("Filling empty slots with bots and loading player pool")
                                     .font(.caption)
                                     .opacity(0.8)
-                            } else if countdownArmed {
-                                Text("Draft starting…")
-                                    .font(.headline)
-                                Text("Members in the lobby are being counted in")
-                                    .font(.caption)
-                                    .opacity(0.8)
                             } else {
                                 Text("Start Draft")
                                     .font(.headline)
-                                Text("30-second countdown, then empty slots fill with bots")
+                                Text("Bots fill empty slots · 30s countdown before pick 1")
                                     .font(.caption)
                                     .opacity(0.8)
                             }
@@ -473,7 +464,7 @@ struct BestBallLeagueDetailView: View {
                         .foregroundStyle(.white)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
-                    .disabled(viewModel.isStartingDraft || countdownArmed)
+                    .disabled(viewModel.isStartingDraft)
                 } else {
                     Text("Waiting for host to start draft...")
                         .font(.subheadline)
