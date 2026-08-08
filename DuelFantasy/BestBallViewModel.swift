@@ -59,6 +59,8 @@ final class BestBallViewModel {
     var draftState: BestBallDraftState?
     var availablePlayers: [BestBallPlayer] = []
     var isDraftPolling: Bool = false
+    /// NFL team abbreviation -> bye week for the current season.
+    var nflByeWeeks: [String: Int] = [:]
 
     // Standings & Scoring
     var weeklyScores: [BestBallWeeklyScore] = []
@@ -696,6 +698,7 @@ final class BestBallViewModel {
                 let picks = pickRecords.map { $0.toModel() }
 
                 if currentLeague?.status == "drafting" {
+                    await loadNFLByeWeeksIfNeeded()
                     if availablePlayers.isEmpty, let sport = currentLeague?.sport {
                         var players = (try? await playerProvider.fetchPlayers(sport: sport)) ?? []
                         if currentLeague?.isDingersOnly == true {
@@ -1612,6 +1615,20 @@ final class BestBallViewModel {
 
     func memberName(for id: String) -> String {
         currentMembers.first(where: { $0.id == id })?.displayName ?? "Unknown"
+    }
+
+    /// Bye week for an NFL team abbreviation; nil for other sports or
+    /// before the bye table has loaded.
+    func byeWeek(forTeam team: String) -> Int? {
+        nflByeWeeks[team.uppercased()]
+    }
+
+    private var byeWeeksFetchAttempted = false
+    func loadNFLByeWeeksIfNeeded() async {
+        guard currentLeague?.sport == "NFL", nflByeWeeks.isEmpty,
+              !byeWeeksFetchAttempted else { return }
+        byeWeeksFetchAttempted = true
+        nflByeWeeks = await NFLByeWeekProvider.fetchByeWeeks()
     }
 
     /// Positions still needed to meet draft minimums for a member

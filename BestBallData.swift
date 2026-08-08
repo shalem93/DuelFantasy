@@ -181,6 +181,44 @@ enum FFCADPProvider {
     }
 }
 
+/// NFL bye weeks by team abbreviation, one ESPN fantasy-API request for
+/// all 32 teams. Abbreviations match the site-API roster abbreviations
+/// the player pool uses (WSH, JAX, LAR, ...). Cached per season in
+/// UserDefaults so drafts don't refetch on every open.
+enum NFLByeWeekProvider {
+    /// NFL season year: Jan/Feb still belong to the prior season.
+    static var seasonYear: Int {
+        let now = Date()
+        let year = Calendar.current.component(.year, from: now)
+        let month = Calendar.current.component(.month, from: now)
+        return month <= 2 ? year - 1 : year
+    }
+
+    static func fetchByeWeeks() async -> [String: Int] {
+        let season = seasonYear
+        let cacheKey = "nfl_bye_weeks_\(season)"
+        if let cached = UserDefaults.standard.dictionary(forKey: cacheKey) as? [String: Int],
+           !cached.isEmpty {
+            return cached
+        }
+        guard let url = URL(string: "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/\(season)?view=proTeamSchedules_wl"),
+              let (data, _) = try? await URLSession.shared.data(from: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let settings = json["settings"] as? [String: Any],
+              let proTeams = settings["proTeams"] as? [[String: Any]] else { return [:] }
+        var byes: [String: Int] = [:]
+        for team in proTeams {
+            guard let abbrev = team["abbrev"] as? String,
+                  let bye = team["byeWeek"] as? Int, bye > 0 else { continue }
+            byes[abbrev.uppercased()] = bye
+        }
+        if !byes.isEmpty {
+            UserDefaults.standard.set(byes, forKey: cacheKey)
+        }
+        return byes
+    }
+}
+
 struct BestBallWeeklyScore: Identifiable, Equatable {
     let id: String
     let leagueID: String

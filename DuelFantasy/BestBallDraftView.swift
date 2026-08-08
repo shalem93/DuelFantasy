@@ -253,6 +253,10 @@ struct BestBallDraftView: View {
                     .frame(width: 36)
                 Text("TEAM")
                     .frame(width: 40)
+                if viewModel.currentLeague?.sport == "NFL" {
+                    Text("BYE")
+                        .frame(width: 30)
+                }
                 if viewModel.currentLeague?.isDingersOnly == true {
                     Text("'25 HR")
                         .frame(width: 48, alignment: .trailing)
@@ -293,6 +297,12 @@ struct BestBallDraftView: View {
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .frame(width: 40)
+                                if viewModel.currentLeague?.sport == "NFL" {
+                                    Text(viewModel.byeWeek(forTeam: player.team).map(String.init) ?? "–")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 30)
+                                }
                                 if viewModel.currentLeague?.isDingersOnly == true {
                                     Text(player.lastSeasonHR > 0 ? "\(player.lastSeasonHR)" : "-")
                                         .font(.subheadline.weight(.medium).monospacedDigit())
@@ -384,7 +394,7 @@ struct BestBallDraftView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(pick.playerName)
                                     .font(.subheadline.weight(.medium))
-                                Text("\(pick.playerPosition) • \(pick.playerTeam)")
+                                Text(posTeamLine(pick))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -522,7 +532,7 @@ struct BestBallDraftView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(pick.playerName)
                         .font(.subheadline.weight(.medium))
-                    Text("\(pick.playerPosition) • \(pick.playerTeam)")
+                    Text(posTeamLine(pick))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -540,6 +550,16 @@ struct BestBallDraftView: View {
     }
 
     // MARK: - Helpers
+
+    /// "RB • PHI • Bye 10" — the bye segment appears only for NFL teams
+    /// with a loaded bye table.
+    private func posTeamLine(_ pick: BestBallPick) -> String {
+        var line = "\(pick.playerPosition) • \(pick.playerTeam)"
+        if let bye = viewModel.byeWeek(forTeam: pick.playerTeam) {
+            line += " • Bye \(bye)"
+        }
+        return line
+    }
 
     /// Number of picks before the user's next turn (1 = up next). nil when
     /// the user has no remaining pick. Walks the snake order forward from
