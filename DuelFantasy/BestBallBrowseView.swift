@@ -532,8 +532,10 @@ struct BestBallBrowseView: View {
                     Text("Entry Fee (RR)")
                 } footer: {
                     let cap = BestBallViewModel.joinCap(forFee: newLeagueEntryFee)
-                    let current = viewModel.activeLeagueCount(atFee: newLeagueEntryFee)
-                    Text("Charged when the draft starts. Winners earn back multiples of the entry. You can be in \(cap) leagues at this level (currently in \(current)).")
+                    let current = viewModel.activeLeagueCount(atFee: newLeagueEntryFee, sport: newLeagueSport)
+                    Text(cap == 1
+                         ? "Charged when the draft starts. Winners earn back multiples of the entry. Limited to 1 \(newLeagueSport) league at this level\(current >= 1 ? " — you already have one" : "")."
+                         : "Charged when the draft starts. Winners earn back multiples of the entry. You can be in \(cap) \(newLeagueSport) leagues at this level (currently in \(current)).")
                 }
 
                 Section("League Settings") {

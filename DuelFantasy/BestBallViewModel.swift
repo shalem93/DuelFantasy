@@ -292,7 +292,7 @@ final class BestBallViewModel {
             }
             return nil
         }
-        if let reason = entryDenialReason(fee: entryFee) {
+        if let reason = entryDenialReason(fee: entryFee, sport: sport) {
             self.error = reason
             return nil
         }
@@ -347,23 +347,25 @@ final class BestBallViewModel {
 
     // MARK: - Fantasy RR (entry fees)
 
-    static let entryFeeTiers = [10, 20, 50, 100, 250]
+    static let entryFeeTiers = [10, 20, 50, 100, 250, 500]
 
-    /// How many non-completed leagues a user may hold at each fee level.
-    /// Fantasy is a season-long commitment, so the caps step down as the
-    /// stakes go up.
+    /// How many non-completed leagues a user may hold PER SPORT at each
+    /// fee level. Fantasy is a season-long commitment, so the caps step
+    /// down as the stakes go up — 500 RR is a one-per-sport flagship.
     static func joinCap(forFee fee: Int) -> Int {
         switch fee {
         case ..<20: return 30
-        case ..<50: return 10
-        case ..<100: return 5
-        default: return 3
+        case ..<50: return 15
+        case ..<100: return 10
+        case ..<250: return 5
+        case ..<500: return 3
+        default: return 1
         }
     }
 
-    /// Non-completed leagues the user is in at this fee tier.
-    func activeLeagueCount(atFee fee: Int) -> Int {
-        myLeagues.filter { $0.entryFee == fee && $0.status != "completed" }.count
+    /// Non-completed leagues the user is in at this fee tier for a sport.
+    func activeLeagueCount(atFee fee: Int, sport: String) -> Int {
+        myLeagues.filter { $0.entryFee == fee && $0.sport == sport && $0.status != "completed" }.count
     }
 
     /// nil = allowed; otherwise a user-facing reason (shared by join+create).
@@ -396,7 +398,7 @@ final class BestBallViewModel {
         return "Join by \(fmt.string(from: start.addingTimeInterval(-24 * 3600)))"
     }
 
-    func entryDenialReason(fee: Int) -> String? {
+    func entryDenialReason(fee: Int, sport: String) -> String? {
         guard fee > 0 else { return nil }
         // Persisted profile RR (kept at the derived total by the
         // leaderboard sync) — this VM doesn't carry its own rrScore.
@@ -405,8 +407,11 @@ final class BestBallViewModel {
             return "Not enough RR — this league costs \(fee) RR to enter."
         }
         let cap = Self.joinCap(forFee: fee)
-        if activeLeagueCount(atFee: fee) >= cap {
-            return "You're already in \(cap) leagues at the \(fee) RR level — finish one first."
+        if activeLeagueCount(atFee: fee, sport: sport) >= cap {
+            if cap == 1 {
+                return "You already have a \(fee) RR \(sport) league — it's limited to one per sport."
+            }
+            return "You're already in \(cap) \(sport) leagues at the \(fee) RR level — finish one first."
         }
         return nil
     }
@@ -569,7 +574,7 @@ final class BestBallViewModel {
             self.error = "The \(league.sport) season has already started — this league can no longer be joined."
             return false
         }
-        if let reason = entryDenialReason(fee: league.entryFee) {
+        if let reason = entryDenialReason(fee: league.entryFee, sport: league.sport) {
             self.error = reason
             return false
         }
