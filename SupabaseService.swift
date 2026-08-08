@@ -2575,6 +2575,26 @@ final class SupabaseService {
         try await requestNoResponse(url: url, method: "PATCH", body: Payload(currentPickNumber: pickNumber), bearerToken: accessToken)
     }
 
+    func updateLeagueDraftStartTime(leagueID: String, date: Date?, accessToken: String) async throws {
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/bestball_leagues"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "id", value: "eq.\(leagueID)")]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        struct Payload: Encodable {
+            let draftStartTime: String?
+            enum CodingKeys: String, CodingKey {
+                case draftStartTime = "draft_start_time"
+            }
+            // encode (not encodeIfPresent) so nil clears the column with
+            // an explicit null instead of dropping the key.
+            func encode(to encoder: Encoder) throws {
+                var container = encoder.container(keyedBy: CodingKeys.self)
+                try container.encode(draftStartTime, forKey: .draftStartTime)
+            }
+        }
+        let iso = date.map { ISO8601DateFormatter().string(from: $0) }
+        try await requestNoResponse(url: url, method: "PATCH", body: Payload(draftStartTime: iso), bearerToken: accessToken)
+    }
+
     func updateLeagueWeek(leagueID: String, week: Int, accessToken: String) async throws {
         var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/bestball_leagues"), resolvingAgainstBaseURL: false)
         components?.queryItems = [URLQueryItem(name: "id", value: "eq.\(leagueID)")]

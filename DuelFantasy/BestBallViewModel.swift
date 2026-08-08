@@ -134,9 +134,20 @@ final class BestBallViewModel {
     private var draftPollTask: Task<Void, Never>?
     /// Wall-clock of the last observed pick landing (or the drafting state
     /// first appearing). Drives the multi-device failover ladder that keeps
-    /// a draft moving when the host's app is backgrounded.
-    private var lastPickActivityAt = Date()
+    /// a draft moving when the host's app is backgrounded, and the pick
+    /// countdown in the draft view — deriving the clock from this instead
+    /// of view-local state means backing out and re-entering the draft
+    /// doesn't restart the timer.
+    private(set) var lastPickActivityAt = Date()
     private var lastObservedPickCount = -1
+
+    /// Solo league (one human + bots): give a returning user a fresh
+    /// clock instead of an instant auto-pick — nobody else is waiting.
+    /// Multi-human leagues keep the continuous clock.
+    func restartPickClockIfSolo() {
+        let humans = currentMembers.filter { !$0.isBot }
+        if humans.count <= 1 { lastPickActivityAt = Date() }
+    }
 
     init(
         playerProvider: BestBallPlayerProvider? = nil,
@@ -751,6 +762,9 @@ final class BestBallViewModel {
                         )
                         currentLeague?.status = "active"
                         stopDraftPolling()
+                        // Refresh the hub list so the league card stops
+                        // reading DRAFTING after the draft wraps.
+                        await loadMyLeagues()
                     }
                 } else {
                     draftState = BestBallDraftState(
@@ -907,6 +921,38 @@ final class BestBallViewModel {
         }
     }
 
+    /// Commissioner sets (or clears) the scheduled auto-start time.
+    func setDraftStartTime(leagueID: String, date: Date?) async {
+        guard let token = accessToken else { return }
+        do {
+            try await SupabaseService.shared.updateLeagueDraftStartTime(
+                leagueID: leagueID, date: date, accessToken: token
+            )
+            await loadLeagueDetail(leagueID: leagueID)
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    /// Fires a scheduled draft once its start time passes while members
+    /// sit in the lobby. The host's device starts it right on time; other
+    /// members act as staggered backups (20s apart) so the draft still
+    /// starts when the host isn't in the app. A device race is guarded by
+    /// the unique (league_id, slot_index) constraint on members — the
+    /// loser's bot inserts fail and it just reloads the drafting league.
+    func autoStartScheduledDraftIfDue() async {
+        guard let league = currentLeague, league.status == "open",
+              let scheduled = league.draftStartTime,
+              let uid = userID, !isStartingDraft else { return }
+        let humans = currentMembers.filter { !$0.isBot }.sorted { $0.slotIndex < $1.slotIndex }
+        var ladder = [league.createdBy].compactMap { $0 }
+        ladder.append(contentsOf: humans.compactMap(\.userID).filter { !ladder.contains($0) })
+        guard let myIndex = ladder.firstIndex(of: uid) else { return }
+        let myTriggerTime = scheduled.addingTimeInterval(Double(myIndex) * 20.0)
+        guard Date() >= myTriggerTime else { return }
+        await startDraft(leagueID: league.id)
+    }
+
     func makePick(player: BestBallPlayer) async {
         guard let state = draftState, !state.isDraftComplete,
               let token = accessToken, let uid = userID else { return }
@@ -969,6 +1015,7 @@ final class BestBallViewModel {
                 await generateScheduleAfterDraft(leagueID: state.league.id)
 
                 await loadLeagueDetail(leagueID: state.league.id)
+                await loadMyLeagues()
             } catch {
                 self.error = error.localizedDescription
             }
@@ -1072,6 +1119,7 @@ final class BestBallViewModel {
                 await generateScheduleAfterDraft(leagueID: currentState.league.id)
 
                 await loadLeagueDetail(leagueID: currentState.league.id)
+                await loadMyLeagues()
             } catch {
                 self.error = error.localizedDescription
             }

@@ -8,6 +8,7 @@ struct BestBallDraftView: View {
     @State private var showRoster: Bool = false
     @State private var pickTimer: Int = 30
     @State private var timerTask: Task<Void, Never>? = nil
+    @State private var isAutoPicking: Bool = false
     /// Set when the user taps a team pill in the recent-picks ticker —
     /// presents a sheet listing that member's drafted players so far.
     @State private var inspectMemberID: String? = nil
@@ -65,14 +66,14 @@ struct BestBallDraftView: View {
             if let league = viewModel.currentLeague {
                 viewModel.startDraftPolling(leagueID: league.id)
             }
+            // Solo leagues get a fresh clock on re-entry; multi-human
+            // leagues keep the continuous clock from the VM.
+            viewModel.restartPickClockIfSolo()
             startTimer()
         }
         .onDisappear {
             viewModel.stopDraftPolling()
             timerTask?.cancel()
-        }
-        .onChange(of: viewModel.draftState?.currentPickNumber) { _, _ in
-            resetTimer()
         }
     }
 
@@ -742,27 +743,31 @@ struct BestBallDraftView: View {
         return players
     }
 
+    /// Seconds left on the current pick, derived from the VM's pick
+    /// clock (when the current pick's predecessor landed) — so backing
+    /// out of the draft and re-entering doesn't restart the countdown.
+    private func remainingSeconds() -> Int {
+        let total = viewModel.currentLeague?.pickTimerSeconds ?? 30
+        let elapsed = Int(Date().timeIntervalSince(viewModel.lastPickActivityAt))
+        return max(0, total - elapsed)
+    }
+
     private func startTimer() {
-        pickTimer = viewModel.currentLeague?.pickTimerSeconds ?? 30
+        pickTimer = remainingSeconds()
         timerTask?.cancel()
         timerTask = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 guard !Task.isCancelled else { break }
-                if pickTimer > 0 {
-                    pickTimer -= 1
-                } else if viewModel.isMyTurn {
-                    // Auto-pick
+                pickTimer = remainingSeconds()
+                if pickTimer <= 0, viewModel.isMyTurn, !isAutoPicking {
+                    isAutoPicking = true
                     if let state, let first = filteredPlayers(state).first {
                         await viewModel.makePick(player: first)
                     }
-                    resetTimer()
+                    isAutoPicking = false
                 }
             }
         }
-    }
-
-    private func resetTimer() {
-        pickTimer = viewModel.currentLeague?.pickTimerSeconds ?? 30
     }
 }

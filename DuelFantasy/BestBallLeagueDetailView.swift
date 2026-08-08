@@ -105,12 +105,14 @@ struct BestBallLeagueDetailView: View {
             // the moment the host starts it — previously non-hosts sat
             // on "Waiting for host..." until they backed out and
             // re-entered the league.
+            await viewModel.autoStartScheduledDraftIfDue()
             while !Task.isCancelled,
                   viewModel.currentLeague?.id == leagueID,
                   viewModel.currentLeague?.status == "open" {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 guard !Task.isCancelled else { break }
                 await viewModel.loadLeagueDetail(leagueID: leagueID)
+                await viewModel.autoStartScheduledDraftIfDue()
             }
         }
     }
@@ -381,6 +383,31 @@ struct BestBallLeagueDetailView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 14))
                 .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
 
+                // Scheduled draft banner
+                if let scheduled = league.draftStartTime {
+                    HStack(spacing: 8) {
+                        Image(systemName: "clock.fill")
+                            .font(.subheadline)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Draft scheduled")
+                                .font(.caption.weight(.bold))
+                            Text(scheduled.formatted(date: .abbreviated, time: .shortened))
+                                .font(.subheadline.weight(.semibold))
+                        }
+                        Spacer()
+                        if scheduled <= Date() {
+                            Text("Starting…")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                    .foregroundStyle(brandPurple)
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(brandPurple.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+
                 // Action buttons
                 let isMember = viewModel.currentMembers.contains(where: { $0.userID == auth.userID })
 
@@ -510,6 +537,8 @@ private struct CommishSettingsSheet: View {
     @State private var isSavingSettings: Bool = false
     @State private var showDeleteConfirmation: Bool = false
     @State private var isDeletingLeague: Bool = false
+    @State private var editScheduleDraft: Bool
+    @State private var editDraftDate: Date
 
     private var brandPurple: Color {
         Color(red: 0.48, green: 0.23, blue: 0.93)
@@ -542,6 +571,8 @@ private struct CommishSettingsSheet: View {
         _editNflTE = State(initialValue: league.nflTeStarters)
         _editNflFLEX = State(initialValue: league.nflFlexStarters)
         _editNflSFLEX = State(initialValue: league.nflSflexStarters)
+        _editScheduleDraft = State(initialValue: league.draftStartTime != nil)
+        _editDraftDate = State(initialValue: league.draftStartTime ?? Date().addingTimeInterval(3600))
     }
 
     var body: some View {
@@ -650,6 +681,39 @@ private struct CommishSettingsSheet: View {
                                     .buttonStyle(.bordered)
                                     .tint(brandPurple)
                                 }
+                            }
+                        }
+                    }
+
+                    // Draft schedule (only meaningful before the draft)
+                    if league.status == "open" {
+                        settingsCard(title: "Draft Schedule") {
+                            VStack(alignment: .leading, spacing: 14) {
+                                HStack {
+                                    Text("Scheduled Start")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Toggle("", isOn: $editScheduleDraft)
+                                        .labelsHidden()
+                                        .tint(brandPurple)
+                                }
+                                if editScheduleDraft {
+                                    Divider()
+                                    DatePicker(
+                                        "Start Time",
+                                        selection: $editDraftDate,
+                                        in: Date()...,
+                                        displayedComponents: [.date, .hourAndMinute]
+                                    )
+                                    .font(.subheadline)
+                                    .tint(brandPurple)
+                                }
+                                Text(editScheduleDraft
+                                     ? "The draft starts automatically at this time for everyone in the lobby. You can still hit Start Draft earlier."
+                                     : "You start the draft manually from the league page.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
                         }
                     }
@@ -804,6 +868,11 @@ private struct CommishSettingsSheet: View {
                                     nflFLEX: editNflFLEX,
                                     nflSFLEX: editNflSFLEX
                                 )
+                                // Persist the draft schedule only when it changed.
+                                let newSchedule: Date? = editScheduleDraft ? editDraftDate : nil
+                                if league.status == "open", newSchedule != league.draftStartTime {
+                                    await viewModel.setDraftStartTime(leagueID: leagueID, date: newSchedule)
+                                }
                                 isSavingSettings = false
                                 onDismiss()
                             }
