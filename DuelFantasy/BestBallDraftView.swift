@@ -116,7 +116,7 @@ struct BestBallDraftView: View {
                         .stroke(Color(.systemGray4), lineWidth: 3)
                         .frame(width: 44, height: 44)
                     Circle()
-                        .trim(from: 0, to: CGFloat(pickTimer) / 30.0)
+                        .trim(from: 0, to: CGFloat(pickTimer) / CGFloat(max(viewModel.currentLeague?.pickTimerSeconds ?? 30, 1)))
                         .stroke(pickTimer <= 10 ? .red : brandPurple, style: StrokeStyle(lineWidth: 3, lineCap: .round))
                         .frame(width: 44, height: 44)
                         .rotationEffect(.degrees(-90))
@@ -175,8 +175,10 @@ struct BestBallDraftView: View {
 
     private func recentPicksTicker(_ state: BestBallDraftState) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(Array(state.picks.suffix(8).reversed()), id: \.id) { pick in
+            // Every pick of the draft, newest first — lazy so a 120-pick
+            // board doesn't build 120 pills up front.
+            LazyHStack(spacing: 8) {
+                ForEach(Array(state.picks.reversed()), id: \.id) { pick in
                     Button {
                         Haptics.light()
                         inspectMemberID = pick.memberID
@@ -633,7 +635,7 @@ struct BestBallDraftView: View {
     }
 
     private func startTimer() {
-        pickTimer = 30
+        pickTimer = viewModel.currentLeague?.pickTimerSeconds ?? 30
         timerTask?.cancel()
         timerTask = Task {
             while !Task.isCancelled {

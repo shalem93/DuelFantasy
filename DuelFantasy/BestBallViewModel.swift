@@ -130,6 +130,11 @@ final class BestBallViewModel {
 
     // Draft polling
     private var draftPollTask: Task<Void, Never>?
+    /// Wall-clock of the last observed pick landing (or the drafting state
+    /// first appearing). Drives the multi-device failover ladder that keeps
+    /// a draft moving when the host's app is backgrounded.
+    private var lastPickActivityAt = Date()
+    private var lastObservedPickCount = -1
 
     init(
         playerProvider: BestBallPlayerProvider? = nil,
@@ -706,6 +711,11 @@ final class BestBallViewModel {
                     )
                     draftState = state
 
+                    if picks.count != lastObservedPickCount {
+                        lastObservedPickCount = picks.count
+                        lastPickActivityAt = Date()
+                    }
+
                     // Auto-recover: if all picks are in but status is still "drafting", transition to active
                     if state.isDraftComplete {
                         try await SupabaseService.shared.updateLeagueStatus(
@@ -908,9 +918,15 @@ final class BestBallViewModel {
         guard let state = draftState,
               let token = accessToken, let uid = userID else { return }
 
-        // Only the first non-bot member (draft host) executes bot picks
-        let nonBotMembers = currentMembers.filter { !$0.isBot }.sorted(by: { $0.slotIndex < $1.slotIndex })
-        guard nonBotMembers.first?.userID == uid else { return }
+        // Any human's device can advance the draft, on a staggered failover
+        // ladder: the first human acts immediately, later humans only step
+        // in after picks stop advancing (host backgrounded the app
+        // mid-draft — without failover the whole draft froze at 0 seconds
+        // for everyone else). A race between two devices is harmless:
+        // bestball_picks has a unique (league_id, pick_number) constraint,
+        // so the loser's insert fails and the next 2s poll resyncs.
+        let humans = currentMembers.filter { !$0.isBot }.sorted(by: { $0.slotIndex < $1.slotIndex })
+        guard let myHumanIndex = humans.firstIndex(where: { $0.userID == uid }) else { return }
 
         // If draft is already complete (e.g. last pick was human), transition immediately
         if state.isDraftComplete {
@@ -934,11 +950,29 @@ final class BestBallViewModel {
         let sport = state.league.sport
         let rosterSize = state.league.rosterSize
         var currentState = state
+        var actedThisRun = false
         while !currentState.isDraftComplete {
             guard let onClockID = currentState.onTheClockMemberID,
-                  let onClockMember = currentMembers.first(where: { $0.id == onClockID }),
-                  onClockMember.isBot else {
-                break // Not a bot's turn
+                  let onClockMember = currentMembers.first(where: { $0.id == onClockID }) else {
+                break
+            }
+
+            let stalledFor = Date().timeIntervalSince(lastPickActivityAt)
+            if onClockMember.isBot {
+                // Ladder index 0 picks for bots right away; other devices
+                // wait out their failover delay before taking over. Once a
+                // device has started acting this run it keeps going — the
+                // activity clock resets on every pick it lands.
+                if !actedThisRun, stalledFor < Double(myHumanIndex) * 12.0 { break }
+            } else {
+                // Human on the clock — their own device drives the pick
+                // (a tap, or its local auto-pick when the timer hits 0).
+                // Another device only picks for them once they've clearly
+                // gone away: full pick timer plus grace, staggered per
+                // device so two failover devices don't collide.
+                if onClockMember.userID == uid { break }
+                let timerSeconds = Double(currentLeague?.pickTimerSeconds ?? 30)
+                if stalledFor < timerSeconds + 10.0 + Double(myHumanIndex) * 12.0 { break }
             }
 
             let pickedIDs = currentState.pickedPlayerIDs()
@@ -977,6 +1011,7 @@ final class BestBallViewModel {
                     accessToken: token
                 )
 
+                actedThisRun = true
                 await loadLeagueDetail(leagueID: currentState.league.id)
                 guard let updated = draftState else { break }
                 currentState = updated

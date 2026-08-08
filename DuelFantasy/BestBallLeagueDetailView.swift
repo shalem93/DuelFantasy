@@ -100,6 +100,18 @@ struct BestBallLeagueDetailView: View {
                 await viewModel.catchUpScoring(leagueID: leagueID)
                 isCatchingUp = false
             }
+            // Lobby polling: while the league is still open, keep
+            // refreshing so every member's screen flips into the draft
+            // the moment the host starts it — previously non-hosts sat
+            // on "Waiting for host..." until they backed out and
+            // re-entered the league.
+            while !Task.isCancelled,
+                  viewModel.currentLeague?.id == leagueID,
+                  viewModel.currentLeague?.status == "open" {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard !Task.isCancelled else { break }
+                await viewModel.loadLeagueDetail(leagueID: leagueID)
+            }
         }
     }
 
