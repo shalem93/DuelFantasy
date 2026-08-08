@@ -121,22 +121,10 @@ struct BestBallLeagueDetailView: View {
 
     private var activeLeagueContent: some View {
         VStack(spacing: 0) {
-            // Auto-scoring banner
-            if isCatchingUp || !viewModel.catchUpProgress.isEmpty {
-                HStack(spacing: 8) {
-                    if isCatchingUp {
-                        ProgressView()
-                            .scaleEffect(0.8)
-                            .tint(.white)
-                    }
-                    Text(viewModel.catchUpProgress.isEmpty ? "Scoring past weeks..." : viewModel.catchUpProgress)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.white)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-                .background(brandPurple)
-            }
+            // Catch-up scoring runs silently in the background — the old
+            // purple "Scoring past weeks..." banner on every league open
+            // read as a loading screen. The Standings refresh button still
+            // shows inline progress for user-triggered scoring.
 
             // Segmented control
             Picker("Tab", selection: $selectedTab) {

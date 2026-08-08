@@ -241,8 +241,10 @@ struct BestBallStandingsView: View {
                                 .frame(width: 56, alignment: .trailing)
                         }
                         .padding(.vertical, 3)
+                        .padding(.horizontal, 6)
                         .background(isMe ? brandPurple.opacity(0.08) : .clear)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .padding(.horizontal, -6)
                     }
                     .buttonStyle(.plain)
                 }
@@ -294,8 +296,10 @@ struct BestBallStandingsView: View {
                                 .frame(width: 66, alignment: .trailing)
                         }
                         .padding(.vertical, 3)
+                        .padding(.horizontal, 6)
                         .background(isMe ? brandPurple.opacity(0.08) : .clear)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .padding(.horizontal, -6)
                     }
                     .buttonStyle(.plain)
                 }
