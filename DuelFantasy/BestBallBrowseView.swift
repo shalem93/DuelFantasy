@@ -3,6 +3,7 @@ import SwiftUI
 struct BestBallBrowseView: View {
     @Bindable var viewModel: BestBallViewModel
     @State private var showCreateSheet: Bool = false
+    @State private var isCreatingLeague: Bool = false
     @State private var showJoinByCode: Bool = false
     @State private var newLeagueTitle: String = ""
     @State private var newLeagueSport: String = "NFL"
@@ -671,6 +672,14 @@ struct BestBallBrowseView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 }
+
+                if let error = viewModel.error {
+                    Section {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
             }
             .navigationTitle("Create League")
             .navigationBarTitleDisplayMode(.inline)
@@ -681,9 +690,13 @@ struct BestBallBrowseView: View {
                     }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Create") {
+                    Button {
                         let title = newLeagueTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !title.isEmpty else { return }
+                        // In-flight guard: a slow create used to leave the
+                        // button live, and a second tap duplicated the league.
+                        guard !title.isEmpty, !isCreatingLeague else { return }
+                        isCreatingLeague = true
+                        viewModel.error = nil
                         Task {
                             // For NFL leagues, ensure the roster is at
                             // least big enough to hold the configured
@@ -697,7 +710,7 @@ struct BestBallBrowseView: View {
                             } else {
                                 effectiveRoster = newLeagueRosterSize
                             }
-                            _ = await viewModel.createLeague(
+                            let created = await viewModel.createLeague(
                                 title: title, sport: newLeagueSport,
                                 isPrivate: newLeaguePrivate,
                                 maxMembers: newLeagueSize,
@@ -715,6 +728,10 @@ struct BestBallBrowseView: View {
                                 nbaC: newLeagueSport == "NBA" ? newNbaC : nil,
                                 nbaFLEX: newLeagueSport == "NBA" ? newNbaFLEX : nil
                             )
+                            isCreatingLeague = false
+                            // Failed create: keep the sheet open so the
+                            // error section is visible and nothing is lost.
+                            guard created != nil else { return }
                             showCreateSheet = false
                             newLeagueTitle = ""
                             newLeaguePrivate = false
@@ -730,8 +747,14 @@ struct BestBallBrowseView: View {
                             newNflFLEX = 2
                             newNflSFLEX = 0
                         }
+                    } label: {
+                        if isCreatingLeague {
+                            ProgressView()
+                        } else {
+                            Text("Create")
+                        }
                     }
-                    .disabled(newLeagueTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(newLeagueTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isCreatingLeague)
                 }
             }
         }
