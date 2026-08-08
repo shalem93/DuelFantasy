@@ -192,9 +192,10 @@ struct BestBallDraftView: View {
 
     private func recentPicksTicker(_ state: BestBallDraftState) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            // Every pick of the draft, newest first — lazy so a 120-pick
-            // board doesn't build 120 pills up front.
-            LazyHStack(spacing: 8) {
+            // Every pick of the draft, newest first. Plain HStack — a
+            // LazyHStack here greedily claims all proposed height and
+            // blew the ticker up to half the screen.
+            HStack(spacing: 8) {
                 ForEach(Array(state.picks.reversed()), id: \.id) { pick in
                     Button {
                         Haptics.light()
@@ -283,12 +284,15 @@ struct BestBallDraftView: View {
                             .frame(width: 52, alignment: .trailing)
                     }
                     Text("PROJ")
-                        .frame(width: 44, alignment: .trailing)
+                        .frame(width: 52, alignment: .trailing)
                 }
             }
             .font(.caption2.weight(.bold))
             .foregroundStyle(.secondary)
-            .padding(.horizontal, 16)
+            .padding(.leading, 16)
+            // Rows always reserve a trailing quick-draft slot (34 + 6);
+            // the header carries the same inset so columns line up.
+            .padding(.trailing, 40)
             .padding(.vertical, 6)
 
             Divider()
@@ -364,24 +368,28 @@ struct BestBallDraftView: View {
                                 }
                             }
                             .padding(.leading, 16)
-                            .padding(.trailing, viewModel.isMyTurn && !state.isDraftComplete ? 8 : 16)
                             .padding(.vertical, 10)
                         }
                         .buttonStyle(.plain)
 
-                        if viewModel.isMyTurn && !state.isDraftComplete {
-                            Button {
-                                Haptics.medium()
-                                Task { await viewModel.makePick(player: player) }
-                            } label: {
-                                Image(systemName: "plus.circle.fill")
-                                    .font(.title3)
-                                    .foregroundStyle(brandPurple)
-                                    .padding(.trailing, 14)
-                                    .padding(.vertical, 10)
-                            }
-                            .buttonStyle(.plain)
+                        // Quick-draft slot is ALWAYS reserved so the stat
+                        // columns never shift when the clock flips to the
+                        // user — the button just fades in.
+                        let canDraft = viewModel.isMyTurn && !state.isDraftComplete
+                        Button {
+                            Haptics.medium()
+                            Task { await viewModel.makePick(player: player) }
+                        } label: {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.title3)
+                                .foregroundStyle(brandPurple)
+                                .padding(.vertical, 10)
                         }
+                        .buttonStyle(.plain)
+                        .frame(width: 34)
+                        .padding(.trailing, 6)
+                        .opacity(canDraft ? 1 : 0)
+                        .disabled(!canDraft)
                         }
                         .background(Color(.systemBackground))
 
