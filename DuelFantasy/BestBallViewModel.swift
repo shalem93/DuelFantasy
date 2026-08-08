@@ -354,6 +354,23 @@ final class BestBallViewModel {
                         preview.opponentRecord = preview.opponentRecord ?? prev.opponentRecord
                         preview.opponentStanding = preview.opponentStanding ?? prev.opponentStanding
                     }
+                    // Fresh league (drafted, nothing scored yet — no
+                    // standings rows): synthesize 0-0 records and
+                    // slot-order ranks from the member list so the card
+                    // never renders rank-less.
+                    if preview.myRecord == nil || preview.opponentRecord == nil {
+                        let ordered = memberRecords.sorted { $0.slotIndex < $1.slotIndex }
+                        if preview.myRecord == nil,
+                           let idx = ordered.firstIndex(where: { $0.id == myMembership.id }) {
+                            preview.myRecord = "0-0"
+                            preview.myStanding = "\(bestBallOrdinal(idx + 1))/\(ordered.count)"
+                        }
+                        if preview.opponentRecord == nil,
+                           let idx = ordered.firstIndex(where: { $0.id == oppID }) {
+                            preview.opponentRecord = "0-0"
+                            preview.opponentStanding = "\(bestBallOrdinal(idx + 1))/\(ordered.count)"
+                        }
+                    }
                     previews[league.id] = preview
                 }
             }
@@ -1226,10 +1243,27 @@ final class BestBallViewModel {
 
     // MARK: - Schedule Generation
 
+    /// Seed 0-0 standings rows the moment a draft completes so the hub
+    /// card and standings tab show rank/record before any scoring runs.
+    /// No-op once standings exist (safe across racing devices — upsert
+    /// on (league_id, member_id)).
+    private func seedInitialStandings(leagueID: String) async {
+        guard let token = accessToken, !currentMembers.isEmpty else { return }
+        let existing = (try? await SupabaseService.shared.fetchStandings(leagueID: leagueID, accessToken: token)) ?? []
+        guard existing.isEmpty else { return }
+        let ordered = currentMembers.sorted { $0.slotIndex < $1.slotIndex }
+        let rows = ordered.enumerated().map { idx, member in
+            (leagueID: leagueID, memberID: member.id, totalPoints: 0.0,
+             weeksScored: 0, rank: idx + 1, wins: 0, losses: 0)
+        }
+        try? await SupabaseService.shared.batchUpsertStandings(standings: rows, accessToken: token)
+    }
+
     private func generateScheduleAfterDraft(leagueID: String) async {
         guard let token = accessToken, let league = currentLeague else { return }
         // Skip schedule for dingers-only leagues (no H2H matchups)
         guard !league.isDingersOnly else { return }
+        await seedInitialStandings(leagueID: leagueID)
         let memberIDs = currentMembers.map { $0.id }
         let schedule = BestBallScheduleGenerator.generateSchedule(
             memberIDs: memberIDs, totalWeeks: league.totalWeeks
