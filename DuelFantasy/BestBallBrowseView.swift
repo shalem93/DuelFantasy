@@ -41,7 +41,7 @@ struct BestBallBrowseView: View {
     // MLB drops out after Opening Day, NFL/CFB run up to kickoff week.
     private let allSports = ["NFL", "CFB", "MLB", "NBA"]
     private var sports: [String] {
-        allSports.filter { BestBallViewModel.isSportJoinable($0) }
+        allSports.filter { BestBallViewModel.isSportOpenForNewLeagues($0) }
     }
 
     /// Display metadata for the create-sheet sport cards.

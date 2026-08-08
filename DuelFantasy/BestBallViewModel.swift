@@ -284,8 +284,12 @@ final class BestBallViewModel {
 
     func createLeague(title: String, sport: String, isPrivate: Bool = false, maxMembers: Int = 12, rosterSize: Int = 12, pitcherSlots: Int = 2, batterSlots: Int = 6, scoringMode: BestBallScoringMode = .normal, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0, entryFee: Int = 10, nbaPG: Int? = nil, nbaSG: Int? = nil, nbaSF: Int? = nil, nbaPF: Int? = nil, nbaC: Int? = nil, nbaFLEX: Int? = nil) async -> BestBallLeague? {
         guard let uid = userID, let token = accessToken else { return nil }
-        guard Self.isSportJoinable(sport) else {
-            self.error = "The \(sport) season has already started — leagues for the next season open after it wraps."
+        guard Self.isSportOpenForNewLeagues(sport) else {
+            if sport == "NBA", Self.isSportJoinable(sport) {
+                self.error = "NBA leagues open October 1 — check back closer to tip-off."
+            } else {
+                self.error = "The \(sport) season has already started — leagues for the next season open after it wraps."
+            }
             return nil
         }
         if let reason = entryDenialReason(fee: entryFee) {
@@ -368,6 +372,21 @@ final class BestBallViewModel {
     /// that's already half burned.
     static func isSportJoinable(_ sport: String) -> Bool {
         Date() < BestBallSeasonHelper.seasonStartDate(for: sport)
+    }
+
+    /// Whether the sport should be offered for NEW leagues right now.
+    /// Joinable is necessary but not sufficient: NBA stays hidden until
+    /// Oct 1 — offering an NBA draft in August, months before rosters
+    /// settle and 3+ weeks before tip-off, made no sense.
+    static func isSportOpenForNewLeagues(_ sport: String) -> Bool {
+        guard isSportJoinable(sport) else { return false }
+        if sport == "NBA" {
+            let calendar = Calendar(identifier: .gregorian)
+            let year = calendar.component(.year, from: Date())
+            let opens = calendar.date(from: DateComponents(year: year, month: 10, day: 1)) ?? Date()
+            return Date() >= opens
+        }
+        return true
     }
 
     static func joinDeadlineNote(for sport: String) -> String {
