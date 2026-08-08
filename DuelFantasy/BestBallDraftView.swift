@@ -187,7 +187,7 @@ struct BestBallDraftView: View {
                             Text("R\(pick.round)P\(pick.pickNumber)")
                                 .font(.caption2.weight(.bold))
                                 .foregroundStyle(.secondary)
-                            Text(pick.playerName.components(separatedBy: " ").last ?? pick.playerName)
+                            Text(tickerLastName(pick.playerName))
                                 .font(.caption.weight(.medium))
                                 .lineLimit(1)
                             Text(viewModel.memberName(for: pick.memberID))
@@ -550,6 +550,20 @@ struct BestBallDraftView: View {
     }
 
     // MARK: - Helpers
+
+    /// Surname for the ticker pill, skipping generational suffixes so
+    /// "Deebo Samuel Sr." shows "Samuel", not "Sr.".
+    private func tickerLastName(_ fullName: String) -> String {
+        let suffixes: Set<String> = ["jr", "sr", "ii", "iii", "iv", "v"]
+        let parts = fullName.split(separator: " ")
+        if let surname = parts.last(where: { part in
+            let cleaned = String(part).lowercased().trimmingCharacters(in: .punctuationCharacters)
+            return !suffixes.contains(cleaned)
+        }) {
+            return String(surname)
+        }
+        return fullName
+    }
 
     /// "RB • PHI • Bye 10" — the bye segment appears only for NFL teams
     /// with a loaded bye table.
