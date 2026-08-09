@@ -39,7 +39,7 @@ struct BestBallBrowseView: View {
     // a Best Ball drafted mid-season plays against a half-burned schedule.
     // NBA re-enters the list automatically ahead of its October tip-off,
     // MLB drops out after Opening Day, NFL/CFB run up to kickoff week.
-    private let allSports = ["NFL", "CFB", "MLB", "NBA"]
+    private let allSports = ["NFL", "CFB", "EPL", "MLB", "NBA"]
     private var sports: [String] {
         allSports.filter { BestBallViewModel.isSportOpenForNewLeagues($0) }
     }
@@ -75,6 +75,13 @@ struct BestBallBrowseView: View {
                 tagline: "Nightly buckets",
                 seasonNote: "Tips off October · 24 wks",
                 gradient: [Color(red: 0.30, green: 0.08, blue: 0.35), Color(red: 0.55, green: 0.18, blue: 0.55)]
+            )
+        case "EPL":
+            return SportOption(
+                name: "EPL", icon: "soccerball",
+                tagline: "Premier League XIs",
+                seasonNote: "Kicks off late August · 41 wks",
+                gradient: [Color(red: 0.22, green: 0.03, blue: 0.28), Color(red: 0.55, green: 0.05, blue: 0.30)]
             )
         default:
             return SportOption(
@@ -549,6 +556,7 @@ struct BestBallBrowseView: View {
                             if newLeagueSport == "NFL" || newLeagueSport == "CFB" {
                                 return newNflQB + newNflRB + newNflWR + newNflTE + newNflFLEX + newNflSFLEX
                             }
+                            if newLeagueSport == "EPL" { return 11 }
                             return newPitcherSlots + newBatterSlots
                         }()
                         Stepper("Roster Size: \(newLeagueRosterSize)", value: $newLeagueRosterSize, in: minRoster...20)
@@ -618,6 +626,21 @@ struct BestBallBrowseView: View {
                                 .foregroundStyle(brandPurple)
                         }
                     }
+                } else if newLeagueSport == "EPL" {
+                    Section("Starting Lineup") {
+                        // Fixed 11-man XI — the optimizer's FLEX slot lets
+                        // the best lineup morph between 3-5-2 / 3-4-3 / 4-4-2.
+                        HStack {
+                            Text("1 GK · 3 DEF · 4 MID · 2 FWD · 1 FLEX")
+                            Spacer()
+                            Text("11 starters")
+                                .font(.subheadline.weight(.bold))
+                                .foregroundStyle(brandPurple)
+                        }
+                        Text("FLEX takes any outfield player (DEF/MID/FWD).")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 } else if newLeagueSport == "NFL" || newLeagueSport == "CFB" {
                     Section("Starting Lineup") {
                         Stepper("QB: \(newNflQB)", value: $newNflQB, in: 0...2)
@@ -658,6 +681,7 @@ struct BestBallBrowseView: View {
                             switch newLeagueSport {
                             case "MLB": return newScoringMode == .dingersOnly ? newBatterSlots : newPitcherSlots + newBatterSlots
                             case "NBA": return newNbaPG + newNbaSG + newNbaSF + newNbaPF + newNbaC + newNbaFLEX
+                            case "EPL": return 11
                             default: return newNflQB + newNflRB + newNflWR + newNflTE + newNflFLEX + newNflSFLEX
                             }
                         }()
@@ -707,6 +731,8 @@ struct BestBallBrowseView: View {
                             let effectiveRoster: Int
                             if newLeagueSport == "NFL" || newLeagueSport == "CFB" {
                                 effectiveRoster = max(newLeagueRosterSize, nflStarters)
+                            } else if newLeagueSport == "EPL" {
+                                effectiveRoster = max(newLeagueRosterSize, 11)
                             } else if newScoringMode == .dingersOnly {
                                 effectiveRoster = newBatterSlots
                             } else {

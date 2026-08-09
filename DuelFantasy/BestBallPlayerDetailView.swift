@@ -49,6 +49,7 @@ struct BestBallPlayerDetailSheet: View {
         switch sport {
         case "NFL", "CFB": return month <= 2 ? year - 1 : year
         case "NBA": return month >= 10 ? year + 1 : year
+        case "EPL": return month >= 7 ? year : year - 1   // labeled by August start year
         default: return year
         }
     }
@@ -280,6 +281,19 @@ struct BestBallPlayerDetailSheet: View {
             return parts.isEmpty ? "Did not record a stat" : parts.joined(separator: " · ")
         case "NBA":
             return "\(g.points) PTS · \(g.rebounds) REB · \(g.assists) AST"
+        case "EPL":
+            // Soccer field mapping in DFSPlayerGameLog: points=goals,
+            // rebounds=SOT, assists=assists, blocks=saves,
+            // turnovers=totalShots, fgm=YC, fga=RC, ftm=cleanSheet.
+            var parts: [String] = []
+            if g.points > 0 { parts.append("\(g.points) G") }
+            if g.assists > 0 { parts.append("\(g.assists) A") }
+            if g.rebounds > 0 { parts.append("\(g.rebounds) SOT") }
+            if g.blocks > 0 { parts.append("\(g.blocks) SV") }
+            if g.ftm > 0 { parts.append("CS") }
+            if g.fgm > 0 { parts.append("\(g.fgm) YC") }
+            if g.fga > 0 { parts.append("\(g.fga) RC") }
+            return parts.isEmpty ? "\(g.turnovers) SH" : parts.joined(separator: " · ")
         default:
             return ""
         }
@@ -289,6 +303,10 @@ struct BestBallPlayerDetailSheet: View {
         // NBA seasons span two calendar years; label as "2025-26".
         if sport == "NBA" {
             return "\(season - 1)-\(String(season).suffix(2))"
+        }
+        // EPL also spans two years but is keyed by its August start year.
+        if sport == "EPL" {
+            return "\(season)-\(String(season + 1).suffix(2))"
         }
         return "\(season)"
     }

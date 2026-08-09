@@ -508,6 +508,7 @@ struct BestBallLeagueDetailView: View {
         case "NBA": return "basketball"
         case "MLB": return "baseball"
         case "NFL", "CFB": return "football"
+        case "EPL": return "soccerball"
         default: return "sportscourt"
         }
     }
@@ -641,6 +642,7 @@ private struct CommishSettingsSheet: View {
                                     if league.sport == "NFL" || league.sport == "CFB" {
                                         return editNflQB + editNflRB + editNflWR + editNflTE + editNflFLEX + editNflSFLEX
                                     }
+                                    if league.sport == "EPL" { return 11 }
                                     return editPitcherSlots + editBatterSlots
                                 }()
                                 Stepper("\(editRosterSize)", value: $editRosterSize, in: minRoster...20)
@@ -833,6 +835,12 @@ private struct CommishSettingsSheet: View {
                                     .foregroundStyle(.secondary)
                             }
                         }
+                    } else if league.sport == "EPL" {
+                        settingsCard(title: "Starting Lineup") {
+                            Text("1 GK · 3 DEF · 4 MID · 2 FWD · 1 FLEX — 11 starters (fixed)")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
                     }
 
                     // Scoring Model card
@@ -862,6 +870,8 @@ private struct CommishSettingsSheet: View {
                                 if league.sport == "NFL" || league.sport == "CFB" {
                                     let starters = editNflQB + editNflRB + editNflWR + editNflTE + editNflFLEX + editNflSFLEX
                                     effectiveRoster = max(effectiveRoster, starters)
+                                } else if league.sport == "EPL" {
+                                    effectiveRoster = max(effectiveRoster, 11)
                                 }
                                 await viewModel.updateLeagueSettings(
                                     leagueID: leagueID,

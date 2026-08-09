@@ -211,10 +211,11 @@ struct BestBallMatchupView: View {
                 mlbMatchupSection(title: "PITCHERS", badge: "P", slots1: pitchers1, slots2: pitchers2)
                 mlbMatchupSection(title: "BATTERS", badge: "UTIL", slots1: batters1, slots2: batters2)
                     .padding(.top, 12)
-            } else if sport == "NFL" || sport == "CFB", let league = viewModel.currentLeague {
-                // For NFL we render starters by their lineup slot
-                // (QB → RB → WR → TE → FLEX) so the matchup reads like a
-                // standard fantasy box score rather than a flat FLEX list.
+            } else if sport == "NFL" || sport == "CFB" || sport == "EPL", let league = viewModel.currentLeague {
+                // For NFL/EPL we render starters by their lineup slot
+                // (QB → RB → … / GK → DEF → MID → FWD → FLEX) so the matchup
+                // reads like a standard fantasy box score rather than a
+                // flat FLEX list.
                 let constraints = BestBallLineupConfig.requirements(for: league).constraints
                 let ordered1 = orderedSlots(team: slots1, constraints: constraints)
                 let ordered2 = orderedSlots(team: slots2, constraints: constraints)
@@ -331,7 +332,7 @@ struct BestBallMatchupView: View {
     ) -> Set<String> {
         if !scoringSet.isEmpty { return scoringSet }
         let slots = buildScoringSlots(roster: roster, scoringSet: scoringSet, weekScore: weekScore)
-        if sport == "NFL" || sport == "CFB", let league = viewModel.currentLeague {
+        if sport == "NFL" || sport == "CFB" || sport == "EPL", let league = viewModel.currentLeague {
             let constraints = BestBallLineupConfig.requirements(for: league).constraints
             return Set(orderedSlots(team: slots, constraints: constraints).map { $0.entry.pick.playerID })
         }

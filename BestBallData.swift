@@ -353,6 +353,16 @@ enum BestBallLineupConfig {
                 BestBallPositionRequirement(label: "P",    count: pitcherSlots, eligible: ["SP", "P"]),
                 BestBallPositionRequirement(label: "UTIL", count: batterSlots, eligible: ["C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "OF", "DH"]),
             ])
+        case "EPL":
+            // Fixed 11-man XI. The FLEX (any outfield player) lets the
+            // optimizer morph between 3-5-2 / 3-4-3 / 4-4-2 shapes.
+            return (11, [
+                BestBallPositionRequirement(label: "GK", count: 1, eligible: ["GK"]),
+                BestBallPositionRequirement(label: "DEF", count: 3, eligible: ["DEF"]),
+                BestBallPositionRequirement(label: "MID", count: 4, eligible: ["MID"]),
+                BestBallPositionRequirement(label: "FWD", count: 2, eligible: ["FWD"]),
+                BestBallPositionRequirement(label: "FLEX", count: 1, eligible: ["DEF", "MID", "FWD"]),
+            ])
         case "NFL", "CFB":
             // Commissioner-configurable lineup. Standard FLEX = RB/WR/TE
             // (no QB); Superflex (SFLEX) = QB/RB/WR/TE for leagues that
@@ -408,6 +418,7 @@ enum BestBallLineupConfig {
     static func draftMinimums(for sport: String, pitcherSlots: Int = 2, batterSlots: Int = 6, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1) -> [String: Int] {
         switch sport {
         case "NBA": return ["PG": 1, "SG": 1, "SF": 1, "PF": 1, "C": 1]
+        case "EPL": return ["GK": 1, "DEF": 3, "MID": 4, "FWD": 2]
         case "MLB": return ["SP": pitcherSlots]  // Must fill pitcher starter slots; batters handled by balanced pick logic
         case "NFL", "CFB":
             var mins: [String: Int] = [:]
@@ -427,6 +438,7 @@ enum BestBallLineupConfig {
         case "MLB" where isPitcher: return ["IP", "K", "ER", "W", "SV"]
         case "MLB": return ["H", "AB", "HR", "RBI", "R", "BB", "K", "SB"]
         case "NFL", "CFB": return ["PYDS", "PTD", "INT", "RYDS", "RTD", "REC", "RECYDS", "RECTD"]
+        case "EPL": return ["G", "A", "SOT", "SH", "SV", "YC", "RC"]
         default: return []
         }
     }
@@ -516,6 +528,14 @@ enum BestBallLineupConfig {
             Pass YDS ×0.04 · Pass TD ×4 · INT ×−1
             Rush YDS ×0.1 · Rush TD ×6
             REC ×1 · Rec YDS ×0.1 · Rec TD ×6 · FUM ×−2
+            """
+        case "EPL":
+            return """
+            Soccer Fantasy Points:
+            Goal ×15 · Assist ×7 · Shot on Target ×4 · Shot ×1
+            Foul Drawn ×1 · YC ×−1 · RC ×−3
+            DEF: Clean Sheet +5 · Goal Against ×−0.6
+            GK: Save ×2.5 · Clean Sheet +8 · Win +6 · Goal Against ×−2.5
             """
         default:
             return ""
@@ -739,6 +759,69 @@ enum BestBallScoringEngine {
         Double(recYds) * 0.1 + Double(receptions) * 1 + Double(recTD) * 6 -
         Double(fumblesLost) * 2
     }
+
+    /// Soccer (EPL) scoring. Same shape as the Tiers/DFS soccer formula
+    /// but WITHOUT tackles/interceptions/blocks/clearances — those need
+    /// one extra core-API request per player per match, which is far too
+    /// many calls for a season-long weekly refresh. Clean sheets and
+    /// goals-against (which ARE in the summary payload) keep DEF/GK
+    /// competitive instead.
+    nonisolated static func soccerFantasyPoints(
+        position: String,
+        goals: Int, assists: Int, shotsOnTarget: Int, totalShots: Int,
+        saves: Int, yellowCards: Int, redCards: Int,
+        foulsDrawn: Int, goalsAgainst: Int,
+        cleanSheet: Bool, gameFinal: Bool, teamWon: Bool
+    ) -> Double {
+        var pts = 0.0
+        pts += Double(goals) * 15.0
+        pts += Double(assists) * 7.0
+        pts += Double(shotsOnTarget) * 4.0
+        let nonTargetShots = max(0, totalShots - shotsOnTarget)
+        pts += Double(nonTargetShots) * 1.0
+        pts += Double(foulsDrawn) * 1.0
+        pts -= Double(yellowCards) * 1.0
+        pts -= Double(redCards) * 3.0
+        if position == "DEF" {
+            if cleanSheet && gameFinal { pts += 5.0 }
+            pts -= Double(goalsAgainst) * 0.6
+        }
+        if position == "GK" {
+            pts += Double(saves) * 2.5
+            if cleanSheet && gameFinal { pts += 8.0 }
+            if gameFinal && teamWon { pts += 6.0 }
+            pts -= Double(goalsAgainst) * 2.5
+        }
+        return pts
+    }
+}
+
+/// ESPN soccer positions → the four best-ball slots GK/DEF/MID/FWD.
+/// Roster endpoints use simple codes ("G"/"D"/"M"/"F"); match summaries
+/// use formation codes, often compound ("CD-L", "AM-R") where the token
+/// before the dash carries the role. Substitutes come through as "SUB"
+/// with no real position and land on the MID default — which also means
+/// they never collect DEF/GK clean-sheet bonuses, mirroring the usual
+/// 60-minute clean-sheet rule closely enough.
+func bbSoccerPosition(_ raw: String) -> String {
+    let upper = raw.uppercased().trimmingCharacters(in: .whitespaces)
+    let base = upper.split(separator: "-").first.map(String.init) ?? upper
+    if base == "G" || base == "GK" || upper.contains("GOALKEEPER") || upper.contains("KEEPER") {
+        return "GK"
+    }
+    if ["D", "DEF", "CB", "CD", "LB", "RB", "LWB", "RWB", "WB", "SW"].contains(base)
+        || upper.contains("DEFENDER") || upper.contains("BACK") {
+        return "DEF"
+    }
+    if ["M", "MID", "CM", "CAM", "CDM", "LM", "RM", "AM", "DM"].contains(base)
+        || upper.contains("MIDFIELDER") || upper.contains("MIDFIELD") {
+        return "MID"
+    }
+    if ["F", "FWD", "ST", "CF", "LW", "RW", "SS"].contains(base)
+        || upper.contains("FORWARD") || upper.contains("STRIKER") || upper.contains("WINGER") {
+        return "FWD"
+    }
+    return "MID"
 }
 
 // MARK: - Bot Drafter
@@ -889,6 +972,26 @@ enum BestBallBotDrafter {
             return sorted.first
         }
 
+        // EPL: same two-phase shape as NFL. The generic "< 3 of same
+        // position" fallback below would happily hand a bot three
+        // goalkeepers; cap GK at 2 and keep outfield depth sensible
+        // (dedicated slots + flex + one bench spare each).
+        if sport == "EPL" {
+            if !neededPositions.isEmpty {
+                if let forced = sorted.first(where: { neededPositions.contains($0.position) }) {
+                    return forced
+                }
+            }
+            let positionCaps: [String: Int] = ["GK": 2, "DEF": 6, "MID": 7, "FWD": 5]
+            if let pick = sorted.first(where: {
+                let cap = positionCaps[$0.position] ?? Int.max
+                return (pickedPositions[$0.position] ?? 0) < cap
+            }) {
+                return pick
+            }
+            return sorted.first
+        }
+
         // Prefer balanced approach: underrepresented positions (< 3)
         if let balanced = sorted.first(where: { (pickedPositions[$0.position] ?? 0) < 3 }) {
             return balanced
@@ -952,6 +1055,7 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
         case "MLB": return try await fetchSportPlayers(sport: "baseball", league: "mlb", sportName: "MLB", teamLimit: 30)
         case "NFL": return try await fetchSportPlayers(sport: "football", league: "nfl", sportName: "NFL", teamLimit: 32)
         case "CFB": return try await fetchSportPlayers(sport: "football", league: "college-football", sportName: "CFB", teamLimit: 140)
+        case "EPL": return try await fetchSportPlayers(sport: "soccer", league: "eng.1", sportName: "EPL", teamLimit: 20)
         default: return []
         }
     }
@@ -1096,11 +1200,16 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
         for athlete in flatAthletes {
             guard let id = athlete["id"] as? String ?? (athlete["id"] as? Int).map({ String($0) }),
                   let fullName = athlete["fullName"] as? String ?? athlete["displayName"] as? String else { continue }
-            let positionAbbr: String
+            var positionAbbr: String
             if let pos = athlete["position"] as? [String: Any] {
-                positionAbbr = pos["abbreviation"] as? String ?? "UTIL"
+                positionAbbr = pos["abbreviation"] as? String ?? pos["displayName"] as? String ?? "UTIL"
             } else {
                 positionAbbr = "UTIL"
+            }
+            // ESPN soccer rosters use "G"/"D"/"M"/"F" — map to the
+            // GK/DEF/MID/FWD slots the lineup config expects.
+            if sportName == "EPL" {
+                positionAbbr = bbSoccerPosition(positionAbbr)
             }
 
             // Skip relief pitchers for MLB — they aren't useful in best ball
@@ -1170,6 +1279,22 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
                 for (id, proj) in prevProjections where cache.leagueProjections[id] == nil {
                     cache.leagueProjections[id] = proj
                 }
+            }
+            return
+        }
+
+        // EPL: soccer leaders live under season type 1 (types/2 responds
+        // 200 with zero categories), and the new season's leaders are
+        // empty until matches are played — so parse each season in turn
+        // and stop at the first one that yields projections.
+        if sportName == "EPL" {
+            for season in [primarySeason, fallbackSeason] {
+                guard let data = await fetchLeadersData(sport: sport, league: league, season: season, seasonType: 1),
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let categories = json["categories"] as? [[String: Any]],
+                      !categories.isEmpty else { continue }
+                parseSoccerLeaders(categories: categories)
+                if !cache.leagueProjections.isEmpty { return }
             }
             return
         }
@@ -1281,9 +1406,51 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
         }
     }
 
+    /// Sum each leaders category's fantasy-point contribution per athlete
+    /// (same accumulation shape as parseNFLLeaders), then ÷38 matches for
+    /// a per-week projection. Goals double-dip slightly with the SOT and
+    /// total-shots categories, but for draft-board ordering that's fine.
+    private func parseSoccerLeaders(categories: [[String: Any]]) {
+        func pointsPerUnit(for rawCategory: String) -> Double? {
+            switch rawCategory {
+            case "goals": return 15.0
+            case "assists": return 7.0
+            case "shotsOnTarget": return 4.0
+            case "totalShots": return 1.0
+            case "saves": return 2.5
+            case "foulsSuffered": return 1.0
+            case "yellowCards": return -1.0
+            case "redCards": return -3.0
+            default: return nil   // goalsLeaders/assistsLeaders dupes, accuratePasses, foulsCommitted
+            }
+        }
+
+        var totals: [String: Double] = [:]
+        for category in categories {
+            let name = (category["name"] as? String) ?? ""
+            guard let multiplier = pointsPerUnit(for: name),
+                  let leaders = category["leaders"] as? [[String: Any]] else { continue }
+            for leader in leaders {
+                guard let athleteRef = leader["athlete"] as? [String: Any],
+                      let refURL = athleteRef["$ref"] as? String,
+                      let displayValue = leader["displayValue"] as? String else { continue }
+                let pathParts = refURL.split(separator: "?").first?.split(separator: "/") ?? []
+                guard let athleteID = pathParts.last.map(String.init) else { continue }
+                let cleaned = displayValue
+                    .trimmingCharacters(in: .whitespaces)
+                    .replacingOccurrences(of: ",", with: "")
+                guard let value = Double(cleaned) else { continue }
+                totals[athleteID, default: 0] += value * multiplier
+            }
+        }
+        for (id, season) in totals where season > 0 {
+            cache.leagueProjections[id] = season / 38.0
+        }
+    }
+
     /// Fetch leaders data for a given season; returns nil if unavailable.
-    private func fetchLeadersData(sport: String, league: String, season: Int) async -> Data? {
-        guard let url = URL(string: "https://sports.core.api.espn.com/v2/sports/\(sport)/leagues/\(league)/seasons/\(season)/types/2/leaders?limit=100") else { return nil }
+    private func fetchLeadersData(sport: String, league: String, season: Int, seasonType: Int = 2) async -> Data? {
+        guard let url = URL(string: "https://sports.core.api.espn.com/v2/sports/\(sport)/leagues/\(league)/seasons/\(season)/types/\(seasonType)/leaders?limit=100") else { return nil }
         guard let (data, response) = try? await session.data(from: url),
               let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
         return data
@@ -1569,6 +1736,9 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
             return year                       // Mar–Jun off-season → upcoming season
         case "MLB":
             return month >= 3 ? year : year - 1
+        case "EPL":
+            // ESPN labels eng.1 seasons by their August start year.
+            return month >= 7 ? year : year - 1
         default:
             return year
         }
@@ -1631,6 +1801,11 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
             floor = 2.0; ceiling = 30.0
         case "NFL", "CFB":
             // Non-leaders: low-tier starters / backups
+            floor = 2.0; ceiling = 10.0
+        case "EPL":
+            // No per-team ratings endpoint exists for soccer, so ratings
+            // are all 0 and non-leaders land at the floor — below the
+            // ~300 players the leaders pass covers.
             floor = 2.0; ceiling = 10.0
         default:
             floor = 2.0; ceiling = 15.0
@@ -1717,8 +1892,26 @@ struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvider {
                 guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/\(sportPath)/\(leaguePath)/summary?event=\(gameID)") else { continue }
                 guard let (data, response) = try? await session.data(from: url),
                       let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { continue }
-                guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let boxscore = json["boxscore"] as? [String: Any],
+                guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+
+                // Soccer summaries have no boxscore.players — stats live
+                // under rosters[] in a different shape entirely.
+                if sport == "EPL" {
+                    for entry in Self.parseSoccerSummaryEntries(json: json, prefix: prefix) {
+                        guard playerIDSet.contains(entry.fullID) else { continue }
+                        totalPoints[entry.fullID, default: 0] += entry.fpts
+                        for (key, val) in entry.lookup {
+                            totalStats[entry.fullID, default: [:]][key, default: 0] += val
+                        }
+                        dailyBreakdown[dateKey, default: [:]][entry.fullID, default: 0] += entry.fpts
+                        for (key, val) in entry.lookup {
+                            dailyStats[dateKey, default: [:]][entry.fullID, default: [:]][key, default: 0] += val
+                        }
+                    }
+                    continue
+                }
+
+                guard let boxscore = json["boxscore"] as? [String: Any],
                       let playerGroups = boxscore["players"] as? [[String: Any]] else { continue }
 
                 for group in playerGroups {
@@ -1854,8 +2047,18 @@ struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvider {
                           let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
                         return BoxScoreResult(dateKey: fetch.dateKey, playerEntries: [])
                     }
-                    guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                          let boxscore = json["boxscore"] as? [String: Any],
+                    guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                        return BoxScoreResult(dateKey: fetch.dateKey, playerEntries: [])
+                    }
+
+                    if sport == "EPL" {
+                        return BoxScoreResult(
+                            dateKey: fetch.dateKey,
+                            playerEntries: Self.parseSoccerSummaryEntries(json: json, prefix: prefix)
+                        )
+                    }
+
+                    guard let boxscore = json["boxscore"] as? [String: Any],
                           let playerGroups = boxscore["players"] as? [[String: Any]] else {
                         return BoxScoreResult(dateKey: fetch.dateKey, playerEntries: [])
                     }
@@ -1980,8 +2183,96 @@ struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvider {
         case "MLB": return ("baseball", "mlb")
         case "NFL": return ("football", "nfl")
         case "CFB": return ("football", "college-football")
+        case "EPL": return ("soccer", "eng.1")
         default: return ("", "")
         }
+    }
+
+    /// Parse an ESPN soccer summary into per-player scoring entries.
+    /// Stats are `rosters[].roster[].stats` as {name, value} dicts (NOT
+    /// the labels/stats string arrays every other sport uses), and the
+    /// clean-sheet / win context comes from the header competitors.
+    private nonisolated static func parseSoccerSummaryEntries(
+        json: [String: Any], prefix: String
+    ) -> [(fullID: String, fpts: Double, lookup: [String: Double])] {
+        guard let rostersArr = json["rosters"] as? [[String: Any]] else { return [] }
+
+        var gameFinal = false
+        var scoreByHomeAway: [String: Int] = [:]
+        if let header = json["header"] as? [String: Any],
+           let comp = (header["competitions"] as? [[String: Any]])?.first {
+            if let status = comp["status"] as? [String: Any],
+               let type = status["type"] as? [String: Any],
+               let state = type["state"] as? String {
+                gameFinal = state == "post"
+            }
+            for competitor in (comp["competitors"] as? [[String: Any]]) ?? [] {
+                guard let homeAway = competitor["homeAway"] as? String else { continue }
+                let score = (competitor["score"] as? String).flatMap { Int($0) }
+                    ?? competitor["score"] as? Int ?? 0
+                scoreByHomeAway[homeAway] = score
+            }
+        }
+
+        var entries: [(fullID: String, fpts: Double, lookup: [String: Double])] = []
+        for rosterBlock in rostersArr {
+            let homeAway = rosterBlock["homeAway"] as? String ?? ""
+            let teamScore = scoreByHomeAway[homeAway] ?? 0
+            let oppScore = scoreByHomeAway[homeAway == "home" ? "away" : "home"] ?? 0
+            let cleanSheet = gameFinal && oppScore == 0
+            let teamWon = gameFinal && teamScore > oppScore
+
+            guard let rosterEntries = rosterBlock["roster"] as? [[String: Any]] else { continue }
+            for entry in rosterEntries {
+                let isActive = entry["active"] as? Bool ?? false
+                let isStarter = entry["starter"] as? Bool ?? false
+                let subbedIn = entry["subbedIn"] as? Bool ?? false
+                // Skip players who never got on the pitch.
+                guard isActive || isStarter || subbedIn else { continue }
+                guard let athleteDict = entry["athlete"] as? [String: Any],
+                      let athleteID = athleteDict["id"] as? String ?? (athleteDict["id"] as? Int).map({ String($0) }) else { continue }
+
+                let posDict = entry["position"] as? [String: Any]
+                let position = bbSoccerPosition(
+                    posDict?["abbreviation"] as? String ?? posDict?["displayName"] as? String ?? "M"
+                )
+
+                var statMap: [String: Double] = [:]
+                for stat in (entry["stats"] as? [[String: Any]]) ?? [] {
+                    if let name = stat["name"] as? String {
+                        statMap[name] = stat["value"] as? Double
+                            ?? (stat["displayValue"] as? String).flatMap { Double($0) }
+                            ?? 0
+                    }
+                }
+
+                let goals = Int(statMap["totalGoals"] ?? 0)
+                let assists = Int(statMap["goalAssists"] ?? 0)
+                let sot = Int(statMap["shotsOnTarget"] ?? 0)
+                let shots = Int(statMap["totalShots"] ?? 0)
+                let saves = Int(statMap["saves"] ?? 0)
+                let yc = Int(statMap["yellowCards"] ?? 0)
+                let rc = Int(statMap["redCards"] ?? 0)
+                let foulsDrawn = Int(statMap["foulsSuffered"] ?? 0)
+                let goalsAgainst = Int(statMap["goalsConceded"] ?? 0)
+
+                let fpts = BestBallScoringEngine.soccerFantasyPoints(
+                    position: position,
+                    goals: goals, assists: assists, shotsOnTarget: sot, totalShots: shots,
+                    saves: saves, yellowCards: yc, redCards: rc,
+                    foulsDrawn: foulsDrawn, goalsAgainst: goalsAgainst,
+                    cleanSheet: cleanSheet, gameFinal: gameFinal, teamWon: teamWon
+                )
+
+                let lookup: [String: Double] = [
+                    "G": Double(goals), "A": Double(assists),
+                    "SOT": Double(sot), "SH": Double(shots),
+                    "SV": Double(saves), "YC": Double(yc), "RC": Double(rc),
+                ]
+                entries.append((prefix + athleteID, fpts, lookup))
+            }
+        }
+        return entries
     }
 
     private nonisolated static func computeFantasyPoints(sport: String, labels: [String], stats: [String]) -> Double {
@@ -2039,6 +2330,7 @@ enum BestBallSeasonHelper {
         case "MLB": return 26
         case "NFL": return 18
         case "CFB": return 15   // Week 1 (Labor Day weekend) → conference championships
+        case "EPL": return 41   // Aug 17 2026 → final day Sun May 30 2027, Mon–Sun weeks (international breaks score 0)
         default: return 20
         }
     }
@@ -2069,7 +2361,9 @@ enum BestBallSeasonHelper {
             }
             return "\(year - 1)-\(String(year).suffix(2))"
         default:
-            // MLB and other Mar–Sep sports — current year is the season.
+            // MLB and other sports whose season is underway or upcoming
+            // by July (EPL's Aug→May season labels correctly here too:
+            // Jul–Dec → "year-(year+1)", Jan–Jun → "(year-1)-year").
             if month >= 7 {
                 return "\(year)-\(String(year + 1).suffix(2))"
             }
@@ -2157,6 +2451,14 @@ enum BestBallSeasonHelper {
                 startYear = year
             }
             return mondayOnOrAfter(calendar.date(from: DateComponents(year: startYear, month: 8, day: 28)) ?? Date(), calendar: calendar)
+        case "EPL":
+            // EPL runs Aug→May; the season label pivots in July. 2026-27
+            // opens Friday Aug 21 (a week later than usual after the World
+            // Cup), so week 1 anchors to the Monday of opening week —
+            // mondayOnOrAfter(Aug 12) = Aug 17. Revisit the anchor if a
+            // future season opens on the second weekend of August.
+            let startYear = month >= 7 ? year : year - 1
+            return mondayOnOrAfter(calendar.date(from: DateComponents(year: startYear, month: 8, day: 12)) ?? Date(), calendar: calendar)
         default:
             return Date()
         }

@@ -89,6 +89,7 @@ struct BestBallRosterView: View {
         case "NFL", "CFB": order = ["QB", "RB", "FB", "WR", "TE", "K"]
         case "NBA": order = ["PG", "SG", "SF", "PF", "C"]
         case "MLB": order = ["SP", "RP", "P", "C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "OF", "DH"]
+        case "EPL": order = ["GK", "DEF", "MID", "FWD"]
         default:    order = []
         }
         return order.firstIndex(of: position) ?? Int.max
@@ -539,8 +540,8 @@ struct BestBallRosterView: View {
         let candidates = hasScores
             ? sortedRoster.filter { scoringPlayerIDs.contains($0.playerID) }
             : sortedRoster
-        guard sport == "NFL" || sport == "CFB", let league = viewModel.currentLeague else {
-            // Non-football keeps the old behavior: no starters until scored.
+        guard sport == "NFL" || sport == "CFB" || sport == "EPL", let league = viewModel.currentLeague else {
+            // Other sports keep the old behavior: no starters until scored.
             return hasScores ? candidates.map { ($0, nil) } : []
         }
         let constraints = BestBallLineupConfig.requirements(for: league).constraints
@@ -720,6 +721,10 @@ struct BestBallRosterView: View {
         case "SP", "RP", "P": return .red
         case "1B", "2B", "3B", "SS": return .indigo
         case "LF", "CF", "RF", "OF": return .teal
+        case "GK": return .yellow
+        case "DEF": return .blue
+        case "MID": return .green
+        case "FWD": return .red
         default: return .gray
         }
     }

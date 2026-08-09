@@ -1575,3 +1575,15 @@ alter table bestball_leagues add column if not exists nba_pf_starters int;
 alter table bestball_leagues add column if not exists nba_c_starters int;
 alter table bestball_leagues add column if not exists nba_flex_starters int;
 select pg_notify('pgrst', 'reload schema');
+
+
+-- ============================================================
+-- EPL Best Ball (Aug 2026): allow 'EPL' as a bestball sport.
+-- Fixed 11-man lineup (1 GK / 3 DEF / 4 MID / 2 FWD / 1 FLEX) —
+-- no per-position config columns needed.
+-- ============================================================
+alter table public.bestball_leagues drop constraint if exists bestball_leagues_sport_check;
+alter table public.bestball_leagues add constraint bestball_leagues_sport_check
+  check (sport in ('NBA', 'MLB', 'NFL', 'CFB', 'EPL'));
+
+select pg_notify('pgrst', 'reload schema');

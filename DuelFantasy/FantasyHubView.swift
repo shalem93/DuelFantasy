@@ -546,11 +546,11 @@ struct FantasyHubView: View {
             } label: {
                 gameTypeCard(
                     title: "Best Ball Fantasy",
-                    subtitle: "Season-long: draft a roster in NFL, CFB, or MLB and the best lineup auto-sets each week",
+                    subtitle: "Season-long: draft a roster in NFL, CFB, EPL, or MLB and the best lineup auto-sets each week",
                     icon: "figure.baseball",
                     gradient: [Color(red: 0.12, green: 0.28, blue: 0.12), Color(red: 0.18, green: 0.42, blue: 0.18)],
                     status: .open,
-                    extraIcons: ["football.fill", "basketball.fill"]
+                    extraIcons: ["football.fill", "soccerball", "basketball.fill"]
                 )
             }
             .buttonStyle(.plain)
@@ -716,6 +716,7 @@ struct FantasyHubView: View {
             case "NBA": return "basketball.fill"
             case "NFL", "CFB": return "football.fill"
             case "MLB": return "figure.baseball"
+            case "EPL": return "soccerball"
             default: return "figure.baseball"
             }
         }

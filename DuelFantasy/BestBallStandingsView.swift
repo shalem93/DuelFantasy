@@ -449,6 +449,7 @@ struct BestBallStandingsView: View {
         case "NBA": return "basketball"
         case "MLB": return "baseball"
         case "NFL", "CFB": return "football"
+        case "EPL": return "soccerball"
         default: return "sportscourt"
         }
     }
