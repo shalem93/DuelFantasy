@@ -110,6 +110,10 @@ struct BestBallPlayer: Identifiable, Hashable {
     /// the 1-QB board; 2QB is the superflex board where QBs rise. NFL only.
     var adpPPR: Double? = nil
     var adp2QB: Double? = nil
+    /// EPL only: average fantasy points per match actually played, from
+    /// the most recent season with data (real appearances, unlike the
+    /// PROJ column's season-total ÷ 38 which dilutes rotation players).
+    var avgPointsPerMatch: Double? = nil
 
     /// The board-relevant ADP for a league's format.
     func adp(superflex: Bool) -> Double? {
@@ -1039,6 +1043,12 @@ private class BBProjectionCache {
     var leagueProjectionsFetched: Set<String> = []
     /// NFL market ADP board (fetched once per session).
     var nflADPBoard: FFCADPProvider.Board?
+    /// The season year whose eng.1 leaders actually had data (the new
+    /// season's are empty until matches are played).
+    var eplLeadersSeason: Int?
+    /// EPL avg fantasy points per match played: [playerID: avg].
+    var eplAvgPoints: [String: Double] = [:]
+    var eplAvgFetched = false
 }
 
 struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
@@ -1081,6 +1091,13 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
             }
         }
         players = deduplicatePlayers(players)
+
+        // EPL: attach avg fantasy points per match played — a truer
+        // drafting signal than the projection column for rotation and
+        // injury-shortened seasons.
+        if sportName == "EPL" {
+            await attachEPLAverages(to: &players)
+        }
 
         // NFL: attach real market ADP (PPR + 2QB superflex boards). The
         // draft board and bots order by ADP; projections are the fallback.
@@ -1294,7 +1311,10 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
                       let categories = json["categories"] as? [[String: Any]],
                       !categories.isEmpty else { continue }
                 parseSoccerLeaders(categories: categories)
-                if !cache.leagueProjections.isEmpty { return }
+                if !cache.leagueProjections.isEmpty {
+                    cache.eplLeadersSeason = season
+                    return
+                }
             }
             return
         }
@@ -1817,6 +1837,88 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
     private func deduplicatePlayers(_ players: [BestBallPlayer]) -> [BestBallPlayer] {
         var seen = Set<String>()
         return players.filter { seen.insert($0.id).inserted }
+    }
+
+    // MARK: - EPL Per-Match Averages
+
+    /// Fetches each pool player's season stat line from the core API and
+    /// computes avg fantasy points per match PLAYED. One lightweight
+    /// (~20KB) request per player, concurrent, once per session — the
+    /// per-team ratings/leaders endpoints don't expose appearances, so
+    /// this is the only bulk-free source of a real per-match rate.
+    private func attachEPLAverages(to players: inout [BestBallPlayer]) async {
+        if !cache.eplAvgFetched {
+            cache.eplAvgFetched = true
+            // Use the season whose leaders had data (falls back to last
+            // season until the new campaign has matches).
+            let season = cache.eplLeadersSeason ?? (espnSeasonYear(for: "EPL") - 1)
+            var avgs: [String: Double] = [:]
+            await withTaskGroup(of: (String, Double)?.self) { group in
+                for player in players {
+                    let espnID = String(player.id.dropFirst("epl-".count))
+                    group.addTask {
+                        guard let avg = await self.fetchEPLSeasonAverage(espnID: espnID, season: season) else { return nil }
+                        return (player.id, avg)
+                    }
+                }
+                for await item in group {
+                    if let (id, avg) = item { avgs[id] = avg }
+                }
+            }
+            cache.eplAvgPoints = avgs
+        }
+        players = players.map { player in
+            var player = player
+            player.avgPointsPerMatch = cache.eplAvgPoints[player.id]
+            return player
+        }
+    }
+
+    /// Dedicated session for the per-athlete average sweep — ~560 tiny
+    /// requests against one host; the default 6-connections-per-host cap
+    /// would stretch the EPL pool load by ~10s.
+    private static let eplStatsSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.httpMaximumConnectionsPerHost = 24
+        return URLSession(configuration: config)
+    }()
+
+    private func fetchEPLSeasonAverage(espnID: String, season: Int) async -> Double? {
+        guard let url = URL(string: "https://sports.core.api.espn.com/v2/sports/soccer/leagues/eng.1/seasons/\(season)/types/1/athletes/\(espnID)/statistics/0") else { return nil }
+        guard let (data, response) = try? await Self.eplStatsSession.data(from: url),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let splits = json["splits"] as? [String: Any],
+              let categories = splits["categories"] as? [[String: Any]] else { return nil }
+
+        var stats: [String: Double] = [:]
+        for category in categories {
+            for stat in (category["stats"] as? [[String: Any]]) ?? [] {
+                if let name = stat["name"] as? String,
+                   let value = stat["value"] as? Double {
+                    stats[name] = value
+                }
+            }
+        }
+
+        let appearances = stats["appearances"] ?? 0
+        guard appearances >= 1 else { return nil }
+
+        // Same additive stats as the leaders projection (no clean-sheet /
+        // win / goals-against context — those need per-match results).
+        let goals = stats["totalGoals"] ?? 0
+        let assists = stats["goalAssists"] ?? 0
+        let sot = stats["shotsOnTarget"] ?? 0
+        let shots = stats["totalShots"] ?? 0
+        let saves = stats["saves"] ?? 0
+        let foulsDrawn = stats["foulsSuffered"] ?? 0
+        let yc = stats["yellowCards"] ?? 0
+        let rc = stats["redCards"] ?? 0
+
+        let seasonTotal = goals * 15.0 + assists * 7.0 + sot * 4.0
+            + max(0, shots - sot) * 1.0 + foulsDrawn * 1.0
+            - yc * 1.0 - rc * 3.0 + saves * 2.5
+        return seasonTotal / appearances
     }
 }
 

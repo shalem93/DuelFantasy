@@ -304,6 +304,10 @@ struct BestBallDraftView: View {
                         Text(isSuperflexLeague ? "ADP·2QB" : "ADP")
                             .frame(width: 52, alignment: .trailing)
                     }
+                    if viewModel.currentLeague?.sport == "EPL" {
+                        Text("AVG")
+                            .frame(width: 44, alignment: .trailing)
+                    }
                     Text("PROJ")
                         .frame(width: 52, alignment: .trailing)
                 }
@@ -367,6 +371,16 @@ struct BestBallDraftView: View {
                                             .font(.caption.weight(.semibold).monospacedDigit())
                                             .foregroundStyle(adp != nil ? brandPurple : Color(.systemGray3))
                                             .frame(width: 52, alignment: .trailing)
+                                    }
+                                    if viewModel.currentLeague?.sport == "EPL" {
+                                        // Avg fantasy pts per match actually
+                                        // played last season — catches high-rate
+                                        // players the ÷38 projection dilutes.
+                                        let avg = player.avgPointsPerMatch
+                                        Text(avg.map { String(format: "%.1f", $0) } ?? "–")
+                                            .font(.caption.weight(.semibold).monospacedDigit())
+                                            .foregroundStyle(avg != nil ? brandPurple : Color(.systemGray3))
+                                            .frame(width: 44, alignment: .trailing)
                                     }
                                     // Display season-total projection (PPG × games).
                                     // Internal `projectedPoints` is per-game so the
