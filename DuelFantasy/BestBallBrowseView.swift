@@ -36,6 +36,12 @@ struct BestBallBrowseView: View {
     @State private var newEplFLEX: Int = 1
     @State private var inviteCode: String = ""
     @State private var isJoiningByCode: Bool = false
+    /// Set after a successful create to push straight into the new
+    /// league. Without this, a private league "disappears" — Browse only
+    /// lists public leagues, so the creator saw no trace of it.
+    @State private var pushedLeague: CreatedLeagueRef?
+
+    private struct CreatedLeagueRef: Identifiable, Hashable { let id: String }
 
     private var brandPurple: Color {
         Color(red: 0.48, green: 0.23, blue: 0.93)
@@ -307,6 +313,9 @@ struct BestBallBrowseView: View {
             )
             .ignoresSafeArea()
         )
+        .navigationDestination(item: $pushedLeague) { ref in
+            BestBallLeagueDetailView(viewModel: viewModel, leagueID: ref.id)
+        }
         .sheet(isPresented: $showCreateSheet) {
             createLeagueSheet
         }
@@ -789,7 +798,7 @@ struct BestBallBrowseView: View {
                             isCreatingLeague = false
                             // Failed create: keep the sheet open so the
                             // error section is visible and nothing is lost.
-                            guard created != nil else { return }
+                            guard let created else { return }
                             showCreateSheet = false
                             newLeagueTitle = ""
                             newLeaguePrivate = false
@@ -809,6 +818,12 @@ struct BestBallBrowseView: View {
                             newEplMID = 4
                             newEplFWD = 2
                             newEplFLEX = 1
+                            // Land the creator inside their new league
+                            // (shows the invite code for private ones).
+                            // Small beat so the sheet dismissal animation
+                            // finishes before the push starts.
+                            try? await Task.sleep(nanoseconds: 350_000_000)
+                            pushedLeague = CreatedLeagueRef(id: created.id)
                         }
                     } label: {
                         if isCreatingLeague {

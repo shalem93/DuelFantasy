@@ -450,6 +450,15 @@ final class BestBallViewModel {
                 slotIndex: 0, accessToken: token
             )
 
+            // Optimistically surface the new league immediately — if the
+            // loadMyLeagues refresh below hiccups (it swallows errors),
+            // the league otherwise stays invisible until the next full
+            // screen load, which reads as "my league vanished" (private
+            // leagues especially, since Browse only lists public ones).
+            if !myLeagues.contains(where: { $0.id == league.id }) {
+                myLeagues.insert(league, at: 0)
+            }
+
             await loadOpenLeagues()
             await loadMyLeagues()
             return league
