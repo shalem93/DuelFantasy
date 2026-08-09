@@ -8,6 +8,8 @@ struct BestBallLeagueDetailView: View {
     @State private var selectedTab: LeagueTab = .standings
     @State private var selectedMatchup: BestBallMatchup? = nil
     @State private var settingsLeague: BestBallLeague? = nil  // non-nil triggers sheet
+    @State private var showJoinCodePrompt: Bool = false
+    @State private var joinCodeInput: String = ""
 
     enum LeagueTab: String, CaseIterable {
         case standings = "Standings"
@@ -424,15 +426,44 @@ struct BestBallLeagueDetailView: View {
                 if !isMember {
                     Button {
                         Haptics.medium()
-                        Task { _ = await viewModel.joinLeague(league) }
+                        // Private leagues are visible in Browse (lock
+                        // badge) but joining one requires its invite code.
+                        if league.isPrivate, league.inviteCode != nil {
+                            joinCodeInput = ""
+                            showJoinCodePrompt = true
+                        } else {
+                            Task { _ = await viewModel.joinLeague(league) }
+                        }
                     } label: {
-                        Text("Join League")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 14)
-                            .background(brandPurple)
-                            .foregroundStyle(.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                        HStack(spacing: 6) {
+                            if league.isPrivate {
+                                Image(systemName: "lock.fill")
+                                    .font(.subheadline)
+                            }
+                            Text("Join League")
+                        }
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(brandPurple)
+                        .foregroundStyle(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    .alert("Private League", isPresented: $showJoinCodePrompt) {
+                        TextField("Invite code", text: $joinCodeInput)
+                            .textInputAutocapitalization(.characters)
+                            .autocorrectionDisabled()
+                        Button("Join") {
+                            let entered = joinCodeInput.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+                            if entered == (league.inviteCode ?? "").uppercased() {
+                                Task { _ = await viewModel.joinLeague(league) }
+                            } else {
+                                viewModel.error = "Wrong invite code — ask the commissioner for the current one."
+                            }
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("Enter the invite code to join \(league.title).")
                     }
                 } else if viewModel.isHost {
                     Button {

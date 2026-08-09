@@ -490,6 +490,19 @@ struct BestBallBrowseView: View {
                             .foregroundStyle(.orange)
                             .clipShape(Capsule())
                     }
+                    if league.isPrivate {
+                        HStack(spacing: 3) {
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 7, weight: .heavy))
+                            Text("PRIVATE")
+                                .font(.system(size: 8, weight: .heavy))
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.12))
+                        .foregroundStyle(.secondary)
+                        .clipShape(Capsule())
+                    }
                 }
             }
 

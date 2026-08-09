@@ -2168,9 +2168,10 @@ final class SupabaseService {
 
     func fetchOpenLeagues(sport: String? = nil, accessToken: String) async throws -> [BestBallLeagueRecord] {
         var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/bestball_leagues"), resolvingAgainstBaseURL: false)
+        // Private leagues ARE listed (with a lock badge in the UI) —
+        // joining one is gated behind its invite code in the detail view.
         var queries: [URLQueryItem] = [
             URLQueryItem(name: "status", value: "eq.open"),
-            URLQueryItem(name: "is_private", value: "eq.false"),
             URLQueryItem(name: "select", value: "*"),
             URLQueryItem(name: "order", value: "created_at.desc"),
             URLQueryItem(name: "limit", value: "50")
