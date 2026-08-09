@@ -390,7 +390,7 @@ final class BestBallViewModel {
 
     // MARK: - Create & Join
 
-    func createLeague(title: String, sport: String, isPrivate: Bool = false, maxMembers: Int = 12, rosterSize: Int = 12, pitcherSlots: Int = 2, batterSlots: Int = 6, scoringMode: BestBallScoringMode = .normal, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0, entryFee: Int = 10, nbaPG: Int? = nil, nbaSG: Int? = nil, nbaSF: Int? = nil, nbaPF: Int? = nil, nbaC: Int? = nil, nbaFLEX: Int? = nil) async -> BestBallLeague? {
+    func createLeague(title: String, sport: String, isPrivate: Bool = false, maxMembers: Int = 12, rosterSize: Int = 12, pitcherSlots: Int = 2, batterSlots: Int = 6, scoringMode: BestBallScoringMode = .normal, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0, entryFee: Int = 10, nbaPG: Int? = nil, nbaSG: Int? = nil, nbaSF: Int? = nil, nbaPF: Int? = nil, nbaC: Int? = nil, nbaFLEX: Int? = nil, eplGK: Int? = nil, eplDEF: Int? = nil, eplMID: Int? = nil, eplFWD: Int? = nil, eplFLEX: Int? = nil) async -> BestBallLeague? {
         guard let uid = userID, let token = accessToken else { return nil }
         guard Self.isSportOpenForNewLeagues(sport) else {
             if sport == "NBA", Self.isSportJoinable(sport) {
@@ -414,6 +414,7 @@ final class BestBallViewModel {
                 nflQB: nflQB, nflRB: nflRB, nflWR: nflWR, nflTE: nflTE, nflFLEX: nflFLEX, nflSFLEX: nflSFLEX,
                 entryFee: entryFee,
                 nbaPG: nbaPG, nbaSG: nbaSG, nbaSF: nbaSF, nbaPF: nbaPF, nbaC: nbaC, nbaFLEX: nbaFLEX,
+                eplGK: eplGK, eplDEF: eplDEF, eplMID: eplMID, eplFWD: eplFWD, eplFLEX: eplFLEX,
                 createdBy: uid, accessToken: token
             )
             var league = record.toModel()
@@ -433,6 +434,11 @@ final class BestBallViewModel {
             league.nflFlexStarters = nflFLEX
             league.nflSflexStarters = nflSFLEX
             league.entryFee = entryFee
+            league.eplGkStarters = eplGK
+            league.eplDefStarters = eplDEF
+            league.eplMidStarters = eplMID
+            league.eplFwdStarters = eplFWD
+            league.eplFlexStarters = eplFLEX
 
             // Cache so the detail view has the correct values right away
             currentLeague = league
@@ -1180,7 +1186,12 @@ final class BestBallViewModel {
                 nflWR: currentLeague?.nflWrStarters ?? 2,
                 nflTE: currentLeague?.nflTeStarters ?? 1,
                 nflFLEX: currentLeague?.nflFlexStarters ?? 2,
-                nflSFLEX: currentLeague?.nflSflexStarters ?? 0
+                nflSFLEX: currentLeague?.nflSflexStarters ?? 0,
+                eplGK: currentLeague?.eplGkStarters ?? 1,
+                eplDEF: currentLeague?.eplDefStarters ?? 3,
+                eplMID: currentLeague?.eplMidStarters ?? 4,
+                eplFWD: currentLeague?.eplFwdStarters ?? 2,
+                eplFLEX: currentLeague?.eplFlexStarters ?? 1
             ) else { break }
 
             let pickNumber = currentState.currentPickNumber
@@ -1411,7 +1422,12 @@ final class BestBallViewModel {
                     nflWR: league.nflWrStarters,
                     nflTE: league.nflTeStarters,
                     nflFLEX: league.nflFlexStarters,
-                    nflSFLEX: league.nflSflexStarters
+                    nflSFLEX: league.nflSflexStarters,
+                    eplGK: league.eplGkStarters ?? 1,
+                    eplDEF: league.eplDefStarters ?? 3,
+                    eplMID: league.eplMidStarters ?? 4,
+                    eplFWD: league.eplFwdStarters ?? 2,
+                    eplFLEX: league.eplFlexStarters ?? 1
                 )
 
                 memberData[member.id] = MemberScoringData(
@@ -1635,7 +1651,12 @@ final class BestBallViewModel {
                     nflWR: league.nflWrStarters,
                     nflTE: league.nflTeStarters,
                     nflFLEX: league.nflFlexStarters,
-                    nflSFLEX: league.nflSflexStarters
+                    nflSFLEX: league.nflSflexStarters,
+                    eplGK: league.eplGkStarters ?? 1,
+                    eplDEF: league.eplDefStarters ?? 3,
+                    eplMID: league.eplMidStarters ?? 4,
+                    eplFWD: league.eplFwdStarters ?? 2,
+                    eplFLEX: league.eplFlexStarters ?? 1
                 )
 
                 // Find opponent (skip for dingers-only)
@@ -1777,7 +1798,7 @@ final class BestBallViewModel {
 
     // MARK: - Commissioner Settings
 
-    func updateLeagueSettings(leagueID: String, title: String, maxMembers: Int, rosterSize: Int, isPrivate: Bool, pitcherSlots: Int = 2, batterSlots: Int = 6, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0) async {
+    func updateLeagueSettings(leagueID: String, title: String, maxMembers: Int, rosterSize: Int, isPrivate: Bool, pitcherSlots: Int = 2, batterSlots: Int = 6, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0, eplGK: Int? = nil, eplDEF: Int? = nil, eplMID: Int? = nil, eplFWD: Int? = nil, eplFLEX: Int? = nil) async {
         guard let token = accessToken else { return }
         do {
             try await SupabaseService.shared.updateLeagueSettings(
@@ -1785,6 +1806,7 @@ final class BestBallViewModel {
                 rosterSize: rosterSize, isPrivate: isPrivate,
                 pitcherSlots: pitcherSlots, batterSlots: batterSlots,
                 nflQB: nflQB, nflRB: nflRB, nflWR: nflWR, nflTE: nflTE, nflFLEX: nflFLEX, nflSFLEX: nflSFLEX,
+                eplGK: eplGK, eplDEF: eplDEF, eplMID: eplMID, eplFWD: eplFWD, eplFLEX: eplFLEX,
                 accessToken: token
             )
             await loadLeagueDetail(leagueID: leagueID)
@@ -1848,7 +1870,11 @@ final class BestBallViewModel {
             nflQB: league?.nflQbStarters ?? 1,
             nflRB: league?.nflRbStarters ?? 2,
             nflWR: league?.nflWrStarters ?? 2,
-            nflTE: league?.nflTeStarters ?? 1
+            nflTE: league?.nflTeStarters ?? 1,
+            eplGK: league?.eplGkStarters ?? 1,
+            eplDEF: league?.eplDefStarters ?? 3,
+            eplMID: league?.eplMidStarters ?? 4,
+            eplFWD: league?.eplFwdStarters ?? 2
         )
         let pickedPositions = Dictionary(grouping: roster, by: \.playerPosition)
             .mapValues { $0.count }

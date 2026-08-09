@@ -66,6 +66,14 @@ struct BestBallLeague: Identifiable, Equatable, Hashable {
     var nbaCStarters: Int? = nil
     var nbaFlexStarters: Int? = nil
 
+    // EPL positional lineup (nil = league from before EPL config
+    // existed: the default 1 GK / 3 DEF / 4 MID / 2 FWD / 1 FLEX XI).
+    var eplGkStarters: Int? = nil
+    var eplDefStarters: Int? = nil
+    var eplMidStarters: Int? = nil
+    var eplFwdStarters: Int? = nil
+    var eplFlexStarters: Int? = nil
+
     var memberCount: Int { draftOrder.count }
     var isFull: Bool { draftOrder.count >= maxMembers }
     var isDingersOnly: Bool { scoringMode == .dingersOnly }
@@ -74,6 +82,12 @@ struct BestBallLeague: Identifiable, Equatable, Hashable {
     /// counts). Used as the minimum allowed roster size when editing
     /// settings.
     var nflTotalStarters: Int { nflQbStarters + nflRbStarters + nflWrStarters + nflTeStarters + nflFlexStarters + nflSflexStarters }
+
+    /// Total EPL starters with the default-XI fallbacks applied.
+    var eplTotalStarters: Int {
+        (eplGkStarters ?? 1) + (eplDefStarters ?? 3) + (eplMidStarters ?? 4)
+            + (eplFwdStarters ?? 2) + (eplFlexStarters ?? 1)
+    }
 }
 
 struct BestBallMember: Identifiable, Equatable, Hashable {
@@ -333,7 +347,7 @@ struct BestBallPositionRequirement {
 }
 
 enum BestBallLineupConfig {
-    static func requirements(for sport: String, pitcherSlots: Int = 2, batterSlots: Int = 6, scoringMode: BestBallScoringMode = .normal, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0) -> (starters: Int, constraints: [BestBallPositionRequirement]) {
+    static func requirements(for sport: String, pitcherSlots: Int = 2, batterSlots: Int = 6, scoringMode: BestBallScoringMode = .normal, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0, eplGK: Int = 1, eplDEF: Int = 3, eplMID: Int = 4, eplFWD: Int = 2, eplFLEX: Int = 1) -> (starters: Int, constraints: [BestBallPositionRequirement]) {
         switch sport {
         case "NBA":
             // For NBA, total starters = pitcherSlots + batterSlots (reused as generic starters)
@@ -358,15 +372,16 @@ enum BestBallLineupConfig {
                 BestBallPositionRequirement(label: "UTIL", count: batterSlots, eligible: ["C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "OF", "DH"]),
             ])
         case "EPL":
-            // Fixed 11-man XI. The FLEX (any outfield player) lets the
-            // optimizer morph between 3-5-2 / 3-4-3 / 4-4-2 shapes.
-            return (11, [
-                BestBallPositionRequirement(label: "GK", count: 1, eligible: ["GK"]),
-                BestBallPositionRequirement(label: "DEF", count: 3, eligible: ["DEF"]),
-                BestBallPositionRequirement(label: "MID", count: 4, eligible: ["MID"]),
-                BestBallPositionRequirement(label: "FWD", count: 2, eligible: ["FWD"]),
-                BestBallPositionRequirement(label: "FLEX", count: 1, eligible: ["DEF", "MID", "FWD"]),
-            ])
+            // Commissioner-configurable XI (defaults to 1 GK / 3 DEF /
+            // 4 MID / 2 FWD / 1 FLEX). FLEX takes any outfield player so
+            // the optimizer can morph between 3-5-2 / 3-4-3 / 4-4-2.
+            var constraints: [BestBallPositionRequirement] = []
+            if eplGK > 0 { constraints.append(BestBallPositionRequirement(label: "GK", count: eplGK, eligible: ["GK"])) }
+            if eplDEF > 0 { constraints.append(BestBallPositionRequirement(label: "DEF", count: eplDEF, eligible: ["DEF"])) }
+            if eplMID > 0 { constraints.append(BestBallPositionRequirement(label: "MID", count: eplMID, eligible: ["MID"])) }
+            if eplFWD > 0 { constraints.append(BestBallPositionRequirement(label: "FWD", count: eplFWD, eligible: ["FWD"])) }
+            if eplFLEX > 0 { constraints.append(BestBallPositionRequirement(label: "FLEX", count: eplFLEX, eligible: ["DEF", "MID", "FWD"])) }
+            return (eplGK + eplDEF + eplMID + eplFWD + eplFLEX, constraints)
         case "NFL", "CFB":
             // Commissioner-configurable lineup. Standard FLEX = RB/WR/TE
             // (no QB); Superflex (SFLEX) = QB/RB/WR/TE for leagues that
@@ -414,15 +429,26 @@ enum BestBallLineupConfig {
             nflWR: league.nflWrStarters,
             nflTE: league.nflTeStarters,
             nflFLEX: league.nflFlexStarters,
-            nflSFLEX: league.nflSflexStarters
+            nflSFLEX: league.nflSflexStarters,
+            eplGK: league.eplGkStarters ?? 1,
+            eplDEF: league.eplDefStarters ?? 3,
+            eplMID: league.eplMidStarters ?? 4,
+            eplFWD: league.eplFwdStarters ?? 2,
+            eplFLEX: league.eplFlexStarters ?? 1
         )
     }
 
     /// Minimum positions a roster must have by end of draft.
-    static func draftMinimums(for sport: String, pitcherSlots: Int = 2, batterSlots: Int = 6, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1) -> [String: Int] {
+    static func draftMinimums(for sport: String, pitcherSlots: Int = 2, batterSlots: Int = 6, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, eplGK: Int = 1, eplDEF: Int = 3, eplMID: Int = 4, eplFWD: Int = 2) -> [String: Int] {
         switch sport {
         case "NBA": return ["PG": 1, "SG": 1, "SF": 1, "PF": 1, "C": 1]
-        case "EPL": return ["GK": 1, "DEF": 3, "MID": 4, "FWD": 2]
+        case "EPL":
+            var mins: [String: Int] = [:]
+            if eplGK > 0 { mins["GK"] = eplGK }
+            if eplDEF > 0 { mins["DEF"] = eplDEF }
+            if eplMID > 0 { mins["MID"] = eplMID }
+            if eplFWD > 0 { mins["FWD"] = eplFWD }
+            return mins
         case "MLB": return ["SP": pitcherSlots]  // Must fill pitcher starter slots; batters handled by balanced pick logic
         case "NFL", "CFB":
             var mins: [String: Int] = [:]
@@ -605,13 +631,19 @@ enum BestBallScoringEngine {
         nflWR: Int = 2,
         nflTE: Int = 1,
         nflFLEX: Int = 2,
-        nflSFLEX: Int = 0
+        nflSFLEX: Int = 0,
+        eplGK: Int = 1,
+        eplDEF: Int = 3,
+        eplMID: Int = 4,
+        eplFWD: Int = 2,
+        eplFLEX: Int = 1
     ) -> (total: Double, scoringIDs: [String]) {
         let (starters, constraints) = BestBallLineupConfig.requirements(
             for: sport,
             pitcherSlots: pitcherSlots, batterSlots: batterSlots,
             scoringMode: scoringMode,
-            nflQB: nflQB, nflRB: nflRB, nflWR: nflWR, nflTE: nflTE, nflFLEX: nflFLEX, nflSFLEX: nflSFLEX
+            nflQB: nflQB, nflRB: nflRB, nflWR: nflWR, nflTE: nflTE, nflFLEX: nflFLEX, nflSFLEX: nflSFLEX,
+            eplGK: eplGK, eplDEF: eplDEF, eplMID: eplMID, eplFWD: eplFWD, eplFLEX: eplFLEX
         )
         let candidates = playerPoints.sorted { $0.value > $1.value }
 
@@ -854,7 +886,12 @@ enum BestBallBotDrafter {
         nflWR: Int = 2,
         nflTE: Int = 1,
         nflFLEX: Int = 2,
-        nflSFLEX: Int = 0
+        nflSFLEX: Int = 0,
+        eplGK: Int = 1,
+        eplDEF: Int = 3,
+        eplMID: Int = 4,
+        eplFWD: Int = 2,
+        eplFLEX: Int = 1
     ) -> BestBallPlayer? {
         // Filter out pitchers for dingers-only leagues
         var candidates = available
@@ -866,7 +903,8 @@ enum BestBallBotDrafter {
             for: sport,
             pitcherSlots: pitcherSlots,
             batterSlots: batterSlots,
-            nflQB: nflQB, nflRB: nflRB, nflWR: nflWR, nflTE: nflTE
+            nflQB: nflQB, nflRB: nflRB, nflWR: nflWR, nflTE: nflTE,
+            eplGK: eplGK, eplDEF: eplDEF, eplMID: eplMID, eplFWD: eplFWD
         )
         let pickedPositions = Dictionary(grouping: existingRoster, by: \.playerPosition)
             .mapValues { $0.count }
@@ -978,15 +1016,20 @@ enum BestBallBotDrafter {
 
         // EPL: same two-phase shape as NFL. The generic "< 3 of same
         // position" fallback below would happily hand a bot three
-        // goalkeepers; cap GK at 2 and keep outfield depth sensible
-        // (dedicated slots + flex + one bench spare each).
+        // goalkeepers; cap GK at dedicated slots + 1 and keep outfield
+        // depth sensible (dedicated slots + flex + one bench spare each).
         if sport == "EPL" {
             if !neededPositions.isEmpty {
                 if let forced = sorted.first(where: { neededPositions.contains($0.position) }) {
                     return forced
                 }
             }
-            let positionCaps: [String: Int] = ["GK": 2, "DEF": 6, "MID": 7, "FWD": 5]
+            let positionCaps: [String: Int] = [
+                "GK": eplGK == 0 ? 0 : eplGK + 1,
+                "DEF": eplDEF + eplFLEX + 1,
+                "MID": eplMID + eplFLEX + 1,
+                "FWD": eplFWD + eplFLEX + 1,
+            ]
             if let pick = sorted.first(where: {
                 let cap = positionCaps[$0.position] ?? Int.max
                 return (pickedPositions[$0.position] ?? 0) < cap

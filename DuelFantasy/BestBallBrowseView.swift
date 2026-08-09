@@ -28,6 +28,12 @@ struct BestBallBrowseView: View {
     @State private var newNbaPF: Int = 1
     @State private var newNbaC: Int = 1
     @State private var newNbaFLEX: Int = 3
+    // EPL positional lineup config (defaults to the classic XI).
+    @State private var newEplGK: Int = 1
+    @State private var newEplDEF: Int = 3
+    @State private var newEplMID: Int = 4
+    @State private var newEplFWD: Int = 2
+    @State private var newEplFLEX: Int = 1
     @State private var inviteCode: String = ""
     @State private var isJoiningByCode: Bool = false
 
@@ -183,6 +189,16 @@ struct BestBallBrowseView: View {
         let total = newNflQB + newNflRB + newNflWR + newNflTE + newNflFLEX + newNflSFLEX
         if newLeagueRosterSize < total {
             newLeagueRosterSize = total
+        }
+    }
+
+    private var newEplStarters: Int {
+        newEplGK + newEplDEF + newEplMID + newEplFWD + newEplFLEX
+    }
+
+    private func floorRosterSizeForEPL() {
+        if newLeagueRosterSize < newEplStarters {
+            newLeagueRosterSize = newEplStarters
         }
     }
 
@@ -556,7 +572,7 @@ struct BestBallBrowseView: View {
                             if newLeagueSport == "NFL" || newLeagueSport == "CFB" {
                                 return newNflQB + newNflRB + newNflWR + newNflTE + newNflFLEX + newNflSFLEX
                             }
-                            if newLeagueSport == "EPL" { return 11 }
+                            if newLeagueSport == "EPL" { return newEplStarters }
                             return newPitcherSlots + newBatterSlots
                         }()
                         Stepper("Roster Size: \(newLeagueRosterSize)", value: $newLeagueRosterSize, in: minRoster...20)
@@ -628,16 +644,25 @@ struct BestBallBrowseView: View {
                     }
                 } else if newLeagueSport == "EPL" {
                     Section("Starting Lineup") {
-                        // Fixed 11-man XI — the optimizer's FLEX slot lets
-                        // the best lineup morph between 3-5-2 / 3-4-3 / 4-4-2.
+                        Stepper("GK: \(newEplGK)", value: $newEplGK, in: 0...2)
+                            .onChange(of: newEplGK) { _, _ in floorRosterSizeForEPL() }
+                        Stepper("DEF: \(newEplDEF)", value: $newEplDEF, in: 0...5)
+                            .onChange(of: newEplDEF) { _, _ in floorRosterSizeForEPL() }
+                        Stepper("MID: \(newEplMID)", value: $newEplMID, in: 0...6)
+                            .onChange(of: newEplMID) { _, _ in floorRosterSizeForEPL() }
+                        Stepper("FWD: \(newEplFWD)", value: $newEplFWD, in: 0...4)
+                            .onChange(of: newEplFWD) { _, _ in floorRosterSizeForEPL() }
+                        Stepper("FLEX (DEF/MID/FWD): \(newEplFLEX)", value: $newEplFLEX, in: 0...4)
+                            .onChange(of: newEplFLEX) { _, _ in floorRosterSizeForEPL() }
                         HStack {
-                            Text("1 GK · 3 DEF · 4 MID · 2 FWD · 1 FLEX")
+                            Text("Total Starters")
+                                .foregroundStyle(.secondary)
                             Spacer()
-                            Text("11 starters")
+                            Text("\(newEplStarters)")
                                 .font(.subheadline.weight(.bold))
                                 .foregroundStyle(brandPurple)
                         }
-                        Text("FLEX takes any outfield player (DEF/MID/FWD).")
+                        Text("FLEX takes any outfield player — the best lineup morphs between 3-5-2, 3-4-3, and 4-4-2.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -681,7 +706,7 @@ struct BestBallBrowseView: View {
                             switch newLeagueSport {
                             case "MLB": return newScoringMode == .dingersOnly ? newBatterSlots : newPitcherSlots + newBatterSlots
                             case "NBA": return newNbaPG + newNbaSG + newNbaSF + newNbaPF + newNbaC + newNbaFLEX
-                            case "EPL": return 11
+                            case "EPL": return newEplStarters
                             default: return newNflQB + newNflRB + newNflWR + newNflTE + newNflFLEX + newNflSFLEX
                             }
                         }()
@@ -732,7 +757,7 @@ struct BestBallBrowseView: View {
                             if newLeagueSport == "NFL" || newLeagueSport == "CFB" {
                                 effectiveRoster = max(newLeagueRosterSize, nflStarters)
                             } else if newLeagueSport == "EPL" {
-                                effectiveRoster = max(newLeagueRosterSize, 11)
+                                effectiveRoster = max(newLeagueRosterSize, newEplStarters)
                             } else if newScoringMode == .dingersOnly {
                                 effectiveRoster = newBatterSlots
                             } else {
@@ -754,7 +779,12 @@ struct BestBallBrowseView: View {
                                 nbaSF: newLeagueSport == "NBA" ? newNbaSF : nil,
                                 nbaPF: newLeagueSport == "NBA" ? newNbaPF : nil,
                                 nbaC: newLeagueSport == "NBA" ? newNbaC : nil,
-                                nbaFLEX: newLeagueSport == "NBA" ? newNbaFLEX : nil
+                                nbaFLEX: newLeagueSport == "NBA" ? newNbaFLEX : nil,
+                                eplGK: newLeagueSport == "EPL" ? newEplGK : nil,
+                                eplDEF: newLeagueSport == "EPL" ? newEplDEF : nil,
+                                eplMID: newLeagueSport == "EPL" ? newEplMID : nil,
+                                eplFWD: newLeagueSport == "EPL" ? newEplFWD : nil,
+                                eplFLEX: newLeagueSport == "EPL" ? newEplFLEX : nil
                             )
                             isCreatingLeague = false
                             // Failed create: keep the sheet open so the
@@ -774,6 +804,11 @@ struct BestBallBrowseView: View {
                             newNflTE = 1
                             newNflFLEX = 2
                             newNflSFLEX = 0
+                            newEplGK = 1
+                            newEplDEF = 3
+                            newEplMID = 4
+                            newEplFWD = 2
+                            newEplFLEX = 1
                         }
                     } label: {
                         if isCreatingLeague {

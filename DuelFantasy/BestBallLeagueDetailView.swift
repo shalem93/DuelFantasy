@@ -545,6 +545,11 @@ private struct CommishSettingsSheet: View {
     @State private var editNflTE: Int
     @State private var editNflFLEX: Int
     @State private var editNflSFLEX: Int
+    @State private var editEplGK: Int
+    @State private var editEplDEF: Int
+    @State private var editEplMID: Int
+    @State private var editEplFWD: Int
+    @State private var editEplFLEX: Int
     @State private var isSavingSettings: Bool = false
     @State private var showDeleteConfirmation: Bool = false
     @State private var isDeletingLeague: Bool = false
@@ -582,6 +587,11 @@ private struct CommishSettingsSheet: View {
         _editNflTE = State(initialValue: league.nflTeStarters)
         _editNflFLEX = State(initialValue: league.nflFlexStarters)
         _editNflSFLEX = State(initialValue: league.nflSflexStarters)
+        _editEplGK = State(initialValue: league.eplGkStarters ?? 1)
+        _editEplDEF = State(initialValue: league.eplDefStarters ?? 3)
+        _editEplMID = State(initialValue: league.eplMidStarters ?? 4)
+        _editEplFWD = State(initialValue: league.eplFwdStarters ?? 2)
+        _editEplFLEX = State(initialValue: league.eplFlexStarters ?? 1)
         _editScheduleDraft = State(initialValue: league.draftStartTime != nil)
         _editDraftDate = State(initialValue: league.draftStartTime ?? Date().addingTimeInterval(3600))
     }
@@ -642,7 +652,9 @@ private struct CommishSettingsSheet: View {
                                     if league.sport == "NFL" || league.sport == "CFB" {
                                         return editNflQB + editNflRB + editNflWR + editNflTE + editNflFLEX + editNflSFLEX
                                     }
-                                    if league.sport == "EPL" { return 11 }
+                                    if league.sport == "EPL" {
+                                        return editEplGK + editEplDEF + editEplMID + editEplFWD + editEplFLEX
+                                    }
                                     return editPitcherSlots + editBatterSlots
                                 }()
                                 Stepper("\(editRosterSize)", value: $editRosterSize, in: minRoster...20)
@@ -837,9 +849,35 @@ private struct CommishSettingsSheet: View {
                         }
                     } else if league.sport == "EPL" {
                         settingsCard(title: "Starting Lineup") {
-                            Text("1 GK · 3 DEF · 4 MID · 2 FWD · 1 FLEX — 11 starters (fixed)")
-                                .font(.subheadline)
+                            // Same pre-draft-only rule as NFL: the pool and
+                            // rosters were drafted against this shape.
+                            let isEditable = league.status == "open"
+                            nflLineupConfigStepper(label: "GK",   value: $editEplGK,   range: 0...2, editable: isEditable)
+                            Divider()
+                            nflLineupConfigStepper(label: "DEF",  value: $editEplDEF,  range: 0...5, editable: isEditable)
+                            Divider()
+                            nflLineupConfigStepper(label: "MID",  value: $editEplMID,  range: 0...6, editable: isEditable)
+                            Divider()
+                            nflLineupConfigStepper(label: "FWD",  value: $editEplFWD,  range: 0...4, editable: isEditable)
+                            Divider()
+                            nflLineupConfigStepper(label: "FLEX", value: $editEplFLEX, range: 0...4, editable: isEditable)
+                            Divider()
+                            HStack {
+                                Text("Total Starters")
+                                    .font(.subheadline.weight(.medium))
+                                Spacer()
+                                Text("\(editEplGK + editEplDEF + editEplMID + editEplFWD + editEplFLEX)")
+                                    .font(.subheadline.weight(.bold))
+                                    .foregroundStyle(brandPurple)
+                            }
+                            Text("FLEX takes any outfield player (DEF/MID/FWD).")
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
+                            if !isEditable {
+                                Text("Lineup is locked once the draft begins.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
 
@@ -871,7 +909,7 @@ private struct CommishSettingsSheet: View {
                                     let starters = editNflQB + editNflRB + editNflWR + editNflTE + editNflFLEX + editNflSFLEX
                                     effectiveRoster = max(effectiveRoster, starters)
                                 } else if league.sport == "EPL" {
-                                    effectiveRoster = max(effectiveRoster, 11)
+                                    effectiveRoster = max(effectiveRoster, editEplGK + editEplDEF + editEplMID + editEplFWD + editEplFLEX)
                                 }
                                 await viewModel.updateLeagueSettings(
                                     leagueID: leagueID,
@@ -886,7 +924,12 @@ private struct CommishSettingsSheet: View {
                                     nflWR: editNflWR,
                                     nflTE: editNflTE,
                                     nflFLEX: editNflFLEX,
-                                    nflSFLEX: editNflSFLEX
+                                    nflSFLEX: editNflSFLEX,
+                                    eplGK: league.sport == "EPL" ? editEplGK : nil,
+                                    eplDEF: league.sport == "EPL" ? editEplDEF : nil,
+                                    eplMID: league.sport == "EPL" ? editEplMID : nil,
+                                    eplFWD: league.sport == "EPL" ? editEplFWD : nil,
+                                    eplFLEX: league.sport == "EPL" ? editEplFLEX : nil
                                 )
                                 // Persist the draft schedule only when it changed.
                                 let newSchedule: Date? = editScheduleDraft ? editDraftDate : nil

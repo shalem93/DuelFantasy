@@ -331,6 +331,11 @@ struct BestBallLeagueRecord: Codable, Identifiable {
     let nbaPfStarters: Int?
     let nbaCStarters: Int?
     let nbaFlexStarters: Int?
+    let eplGkStarters: Int?
+    let eplDefStarters: Int?
+    let eplMidStarters: Int?
+    let eplFwdStarters: Int?
+    let eplFlexStarters: Int?
 
     enum CodingKeys: String, CodingKey {
         case id, title, sport, season, status, schedule
@@ -364,6 +369,11 @@ struct BestBallLeagueRecord: Codable, Identifiable {
         case nbaPfStarters = "nba_pf_starters"
         case nbaCStarters = "nba_c_starters"
         case nbaFlexStarters = "nba_flex_starters"
+        case eplGkStarters = "epl_gk_starters"
+        case eplDefStarters = "epl_def_starters"
+        case eplMidStarters = "epl_mid_starters"
+        case eplFwdStarters = "epl_fwd_starters"
+        case eplFlexStarters = "epl_flex_starters"
     }
 
     func toModel() -> BestBallLeague {
@@ -397,6 +407,11 @@ struct BestBallLeagueRecord: Codable, Identifiable {
         league.nbaPfStarters = nbaPfStarters
         league.nbaCStarters = nbaCStarters
         league.nbaFlexStarters = nbaFlexStarters
+        league.eplGkStarters = eplGkStarters
+        league.eplDefStarters = eplDefStarters
+        league.eplMidStarters = eplMidStarters
+        league.eplFwdStarters = eplFwdStarters
+        league.eplFlexStarters = eplFlexStarters
         return league
     }
 }
@@ -2213,6 +2228,7 @@ final class SupabaseService {
         nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0,
         entryFee: Int = 10,
         nbaPG: Int? = nil, nbaSG: Int? = nil, nbaSF: Int? = nil, nbaPF: Int? = nil, nbaC: Int? = nil, nbaFLEX: Int? = nil,
+        eplGK: Int? = nil, eplDEF: Int? = nil, eplMID: Int? = nil, eplFWD: Int? = nil, eplFLEX: Int? = nil,
         createdBy: String, accessToken: String
     ) async throws -> BestBallLeagueRecord {
         var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/bestball_leagues"), resolvingAgainstBaseURL: false)
@@ -2248,6 +2264,11 @@ final class SupabaseService {
             let nbaPfStarters: Int?
             let nbaCStarters: Int?
             let nbaFlexStarters: Int?
+            let eplGkStarters: Int?
+            let eplDefStarters: Int?
+            let eplMidStarters: Int?
+            let eplFwdStarters: Int?
+            let eplFlexStarters: Int?
             enum CodingKeys: String, CodingKey {
                 case title, sport, season
                 case entryFee = "entry_fee"
@@ -2272,6 +2293,11 @@ final class SupabaseService {
                 case nbaPfStarters = "nba_pf_starters"
                 case nbaCStarters = "nba_c_starters"
                 case nbaFlexStarters = "nba_flex_starters"
+                case eplGkStarters = "epl_gk_starters"
+                case eplDefStarters = "epl_def_starters"
+                case eplMidStarters = "epl_mid_starters"
+                case eplFwdStarters = "epl_fwd_starters"
+                case eplFlexStarters = "epl_flex_starters"
             }
         }
         let payload = Payload(
@@ -2287,7 +2313,9 @@ final class SupabaseService {
             nflSflexStarters: nflSFLEX,
             entryFee: entryFee,
             nbaPgStarters: nbaPG, nbaSgStarters: nbaSG, nbaSfStarters: nbaSF,
-            nbaPfStarters: nbaPF, nbaCStarters: nbaC, nbaFlexStarters: nbaFLEX
+            nbaPfStarters: nbaPF, nbaCStarters: nbaC, nbaFlexStarters: nbaFLEX,
+            eplGkStarters: eplGK, eplDefStarters: eplDEF, eplMidStarters: eplMID,
+            eplFwdStarters: eplFWD, eplFlexStarters: eplFLEX
         )
         let results: [BestBallLeagueRecord] = try await request(url: url, method: "POST", body: payload, bearerToken: accessToken, preferReturn: "representation")
         guard let league = results.first else { throw URLError(.badServerResponse) }
@@ -2472,6 +2500,7 @@ final class SupabaseService {
         pitcherSlots: Int = 2, batterSlots: Int = 6,
         scoringMode: String = "normal",
         nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0,
+        eplGK: Int? = nil, eplDEF: Int? = nil, eplMID: Int? = nil, eplFWD: Int? = nil, eplFLEX: Int? = nil,
         accessToken: String
     ) async throws {
         var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/bestball_leagues"), resolvingAgainstBaseURL: false)
@@ -2492,6 +2521,13 @@ final class SupabaseService {
             let nflTeStarters: Int
             let nflFlexStarters: Int
             let nflSflexStarters: Int
+            // Optional so non-EPL edits omit the keys entirely (safe
+            // against a DB that hasn't run the epl_* column migration).
+            let eplGkStarters: Int?
+            let eplDefStarters: Int?
+            let eplMidStarters: Int?
+            let eplFwdStarters: Int?
+            let eplFlexStarters: Int?
             enum CodingKeys: String, CodingKey {
                 case title
                 case maxMembers = "max_members"
@@ -2507,6 +2543,11 @@ final class SupabaseService {
                 case nflTeStarters = "nfl_te_starters"
                 case nflFlexStarters = "nfl_flex_starters"
                 case nflSflexStarters = "nfl_sflex_starters"
+                case eplGkStarters = "epl_gk_starters"
+                case eplDefStarters = "epl_def_starters"
+                case eplMidStarters = "epl_mid_starters"
+                case eplFwdStarters = "epl_fwd_starters"
+                case eplFlexStarters = "epl_flex_starters"
             }
         }
         // Generate invite code if switching to private and none exists
@@ -2520,7 +2561,9 @@ final class SupabaseService {
                 scoringMode: scoringMode,
                 nflQbStarters: nflQB, nflRbStarters: nflRB,
                 nflWrStarters: nflWR, nflTeStarters: nflTE, nflFlexStarters: nflFLEX,
-                nflSflexStarters: nflSFLEX
+                nflSflexStarters: nflSFLEX,
+                eplGkStarters: eplGK, eplDefStarters: eplDEF, eplMidStarters: eplMID,
+                eplFwdStarters: eplFWD, eplFlexStarters: eplFLEX
             ),
             bearerToken: accessToken
         )
