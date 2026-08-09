@@ -6721,7 +6721,7 @@ struct ESPNPlayerGameLogProvider {
         // Soccer uses a different approach — ESPN's soccer gamelog endpoint doesn't return game data.
         // Instead, fetch team schedule → recent match summaries → extract player stats.
         if isSoccer {
-            return try await fetchSoccerGameLog(espnID: espnID, sportPath: sportPath, position: position, limit: limit)
+            return try await fetchSoccerGameLog(espnID: espnID, sportPath: sportPath, position: position, limit: limit, season: season)
         }
 
         // UFC: fetch fight history from ESPN MMA athlete event log
@@ -7308,7 +7308,7 @@ struct ESPNPlayerGameLogProvider {
     /// Fetches game log for a soccer player by iterating through their team's recent completed matches.
     /// ESPN's soccer gamelog endpoint doesn't return per-game stats, so we fetch the team schedule
     /// and then retrieve match summaries to extract individual player stats.
-    private func fetchSoccerGameLog(espnID: String, sportPath: String, position: String, limit: Int) async throws -> [DFSPlayerGameLog] {
+    private func fetchSoccerGameLog(espnID: String, sportPath: String, position: String, limit: Int, season: Int? = nil) async throws -> [DFSPlayerGameLog] {
         // 1. Find the player's team ESPN ID by checking the player in a team roster lookup.
         //    We use the athlete overview to get the team, or iterate via teams endpoint.
         let leaguePath = sportPath.replacingOccurrences(of: "soccer/", with: "") // "eng.1" or "uefa.champions"
@@ -7358,7 +7358,12 @@ struct ESPNPlayerGameLogProvider {
         var aggregatedEvents: [(event: [String: Any], league: String)] = []
         var firstScheduleData: [String: Any]?
         for scheduleLeague in scheduleLeagues {
-            let scheduleURL = "https://site.api.espn.com/apis/site/v2/sports/soccer/\(scheduleLeague)/teams/\(teamID)/schedule"
+            // The schedule endpoint defaults to the CURRENT season — early
+            // in a new season that's a fixture list with zero completed
+            // matches. Pin the requested season (ESPN keys soccer by the
+            // August start year) so last-season logs actually load.
+            let seasonQuery = season.map { "?season=\($0)" } ?? ""
+            let scheduleURL = "https://site.api.espn.com/apis/site/v2/sports/soccer/\(scheduleLeague)/teams/\(teamID)/schedule\(seasonQuery)"
             guard let url = URL(string: scheduleURL) else { continue }
             var request = URLRequest(url: url)
             request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
