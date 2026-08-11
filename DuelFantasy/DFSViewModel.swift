@@ -7534,6 +7534,13 @@ final class DFSViewModel {
                     )
                 }
                 if !repairedRecordIDs.isEmpty {
+                    // Repairs changed totals, so the fetch order (points
+                    // desc from the server) no longer matches the totals.
+                    // Downstream, the standings view pairs leaderboard rows
+                    // to result records POSITIONALLY — an unsorted array
+                    // makes a promoted entry expand to some other entry's
+                    // lineup. Restore the points-desc invariant.
+                    results.sort { $0.totalPoints > $1.totalPoints }
                     print("[DFS-Standings] Repaired zero-point players in \(repairedRecordIDs.count) entries for \(tournamentId)")
                 }
             }

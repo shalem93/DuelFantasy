@@ -339,9 +339,19 @@ struct DFSPastStandingsView: View {
         // matches; clear so the next tap re-expands cleanly.
         expandedEntryID = nil
 
+        // Pair by entry NAME first (unique after dedup) — the positional
+        // fallback silently attaches the wrong lineup whenever the records
+        // array order drifts from the leaderboard sort (e.g. after the
+        // zero-point repair promotes an entry).
+        var recordsByName: [String: DFSTournamentResultRecord] = [:]
+        for record in viewModel.pastTournamentResultRecords where recordsByName[record.entryName] == nil {
+            recordsByName[record.entryName] = record
+        }
         var map: [UUID: DFSTournamentResultRecord] = [:]
         for (index, entry) in viewModel.pastTournamentLeaderboard.enumerated() {
-            if index < viewModel.pastTournamentResultRecords.count {
+            if let named = recordsByName[entry.name] {
+                map[entry.id] = named
+            } else if index < viewModel.pastTournamentResultRecords.count {
                 map[entry.id] = viewModel.pastTournamentResultRecords[index]
             }
         }
