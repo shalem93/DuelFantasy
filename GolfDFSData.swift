@@ -340,14 +340,15 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
         // event is snapshotted and reused until the event changes — one
         // consistent DK-matching price for the whole week.
         async let dkSalariesTask = Self.weeklyClassicSalaries(eventID: event.id)
-        async let worldRankTask = fetchOWGRRankings()
+        async let worldRankTask = fetchOWGRData()
         // ESPN athlete index (normalized name → ESPN athlete ID). Lets the
         // DK-only fallback assign REAL ESPN IDs so the slate, bots, and the
         // scoring snapshot all share `pga-{espnID}` — no name-matching at
         // grade time. Best-effort; falls back to a name-slug ID when missing.
         async let espnIndexTask = fetchPGAAthleteIndex()
         let dkSalaries = await dkSalariesTask
-        let worldRankByName = await worldRankTask
+        let owgr = await worldRankTask
+        let worldRankByName = owgr.ranks
         let espnAthleteIndex = await espnIndexTask
 
         // Require real DraftKings prices for the field — don't offer a slate
@@ -430,10 +431,17 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
                     resolvedID = "dk-\(lowercaseName.replacingOccurrences(of: " ", with: "-"))"
                 }
                 let projection = projectedGolfPoints(salary: salary, worldRank: worldRank, athleteID: resolvedID)
+                // DK alone knows no nationality (which made Monday slates
+                // render without the country subtitle) and its keys are
+                // diacritic-stripped ("Ludvig Aberg"). OWGR — already
+                // fetched for the rankings — carries both for everyone
+                // ranked, so Monday reads like the Tuesday+ ESPN pool.
+                let country = matchOWGRValue(name: displayName, in: owgr.countries) ?? ""
+                let properName = matchOWGRValue(name: displayName, in: owgr.names) ?? displayName
                 return DFSPlayer(
                     id: "pga-\(resolvedID)",
-                    name: displayName,
-                    team: "",          // country unknown from DK alone
+                    name: properName,
+                    team: country,
                     position: "G",
                     salary: salary,
                     projectedPoints: projection,
@@ -872,28 +880,38 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
 
     /// Fetch Official World Golf Rankings for salary pricing.
     /// Returns a dictionary of normalized lowercase player name → world ranking position.
-    private func fetchOWGRRankings() async -> [String: Int] {
+    private func fetchOWGRData() async -> (ranks: [String: Int], countries: [String: String], names: [String: String]) {
         // Fetch top 400 to cover most PGA Tour fields
         guard let url = URL(string: "https://apiweb.owgr.com/api/owgr/rankings/getRankings?pageSize=400&pageNumber=1") else {
-            return [:]
+            return ([:], [:], [:])
         }
         guard let (data, response) = try? await session.data(from: url),
               let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            return [:]
+            return ([:], [:], [:])
         }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let rankingsList = json["rankingsList"] as? [[String: Any]] else {
-            return [:]
+            return ([:], [:], [:])
         }
 
-        var result: [String: Int] = [:]
+        var ranks: [String: Int] = [:]
+        var countries: [String: String] = [:]
+        var names: [String: String] = [:]
         for entry in rankingsList {
             guard let rank = entry["rank"] as? Int,
                   let player = entry["player"] as? [String: Any],
                   let fullName = player["fullName"] as? String else { continue }
-            result[fullName.lowercased()] = rank
+            let key = fullName.lowercased()
+            ranks[key] = rank
+            names[key] = fullName
+            if let country = player["country"] as? [String: Any],
+               let countryName = country["name"] as? String, !countryName.isEmpty {
+                // Match ESPN's flag style for the US so Monday and Tuesday
+                // slates read identically under the player name.
+                countries[key] = countryName == "United States" ? "USA" : countryName
+            }
         }
-        return result
+        return (ranks, countries, names)
     }
 
     /// Normalize a name for matching: lowercase, strip diacritics, and replace special Nordic chars.
@@ -909,34 +927,39 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
     /// Match an ESPN player name to OWGR rankings.
     /// Handles common name differences (e.g., accented characters, Nordic letters, Jr/III suffixes).
     private func matchWorldRanking(name: String, rankings: [String: Int]) -> Int {
+        // Not found in OWGR — high value (unranked)
+        matchOWGRValue(name: name, in: rankings) ?? 999
+    }
+
+    /// Name-match an OWGR table (ranks or countries): direct, then
+    /// diacritic/Nordic-normalized, then unambiguous last-name.
+    private func matchOWGRValue<T>(name: String, in table: [String: T]) -> T? {
         let normalized = normalizeForMatching(name)
 
         // Direct match
-        if let rank = rankings[name.lowercased()] { return rank }
+        if let value = table[name.lowercased()] { return value }
 
         // Normalized match (handles diacritics + Nordic chars)
-        for (rName, rank) in rankings {
-            if normalizeForMatching(rName) == normalized { return rank }
+        for (rName, value) in table {
+            if normalizeForMatching(rName) == normalized { return value }
         }
 
         // Last name only match (unique last name in field)
         let parts = normalized.split(separator: " ")
         if parts.count >= 2 {
             let lastName = String(parts.last!)
-            var matches: [(String, Int)] = []
-            for (rName, rank) in rankings {
-                let rNorm = normalizeForMatching(rName)
-                let rParts = rNorm.split(separator: " ")
+            var matches: [T] = []
+            for (rName, value) in table {
+                let rParts = normalizeForMatching(rName).split(separator: " ")
                 if let rLast = rParts.last, String(rLast) == lastName {
-                    matches.append((rName, rank))
+                    matches.append(value)
                 }
             }
             // Only use last-name match if it's unambiguous (exactly 1 match)
-            if matches.count == 1 { return matches[0].1 }
+            if matches.count == 1 { return matches[0] }
         }
 
-        // Not found in OWGR — return high value (unranked)
-        return 999
+        return nil
     }
 
     /// Map OWGR world ranking to DK-style salary.
