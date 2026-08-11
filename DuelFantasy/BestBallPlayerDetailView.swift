@@ -145,7 +145,7 @@ struct BestBallPlayerDetailSheet: View {
     private var header: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                let bye = viewModel.byeWeek(forTeam: player.team)
+                let bye = viewModel.byeLabel(forTeam: player.team)
                 Text("\(player.position) • \(player.team)\(bye.map { " • Bye \($0)" } ?? "")")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.secondary)

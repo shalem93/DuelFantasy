@@ -124,9 +124,10 @@ struct BestBallPlayer: Identifiable, Hashable {
     /// the 1-QB board; 2QB is the superflex board where QBs rise. NFL only.
     var adpPPR: Double? = nil
     var adp2QB: Double? = nil
-    /// EPL only: average fantasy points per match actually played, from
+    /// EPL/CFB: average fantasy points per game actually played, from
     /// the most recent season with data (real appearances, unlike the
-    /// PROJ column's season-total ÷ 38 which dilutes rotation players).
+    /// PROJ column's season-total ÷ scheduled-games which dilutes
+    /// rotation players and short seasons).
     var avgPointsPerMatch: Double? = nil
 
     /// The board-relevant ADP for a league's format.
@@ -234,6 +235,123 @@ enum NFLByeWeekProvider {
             UserDefaults.standard.set(byes, forKey: cacheKey)
         }
         return byes
+    }
+}
+
+/// CFB bye weeks by team abbreviation. Unlike the NFL's single bye, a
+/// CFB team can have several open weeks in the Best Ball grid; we report
+/// the unplayed weeks strictly inside the team's scheduled span (first →
+/// last regular-season game) so the post-championship tail doesn't read
+/// as a bye for every team. One schedule request per power-conference
+/// team, cached per season in UserDefaults.
+enum CFBByeWeekProvider {
+    static var seasonYear: Int {
+        let now = Date()
+        let year = Calendar.current.component(.year, from: now)
+        let month = Calendar.current.component(.month, from: now)
+        return month <= 1 ? year - 1 : year
+    }
+
+    static func fetchByeWeeks() async -> [String: [Int]] {
+        let season = seasonYear
+        let cacheKey = "cfb_bye_weeks_\(season)"
+        if let data = UserDefaults.standard.data(forKey: cacheKey),
+           let cached = try? JSONDecoder().decode([String: [Int]].self, from: data),
+           !cached.isEmpty {
+            return cached
+        }
+
+        // Same power-conference membership the player pool uses.
+        let teamIDs = await fetchPowerConferenceTeamIDs(season: season)
+        guard !teamIDs.isEmpty else { return [:] }
+        let teams = (await fetchTeamAbbreviations()).filter { teamIDs.contains($0.id) }
+        guard !teams.isEmpty else { return [:] }
+
+        // Precompute the Best Ball week windows once.
+        let totalWeeks = BestBallSeasonHelper.totalWeeks(for: "CFB")
+        let ranges: [(week: Int, start: Date, end: Date)] = (1...totalWeeks).map { week in
+            let (s, e) = BestBallSeasonHelper.weekDateRange(sport: "CFB", week: week)
+            return (week, s, e.addingTimeInterval(24 * 3600))  // end-of-day inclusive
+        }
+
+        var byes: [String: [Int]] = [:]
+        await withTaskGroup(of: (String, [Int])?.self) { group in
+            for team in teams {
+                group.addTask {
+                    guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/football/college-football/teams/\(team.id)/schedule?season=\(season)&seasontype=2"),
+                          let (data, response) = try? await URLSession.shared.data(from: url),
+                          let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let events = json["events"] as? [[String: Any]], !events.isEmpty else { return nil }
+                    let fmt = ISO8601DateFormatter()
+                    fmt.formatOptions = [.withInternetDateTime]
+                    var playedWeeks = Set<Int>()
+                    for event in events {
+                        guard let dateStr = event["date"] as? String else { continue }
+                        // ESPN schedule dates lack seconds: "2026-09-05T16:00Z"
+                        let normalized = dateStr.hasSuffix(":00Z") ? dateStr : dateStr.replacingOccurrences(of: "Z", with: ":00Z")
+                        guard let date = fmt.date(from: normalized) ?? fmt.date(from: dateStr) else { continue }
+                        if let hit = ranges.first(where: { date >= $0.start && date < $0.end }) {
+                            playedWeeks.insert(hit.week)
+                        }
+                    }
+                    guard let first = playedWeeks.min(), let last = playedWeeks.max() else { return nil }
+                    let open = (first...last).filter { !playedWeeks.contains($0) }
+                    return (team.abbreviation.uppercased(), open)
+                }
+            }
+            for await item in group {
+                if let (abbr, open) = item { byes[abbr] = open }
+            }
+        }
+        if !byes.isEmpty, let encoded = try? JSONEncoder().encode(byes) {
+            UserDefaults.standard.set(encoded, forKey: cacheKey)
+        }
+        return byes
+    }
+
+    /// Power-conference + independents team IDs (same ESPN group IDs the
+    /// Best Ball CFB player pool uses). Tries this season, then last.
+    private static func fetchPowerConferenceTeamIDs(season: Int) async -> Set<String> {
+        for seasonYear in [season, season - 1] {
+            var ids = Set<String>()
+            await withTaskGroup(of: [String].self) { group in
+                for groupID in [1, 4, 5, 8, 9, 12, 15, 17, 18, 37, 151] {
+                    group.addTask {
+                        let urlString = "https://sports.core.api.espn.com/v2/sports/football/leagues/college-football/seasons/\(seasonYear)/types/2/groups/\(groupID)/teams?limit=40"
+                        guard let url = URL(string: urlString),
+                              let (data, response) = try? await URLSession.shared.data(from: url),
+                              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                              let items = json["items"] as? [[String: Any]] else { return [] }
+                        return items.compactMap { item in
+                            guard let ref = item["$ref"] as? String,
+                                  let idPart = ref.split(separator: "?").first?.split(separator: "/").last else { return nil }
+                            return String(idPart)
+                        }
+                    }
+                }
+                for await batch in group { ids.formUnion(batch) }
+            }
+            if !ids.isEmpty { return ids }
+        }
+        return []
+    }
+
+    private static func fetchTeamAbbreviations() async -> [(id: String, abbreviation: String)] {
+        guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/football/college-football/teams?limit=1000"),
+              let (data, response) = try? await URLSession.shared.data(from: url),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sportsList = json["sports"] as? [[String: Any]],
+              let leagues = sportsList.first?["leagues"] as? [[String: Any]],
+              let teams = leagues.first?["teams"] as? [[String: Any]] else { return [] }
+        return teams.compactMap { wrapper in
+            guard let team = wrapper["team"] as? [String: Any],
+                  let id = team["id"] as? String ?? (team["id"] as? Int).map({ String($0) }),
+                  let abbr = team["abbreviation"] as? String else { return nil }
+            return (id, abbr)
+        }
     }
 }
 
@@ -1092,6 +1210,12 @@ private class BBProjectionCache {
     /// EPL avg fantasy points per match played: [playerID: avg].
     var eplAvgPoints: [String: Double] = [:]
     var eplAvgFetched = false
+    /// The season year whose CFB leaders had data (empty until games are
+    /// played early in a new season, so this is last season until then).
+    var cfbLeadersSeason: Int?
+    /// CFB avg fantasy points per game played: [playerID: avg].
+    var cfbAvgPoints: [String: Double] = [:]
+    var cfbAvgFetched = false
 }
 
 struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
@@ -1135,11 +1259,14 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
         }
         players = deduplicatePlayers(players)
 
-        // EPL: attach avg fantasy points per match played — a truer
+        // EPL/CFB: attach avg fantasy points per game played — a truer
         // drafting signal than the projection column for rotation and
         // injury-shortened seasons.
         if sportName == "EPL" {
             await attachEPLAverages(to: &players)
+        }
+        if sportName == "CFB" {
+            await attachCFBAverages(to: &players)
         }
 
         // NFL: attach real market ADP (PPR + 2QB superflex boards). The
@@ -1362,18 +1489,24 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
             return
         }
 
-        // Non-MLB: try current season first, fall back to previous year
-        var fetchedData: Data?
+        // Non-MLB: try current season first, fall back to previous year.
+        // Require non-empty categories — a new season's leaders endpoint
+        // can 200 with zero categories before games are played, which
+        // used to short-circuit the fallback.
+        var fetchedCategories: [[String: Any]]?
+        var fetchedSeason: Int?
         for season in [primarySeason, fallbackSeason] {
-            if let data = await fetchLeadersData(sport: sport, league: league, season: season) {
-                fetchedData = data
+            if let data = await fetchLeadersData(sport: sport, league: league, season: season),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let cats = json["categories"] as? [[String: Any]], !cats.isEmpty {
+                fetchedCategories = cats
+                fetchedSeason = season
                 break
             }
         }
 
-        guard let data = fetchedData,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let categories = json["categories"] as? [[String: Any]] else { return }
+        guard let categories = fetchedCategories else { return }
+        if sportName == "CFB" { cache.cfbLeadersSeason = fetchedSeason }
 
         if sportName == "NBA" {
             parseNBALeaders(categories: categories)
@@ -1917,18 +2050,95 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
         }
     }
 
-    /// Dedicated session for the per-athlete average sweep — ~560 tiny
-    /// requests against one host; the default 6-connections-per-host cap
-    /// would stretch the EPL pool load by ~10s.
-    private static let eplStatsSession: URLSession = {
+    /// Dedicated session for the per-athlete average sweeps (EPL/CFB) —
+    /// hundreds of tiny requests against one host; the default
+    /// 6-connections-per-host cap would stretch pool loads by ~10s.
+    private static let coreStatsSession: URLSession = {
         let config = URLSessionConfiguration.default
         config.httpMaximumConnectionsPerHost = 24
         return URLSession(configuration: config)
     }()
 
+    // MARK: - CFB Per-Game Averages
+
+    /// Fetches season stat lines for the draft-relevant CFB players (the
+    /// ones the leaders pass projected — fetching all ~1,700 pool players
+    /// would be far too many requests) and computes avg fantasy points
+    /// per game PLAYED. The PROJ column divides season totals by 17 (the
+    /// NFL parser CFB shares), so this is the honest per-game rate for a
+    /// 12-13 game college season.
+    private func attachCFBAverages(to players: inout [BestBallPlayer]) async {
+        if !cache.cfbAvgFetched {
+            cache.cfbAvgFetched = true
+            let season = cache.cfbLeadersSeason ?? (espnSeasonYear(for: "CFB") - 1)
+            let projectedIDs = Set(cache.leagueProjections.keys)
+            var avgs: [String: Double] = [:]
+            await withTaskGroup(of: (String, Double)?.self) { group in
+                for player in players {
+                    let espnID = String(player.id.dropFirst("cfb-".count))
+                    guard projectedIDs.contains(espnID) else { continue }
+                    group.addTask {
+                        guard let avg = await self.fetchCFBSeasonAverage(espnID: espnID, season: season) else { return nil }
+                        return (player.id, avg)
+                    }
+                }
+                for await item in group {
+                    if let (id, avg) = item { avgs[id] = avg }
+                }
+            }
+            cache.cfbAvgPoints = avgs
+        }
+        players = players.map { player in
+            var player = player
+            player.avgPointsPerMatch = cache.cfbAvgPoints[player.id]
+            return player
+        }
+    }
+
+    private func fetchCFBSeasonAverage(espnID: String, season: Int) async -> Double? {
+        guard let url = URL(string: "https://sports.core.api.espn.com/v2/sports/football/leagues/college-football/seasons/\(season)/types/2/athletes/\(espnID)/statistics/0") else { return nil }
+        guard let (data, response) = try? await Self.coreStatsSession.data(from: url),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let splits = json["splits"] as? [String: Any],
+              let categories = splits["categories"] as? [[String: Any]] else { return nil }
+
+        // Category-aware: "defensiveInterceptions" also carries a stat
+        // named "interceptions", which would clobber the passing one in
+        // a flat merge.
+        var stats: [String: Double] = [:]
+        for category in categories {
+            let catName = category["name"] as? String ?? ""
+            guard ["general", "passing", "rushing", "receiving"].contains(catName) else { continue }
+            for stat in (category["stats"] as? [[String: Any]]) ?? [] {
+                if let name = stat["name"] as? String,
+                   let value = stat["value"] as? Double {
+                    stats[name] = value
+                }
+            }
+        }
+
+        let games = stats["gamesPlayed"] ?? 0
+        guard games >= 1 else { return nil }
+
+        let seasonTotal = BestBallScoringEngine.nflFantasyPoints(
+            passYds: Int(stats["passingYards"] ?? 0),
+            passTD: Int(stats["passingTouchdowns"] ?? 0),
+            interceptions: Int(stats["interceptions"] ?? 0),
+            rushYds: Int(stats["rushingYards"] ?? 0),
+            rushTD: Int(stats["rushingTouchdowns"] ?? 0),
+            recYds: Int(stats["receivingYards"] ?? 0),
+            receptions: Int(stats["receptions"] ?? 0),
+            recTD: Int(stats["receivingTouchdowns"] ?? 0),
+            fumblesLost: Int(stats["fumblesLost"] ?? 0)
+        )
+        guard seasonTotal > 0 else { return nil }
+        return seasonTotal / games
+    }
+
     private func fetchEPLSeasonAverage(espnID: String, season: Int) async -> Double? {
         guard let url = URL(string: "https://sports.core.api.espn.com/v2/sports/soccer/leagues/eng.1/seasons/\(season)/types/1/athletes/\(espnID)/statistics/0") else { return nil }
-        guard let (data, response) = try? await Self.eplStatsSession.data(from: url),
+        guard let (data, response) = try? await Self.coreStatsSession.data(from: url),
               let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let splits = json["splits"] as? [String: Any],

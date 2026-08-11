@@ -296,6 +296,10 @@ struct BestBallDraftView: View {
                     Text("BYE")
                         .frame(width: 30)
                 }
+                if viewModel.currentLeague?.sport == "CFB" {
+                    Text("BYE")
+                        .frame(width: 40)
+                }
                 if viewModel.currentLeague?.isDingersOnly == true {
                     Text("'25 HR")
                         .frame(width: 48, alignment: .trailing)
@@ -304,7 +308,7 @@ struct BestBallDraftView: View {
                         Text(isSuperflexLeague ? "ADP·2QB" : "ADP")
                             .frame(width: 52, alignment: .trailing)
                     }
-                    if viewModel.currentLeague?.sport == "EPL" {
+                    if viewModel.currentLeague?.sport == "EPL" || viewModel.currentLeague?.sport == "CFB" {
                         Text("AVG")
                             .frame(width: 44, alignment: .trailing)
                     }
@@ -356,6 +360,15 @@ struct BestBallDraftView: View {
                                         .foregroundStyle(.secondary)
                                         .frame(width: 30)
                                 }
+                                if viewModel.currentLeague?.sport == "CFB" {
+                                    // Can be multiple open weeks ("6,12").
+                                    Text(viewModel.byeLabel(forTeam: player.team) ?? "–")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.7)
+                                        .frame(width: 40)
+                                }
                                 if viewModel.currentLeague?.isDingersOnly == true {
                                     Text(player.lastSeasonHR > 0 ? "\(player.lastSeasonHR)" : "-")
                                         .font(.subheadline.weight(.medium).monospacedDigit())
@@ -372,10 +385,11 @@ struct BestBallDraftView: View {
                                             .foregroundStyle(adp != nil ? brandPurple : Color(.systemGray3))
                                             .frame(width: 52, alignment: .trailing)
                                     }
-                                    if viewModel.currentLeague?.sport == "EPL" {
-                                        // Avg fantasy pts per match actually
+                                    if viewModel.currentLeague?.sport == "EPL" || viewModel.currentLeague?.sport == "CFB" {
+                                        // Avg fantasy pts per game actually
                                         // played last season — catches high-rate
-                                        // players the ÷38 projection dilutes.
+                                        // players the season-total projection
+                                        // dilutes.
                                         let avg = player.avgPointsPerMatch
                                         Text(avg.map { String(format: "%.1f", $0) } ?? "–")
                                             .font(.caption.weight(.semibold).monospacedDigit())
@@ -676,11 +690,11 @@ struct BestBallDraftView: View {
         return fullName
     }
 
-    /// "RB • PHI • Bye 10" — the bye segment appears only for NFL teams
-    /// with a loaded bye table.
+    /// "RB • PHI • Bye 10" — the bye segment appears for NFL/CFB teams
+    /// with a loaded bye table (CFB can list several: "Bye 6,12").
     private func posTeamLine(_ pick: BestBallPick) -> String {
         var line = "\(pick.playerPosition) • \(pick.playerTeam)"
-        if let bye = viewModel.byeWeek(forTeam: pick.playerTeam) {
+        if let bye = viewModel.byeLabel(forTeam: pick.playerTeam) {
             line += " • Bye \(bye)"
         }
         return line

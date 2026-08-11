@@ -123,6 +123,7 @@ final class BestBallViewModel {
     var isDraftPolling: Bool = false
     /// NFL team abbreviation -> bye week for the current season.
     var nflByeWeeks: [String: Int] = [:]
+    var cfbByeWeeks: [String: [Int]] = [:]
 
     // Standings & Scoring
     var weeklyScores: [BestBallWeeklyScore] = []
@@ -846,6 +847,7 @@ final class BestBallViewModel {
 
                 if currentLeague?.status == "drafting" {
                     await loadNFLByeWeeksIfNeeded()
+                    await loadCFBByeWeeksIfNeeded()
                     if availablePlayers.isEmpty, let sport = currentLeague?.sport {
                         var players = (try? await playerProvider.fetchPlayers(sport: sport)) ?? []
                         if currentLeague?.isDingersOnly == true {
@@ -890,6 +892,7 @@ final class BestBallViewModel {
 
             if currentLeague?.status == "active" || currentLeague?.status == "completed" {
                 await loadNFLByeWeeksIfNeeded()
+                await loadCFBByeWeeksIfNeeded()
                 // Auto-generate schedule if missing (pre-V2 leagues)
                 if let league = currentLeague, league.schedule.isEmpty, !currentMembers.isEmpty {
                     await generateScheduleAfterDraft(leagueID: leagueID)
@@ -1859,12 +1862,31 @@ final class BestBallViewModel {
         nflByeWeeks[team.uppercased()]
     }
 
+    /// Display string for a team's bye week(s): NFL has exactly one
+    /// ("10"); CFB can have several open weeks in the Best Ball grid
+    /// ("6,12"). nil when unknown or the table hasn't loaded.
+    func byeLabel(forTeam team: String) -> String? {
+        if let bye = nflByeWeeks[team.uppercased()] { return String(bye) }
+        if let byes = cfbByeWeeks[team.uppercased()], !byes.isEmpty {
+            return byes.map(String.init).joined(separator: ",")
+        }
+        return nil
+    }
+
     private var byeWeeksFetchAttempted = false
     func loadNFLByeWeeksIfNeeded() async {
         guard currentLeague?.sport == "NFL", nflByeWeeks.isEmpty,
               !byeWeeksFetchAttempted else { return }
         byeWeeksFetchAttempted = true
         nflByeWeeks = await NFLByeWeekProvider.fetchByeWeeks()
+    }
+
+    private var cfbByeWeeksFetchAttempted = false
+    func loadCFBByeWeeksIfNeeded() async {
+        guard currentLeague?.sport == "CFB", cfbByeWeeks.isEmpty,
+              !cfbByeWeeksFetchAttempted else { return }
+        cfbByeWeeksFetchAttempted = true
+        cfbByeWeeks = await CFBByeWeekProvider.fetchByeWeeks()
     }
 
     /// Positions still needed to meet draft minimums for a member
