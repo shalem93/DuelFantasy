@@ -7380,8 +7380,16 @@ final class DFSViewModel {
             let someUserZeroCache = userLeaderboard.count > 1
                 && userLeaderboard.contains(where: { $0.points > 0 })
                 && userLeaderboard.contains(where: { $0.points == 0 })
-            if allResultsZero || (allBotsZero && userHasPts) || someUserZeroCache {
-                let reason = allResultsZero ? "all entries" : someUserZeroCache ? "partial user entries" : "all bots"
+            // A zero-point player inside a user lineup may be a mis-graded
+            // dead-id player (e.g. a NASCAR dk-slug driver who actually
+            // raced) rather than a true DNP — bypass the cache so the
+            // zero-point repair in the full load can check the box scores.
+            let userZeroPointPlayer = cached.results.contains { r in
+                r.isCurrentUser && r.playerPoints != nil
+                    && r.lineupPlayerIDs.contains { (r.playerPoints?[$0] ?? 0) == 0 }
+            }
+            if allResultsZero || (allBotsZero && userHasPts) || someUserZeroCache || userZeroPointPlayer {
+                let reason = allResultsZero ? "all entries" : someUserZeroCache ? "partial user entries" : userZeroPointPlayer ? "user zero-point player" : "all bots"
                 print("[DFS] Cache for \(tournamentId) has \(reason) at 0 pts — invalidating")
                 standingsCache.removeValue(forKey: tournamentId)
             } else {
@@ -7477,6 +7485,56 @@ final class DFSViewModel {
                         rank: dedupRanks[offset],
                         rrDelta: r.rrDelta, isCurrentUser: r.isCurrentUser, isBot: r.isBot
                     )
+                }
+            }
+
+            // Repair mis-graded zero-point lineup players before ranking.
+            // A lineup can hold a player whose settlement-time id never
+            // matched a stat row (e.g. a NASCAR driver drafted under a
+            // dead DK-slug id who actually raced) — stored as 0.0 even
+            // though the box score has his points. Merge those in for
+            // EVERY entry (bots too, so ranks stay fair); the rank/RR
+            // recompute below then re-grades the contest and pushes the
+            // corrected user records.
+            var repairedRecordIDs = Set<String>()
+            let hasZeroPointPlayers = results.contains { r in
+                r.playerPoints != nil && r.lineupPlayerIDs.contains { (r.playerPoints?[$0] ?? 0) == 0 }
+            }
+            if hasZeroPointPlayers {
+                if pastTournamentStatsLoaded != tournamentId {
+                    // Box scores normally load after standings — pull them
+                    // forward so the repair can see the stat rows.
+                    pastTournamentResultRecords = results
+                    await loadPastTournamentBoxScores(tournamentId: tournamentId)
+                }
+                let isSGRepair = tournamentId.contains("-sg-") || tournamentId.hasPrefix("ufc-")
+                results = results.map { r in
+                    guard let stored = r.playerPoints else { return r }
+                    var merged = stored
+                    var total = r.totalPoints
+                    var changed = false
+                    for (index, pid) in r.lineupPlayerIDs.enumerated() where (stored[pid] ?? 0) == 0 {
+                        guard let stats = pastTournamentPlayerStats[pid],
+                              stats.gameFinal, stats.fantasyPoints > 0 else { continue }
+                        var pts = stats.fantasyPoints
+                        if isSGRepair && index == 0 { pts *= 1.5 }
+                        merged[pid] = pts
+                        total += pts
+                        changed = true
+                    }
+                    guard changed else { return r }
+                    repairedRecordIDs.insert(r.id)
+                    return DFSTournamentResultRecord(
+                        id: r.id, tournamentID: r.tournamentID, userID: r.userID,
+                        entryName: r.entryName, lineupPlayerIDs: r.lineupPlayerIDs,
+                        lineupPlayerNames: r.lineupPlayerNames, totalPoints: total,
+                        playerPoints: merged, playerSalaries: r.playerSalaries,
+                        rank: r.rank, rrDelta: r.rrDelta,
+                        isCurrentUser: r.isCurrentUser, isBot: r.isBot
+                    )
+                }
+                if !repairedRecordIDs.isEmpty {
+                    print("[DFS-Standings] Repaired zero-point players in \(repairedRecordIDs.count) entries for \(tournamentId)")
                 }
             }
 
@@ -7822,7 +7880,11 @@ final class DFSViewModel {
                     let correctRank = correctRankByEntryID[r.id]
                     let needsRRFix = correctRR != nil && r.rrDelta != correctRR
                     let needsRankFix = correctRank != nil && r.rank != correctRank
-                    if needsRRFix || needsRankFix {
+                    // Repaired user records must reach the server even when
+                    // rank/RR happen to be unchanged, so the corrected
+                    // points survive the next sync.
+                    let needsPointsFix = repairedRecordIDs.contains(r.id) && userResultIDs.contains(r.id)
+                    if needsRRFix || needsRankFix || needsPointsFix {
                         correctedServerResults[i] = DFSTournamentResultRecord(
                             id: r.id, tournamentID: r.tournamentID, userID: r.userID,
                             entryName: r.entryName, lineupPlayerIDs: r.lineupPlayerIDs,

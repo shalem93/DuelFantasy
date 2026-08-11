@@ -1761,7 +1761,20 @@ struct DFSPastStandingsView: View {
     /// record (e.g., a bot with the same lineup) and copy its per-player points.
     /// Falls back to computing from pastTournamentPlayerStats (box scores).
     private func resolvePlayerPoints(for record: DFSTournamentResultRecord) -> [String: Double] {
-        if let pts = record.playerPoints, !pts.isEmpty { return pts }
+        if let pts = record.playerPoints, !pts.isEmpty {
+            // Backfill players whose persisted points are zero but whose
+            // stat row resolved after settlement (e.g. a NASCAR driver
+            // stored under a dead dk-slug id who actually raced).
+            var merged = pts
+            for (index, pid) in record.lineupPlayerIDs.enumerated() where (merged[pid] ?? 0) == 0 {
+                guard let stats = viewModel.pastTournamentPlayerStats[pid],
+                      stats.gameFinal, stats.fantasyPoints > 0 else { continue }
+                var value = stats.fantasyPoints
+                if isSingleGameTournament && index == 0 { value *= 1.5 }
+                merged[pid] = value
+            }
+            return merged
+        }
         // Try to find another result record with the same lineup player IDs
         let targetSet = Set(record.lineupPlayerIDs)
         for other in viewModel.pastTournamentResultRecords {
