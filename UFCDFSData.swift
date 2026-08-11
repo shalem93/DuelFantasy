@@ -153,59 +153,33 @@ struct ESPNUFCDFSSlateProvider: DFSSlateProvider {
             throw NSError(domain: "UFCDFS", code: 2, userInfo: [NSLocalizedDescriptionKey: "No UFC fighters available"])
         }
 
-        // 4. Apply real DraftKings salaries from RotoGrinders where available
-        let realSalaries = rgSalaries
+        // 4. Apply real DraftKings prices. The card itself comes from ESPN;
+        // prices must come from a salary slate that MATCHES this card —
+        // classic first, then the per-fight showdown feed. If neither
+        // matches (early fight week LineupHQ often still serves the
+        // PREVIOUS weekend's card, which used to slip past a weaker
+        // non-empty check and ship estimated prices), don't offer the
+        // slate at all — same policy as golf.
+        let ufcShowdownSalaries = await RotoGrindersSalaryProvider.shared.fetchAllShowdownSalaries(sport: "ufc", date: resolvedDate)
+
+        func cardMatchRate(of salaries: [String: Int]) -> Double {
+            guard !salaries.isEmpty else { return 0 }
+            let matched = players.filter { RotoGrindersSalaryProvider.lookupSalary(espnName: $0.name, in: salaries) != nil }.count
+            return Double(matched) / Double(max(1, players.count))
+        }
+        let classicRate = cardMatchRate(of: rgSalaries)
+        let showdownRate = cardMatchRate(of: ufcShowdownSalaries)
+
         let finalPlayers: [DFSPlayer]
-        if !realSalaries.isEmpty {
-            let matchCount = players.filter { RotoGrindersSalaryProvider.lookupSalary(espnName: $0.name, in: realSalaries) != nil }.count
-            let matchRate = Double(matchCount) / Double(max(1, players.count))
-            let sameSlate = matchRate > 0.30
-
-            if sameSlate {
-                let rgMin = realSalaries.values.min() ?? 5000
-                let rgMax = realSalaries.values.max() ?? 12000
-                let allProjs = players.map { $0.projectedPoints }
-                let projMin = allProjs.min() ?? 0
-                let projMax = max(projMin + 1, allProjs.max() ?? 50)
-
-                var applied = 0
-                var calibrated = 0
-                finalPlayers = players.map { player in
-                    if let realSalary = RotoGrindersSalaryProvider.lookupSalary(espnName: player.name, in: realSalaries) {
-                        applied += 1
-                        var matched = DFSPlayer(
-                            id: player.id, name: player.name, team: player.team,
-                            position: player.position, salary: realSalary,
-                            projectedPoints: player.projectedPoints,
-                            gameID: player.gameID, injuryStatus: player.injuryStatus
-                        )
-                        matched.isConfirmedActive = true
-                        return matched
-                    }
-                    // Unmatched fighter — calibrate salary to RG range using projection
-                    calibrated += 1
-                    let projFraction = min(1.0, max(0, (player.projectedPoints - projMin) / (projMax - projMin)))
-                    let curved = pow(projFraction, 0.85)
-                    let salary = rgMin + Int(curved * Double(rgMax - rgMin))
-                    let roundedSalary = (salary / 100) * 100
-                    var unmatched = DFSPlayer(
-                        id: player.id, name: player.name, team: player.team,
-                        position: player.position, salary: max(rgMin, roundedSalary),
-                        projectedPoints: player.projectedPoints,
-                        gameID: player.gameID, injuryStatus: player.injuryStatus
-                    )
-                    unmatched.isConfirmedActive = false
-                    return unmatched
-                }
-                print("[UFC-DFS] sameSlate=true (\(matchCount)/\(players.count)), applied=\(applied), calibrated=\(calibrated), range=$\(rgMin)-$\(rgMax)")
-            } else {
-                // Slates don't match — keep estimated salaries
-                print("[UFC-DFS] sameSlate=false (\(matchCount)/\(players.count)), keeping estimated salaries")
-                finalPlayers = makeCapFeasible(players)
-            }
+        if classicRate > 0.30 {
+            finalPlayers = applyRealSalaries(rgSalaries, to: players, label: "classic \(Int(classicRate * 100))%")
+        } else if showdownRate > 0.30 {
+            // No classic slate for this card yet, but DK's per-fight
+            // showdown prices cover it — real numbers, same scale.
+            finalPlayers = applyRealSalaries(ufcShowdownSalaries, to: players, label: "showdown \(Int(showdownRate * 100))%")
         } else {
-            print("[UFC-DFS] No real salary data available — using estimated salaries")
-            finalPlayers = makeCapFeasible(players)
+            print("[UFC-DFS] No DK salary slate matches this card (classic \(Int(classicRate * 100))%, showdown \(Int(showdownRate * 100))%) — not offering it")
+            throw NSError(domain: "UFCDFS", code: 3, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for this UFC slate"])
         }
 
         let sortedPlayers = finalPlayers.sorted(by: { $0.salary > $1.salary })
@@ -228,20 +202,6 @@ struct ESPNUFCDFSSlateProvider: DFSSlateProvider {
         let rosterSlots: [String]? = isCaptainMode
             ? ["MVP", "FLEX", "FLEX", "FLEX", "FLEX", "FLEX"]
             : nil
-
-        // Phase 2: pull RG's per-fight showdown salaries. UFC is always
-        // showdown — each fight is its own single-game contest. Use the
-        // same date the main salary fetch resolved against so we hit
-        // the right LineupHQ bucket for PPV cards.
-        let ufcShowdownSalaries = await RotoGrindersSalaryProvider.shared.fetchAllShowdownSalaries(sport: "ufc", date: resolvedDate)
-
-        // Don't offer a UFC slate built on prices we made up. If neither the
-        // classic/main salary feed NOR the per-fight showdown feed returned
-        // real DraftKings/LineupHQ prices, the card hasn't been posted yet —
-        // wait and show nothing rather than ship estimated salaries.
-        guard !rgSalaries.isEmpty || !ufcShowdownSalaries.isEmpty else {
-            throw NSError(domain: "UFCDFS", code: 3, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for this UFC slate"])
-        }
 
         let (tournaments, sgPlayers) = buildMultiTournamentSlate(
             baseID: tournamentID,
@@ -449,25 +409,48 @@ struct ESPNUFCDFSSlateProvider: DFSSlateProvider {
         return max(4000, min(12000, rounded))
     }
 
-    /// Real DK pools always admit a legal lineup; the estimated pool must
-    /// too. If the 6 cheapest fighters together exceed $44,000 (leaving no
-    /// room under the $50,000 cap to move up from the bare minimum), scale
-    /// every estimated salary down proportionally.
-    private func makeCapFeasible(_ players: [DFSPlayer]) -> [DFSPlayer] {
-        let cheapest6 = players.map(\.salary).sorted().prefix(6).reduce(0, +)
-        let budget = 44_000
-        guard players.count >= 6, cheapest6 > budget else { return players }
-        let scale = Double(budget) / Double(cheapest6)
-        print("[UFC-DFS] Estimated pool infeasible (6 cheapest = $\(cheapest6)) — scaling salaries by \(String(format: "%.2f", scale))")
-        return players.map { player in
-            let scaled = max(3000, (Int(Double(player.salary) * scale) / 100) * 100)
-            return DFSPlayer(
+    /// Overlay real DK prices onto the ESPN-built pool: matched fighters
+    /// get their exact price (and count as confirmed on the slate);
+    /// unmatched ones are calibrated into the real slate's price range by
+    /// projection percentile.
+    private func applyRealSalaries(_ realSalaries: [String: Int], to players: [DFSPlayer], label: String) -> [DFSPlayer] {
+        let rgMin = realSalaries.values.min() ?? 5000
+        let rgMax = realSalaries.values.max() ?? 12000
+        let allProjs = players.map { $0.projectedPoints }
+        let projMin = allProjs.min() ?? 0
+        let projMax = max(projMin + 1, allProjs.max() ?? 50)
+
+        var applied = 0
+        var calibrated = 0
+        let result = players.map { player -> DFSPlayer in
+            if let realSalary = RotoGrindersSalaryProvider.lookupSalary(espnName: player.name, in: realSalaries) {
+                applied += 1
+                var matched = DFSPlayer(
+                    id: player.id, name: player.name, team: player.team,
+                    position: player.position, salary: realSalary,
+                    projectedPoints: player.projectedPoints,
+                    gameID: player.gameID, injuryStatus: player.injuryStatus
+                )
+                matched.isConfirmedActive = true
+                return matched
+            }
+            // Unmatched fighter — calibrate salary to the real range using projection
+            calibrated += 1
+            let projFraction = min(1.0, max(0, (player.projectedPoints - projMin) / (projMax - projMin)))
+            let curved = pow(projFraction, 0.85)
+            let salary = rgMin + Int(curved * Double(rgMax - rgMin))
+            let roundedSalary = (salary / 100) * 100
+            var unmatched = DFSPlayer(
                 id: player.id, name: player.name, team: player.team,
-                position: player.position, salary: scaled,
+                position: player.position, salary: max(rgMin, roundedSalary),
                 projectedPoints: player.projectedPoints,
                 gameID: player.gameID, injuryStatus: player.injuryStatus
             )
+            unmatched.isConfirmedActive = false
+            return unmatched
         }
+        print("[UFC-DFS] Applied DK salaries (\(label)): matched=\(applied), calibrated=\(calibrated), range=$\(rgMin)-$\(rgMax)")
+        return result
     }
 
     // MARK: - Projection
