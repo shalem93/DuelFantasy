@@ -62,6 +62,9 @@ struct DFSPastStandingsView: View {
     private var isUFC: Bool {
         result.tournamentId?.hasPrefix("ufc-") == true
     }
+    private var isNASCAR: Bool {
+        result.tournamentId?.hasPrefix("nascar-") == true
+    }
     private var sportLabel: String {
         if isGolf { return "PGA" }
         if isMLB { return "MLB" }
@@ -591,6 +594,8 @@ struct DFSPastStandingsView: View {
                         soccerExpandedLineup(record: record)
                     } else if isUFC {
                         ufcExpandedLineup(record: record)
+                    } else if isNASCAR {
+                        nascarExpandedLineup(record: record)
                     } else if isFootball {
                         footballExpandedLineup(record: record)
                     } else {
@@ -796,6 +801,105 @@ struct DFSPastStandingsView: View {
                     Text("-").frame(width: 30, alignment: .trailing)
                     Text("-").frame(width: 30, alignment: .trailing)
                     Text("-").frame(width: 28, alignment: .trailing)
+                    Text("-").frame(width: 28, alignment: .trailing)
+                }
+
+                Text(String(format: "%.1f", fpts))
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(brandPurple)
+                    .frame(width: 38, alignment: .trailing)
+            }
+            .font(.caption.monospacedDigit())
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+        }
+
+        lineupTotalsRow(record: record)
+    }
+
+    // MARK: - NASCAR Expanded Lineup
+
+    /// Racing box-score columns: POS / ST / +/− / LL — same DFSPlayerLiveStats
+    /// field mapping the live view uses (points=finish position, ftm=start
+    /// position, rebounds=laps led, assists=laps completed).
+    @ViewBuilder
+    private func nascarExpandedLineup(record: DFSTournamentResultRecord) -> some View {
+        HStack(spacing: 0) {
+            Text("DRIVER")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("POS")
+                .frame(width: 32, alignment: .trailing)
+            Text("ST")
+                .frame(width: 28, alignment: .trailing)
+            Text("+/-")
+                .frame(width: 30, alignment: .trailing)
+            Text("LL")
+                .frame(width: 28, alignment: .trailing)
+            Text("FPTS")
+                .frame(width: 38, alignment: .trailing)
+        }
+        .font(.system(size: 9, weight: .bold))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+
+        let playerIDs = record.lineupPlayerIDs
+        let playerNames = record.lineupPlayerNames
+        let perPlayerPts = resolvePlayerPoints(for: record)
+
+        ForEach(Array(playerIDs.enumerated()), id: \.offset) { index, playerID in
+            let storedName = index < playerNames.count ? playerNames[index] : playerID
+            let name = resolvePlayerName(storedName: storedName, playerID: playerID)
+            let fpts = perPlayerPts[playerID] ?? 0
+            let stats = viewModel.pastTournamentPlayerStats[playerID]
+
+            HStack(spacing: 0) {
+                HStack(spacing: 4) {
+                    Text("D")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 18, height: 18)
+                        .background(brandPurple.opacity(0.7))
+                        .clipShape(Circle())
+
+                    Text(lastName(name))
+                        .font(.caption.weight(.medium))
+                        .lineLimit(1)
+
+                    if let sal = salaryForPlayer(playerID, in: record) {
+                        Text("$\(viewModel.formatSalary(sal))")
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if let pct = ownershipByPlayerID[playerID] {
+                        Text("\(pct)%")
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundStyle(.orange)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                if let stats, stats.points >= 1 {
+                    // Positions gained only when both start and finish are known.
+                    let diff = stats.ftm >= 1 ? stats.ftm - stats.points : 0
+                    Text("P\(stats.points)")
+                        .frame(width: 32, alignment: .trailing)
+                    Text(stats.ftm >= 1 ? "\(stats.ftm)" : "-")
+                        .frame(width: 28, alignment: .trailing)
+                    Text(stats.ftm >= 1 ? "\(diff >= 0 ? "+" : "")\(diff)" : "-")
+                        .frame(width: 30, alignment: .trailing)
+                        .foregroundStyle(diff > 0 ? .green : (diff < 0 ? .red : .secondary))
+                    Text("\(stats.rebounds)")
+                        .frame(width: 28, alignment: .trailing)
+                } else {
+                    // No stat row — driver never took the green flag (DNQ/DNS).
+                    Text("DNS")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.orange)
+                        .frame(width: 32, alignment: .trailing)
+                    Text("-").frame(width: 28, alignment: .trailing)
+                    Text("-").frame(width: 30, alignment: .trailing)
                     Text("-").frame(width: 28, alignment: .trailing)
                 }
 

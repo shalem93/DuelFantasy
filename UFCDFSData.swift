@@ -201,11 +201,11 @@ struct ESPNUFCDFSSlateProvider: DFSSlateProvider {
             } else {
                 // Slates don't match — keep estimated salaries
                 print("[UFC-DFS] sameSlate=false (\(matchCount)/\(players.count)), keeping estimated salaries")
-                finalPlayers = players
+                finalPlayers = makeCapFeasible(players)
             }
         } else {
             print("[UFC-DFS] No real salary data available — using estimated salaries")
-            finalPlayers = players
+            finalPlayers = makeCapFeasible(players)
         }
 
         let sortedPlayers = finalPlayers.sorted(by: { $0.salary > $1.salary })
@@ -416,17 +416,15 @@ struct ESPNUFCDFSSlateProvider: DFSSlateProvider {
         // Win percentage (0.0 - 1.0)
         let winPct = totalFightsRecord > 0 ? Double(wins) / Double(totalFightsRecord) : 0.5
 
-        // Card position factor: main event fighters (index 0-2) get premium
-        let positionFactor: Double
-        if fightIndex <= 1 {
-            positionFactor = 1.3  // Main/co-main event
-        } else if fightIndex <= 4 {
-            positionFactor = 1.1  // Main card
-        } else if fightIndex <= 8 {
-            positionFactor = 0.9  // Prelims
-        } else {
-            positionFactor = 0.75 // Early prelims
-        }
+        // Card position factor, RELATIVE to card size: main event 1.25 down
+        // to 0.75 for the last prelim. The old absolute index ladder (0-1 →
+        // 1.3, 2-4 → 1.1, …) assumed a 12-fight card — on a 5-fight card
+        // every fighter landed in the 1.1-1.3 premium tiers and six of them
+        // couldn't fit under the $50K cap.
+        let posFraction = totalFights > 1
+            ? Double(fightIndex) / Double(totalFights - 1)   // 0 = main event, 1 = last fight
+            : 0.5
+        let positionFactor = 1.25 - posFraction * 0.5
 
         // Experience factor: more experienced fighters get slight premium
         let expFactor = min(1.2, 0.7 + Double(min(totalFightsRecord, 30)) * 0.017)
@@ -445,7 +443,31 @@ struct ESPNUFCDFSSlateProvider: DFSSlateProvider {
 
         let finalSalary = Int(rawSalary * favoriteBump) + Int(hashVariance)
         let rounded = (finalSalary / 100) * 100
-        return max(5000, min(12000, rounded))
+        // Floor $4,000 (not $5,000): the per-slot budget is $8,333, so a
+        // floor at 60% of budget left no room for the pool to admit a
+        // legal 6-man roster on winning-record-heavy cards.
+        return max(4000, min(12000, rounded))
+    }
+
+    /// Real DK pools always admit a legal lineup; the estimated pool must
+    /// too. If the 6 cheapest fighters together exceed $44,000 (leaving no
+    /// room under the $50,000 cap to move up from the bare minimum), scale
+    /// every estimated salary down proportionally.
+    private func makeCapFeasible(_ players: [DFSPlayer]) -> [DFSPlayer] {
+        let cheapest6 = players.map(\.salary).sorted().prefix(6).reduce(0, +)
+        let budget = 44_000
+        guard players.count >= 6, cheapest6 > budget else { return players }
+        let scale = Double(budget) / Double(cheapest6)
+        print("[UFC-DFS] Estimated pool infeasible (6 cheapest = $\(cheapest6)) — scaling salaries by \(String(format: "%.2f", scale))")
+        return players.map { player in
+            let scaled = max(3000, (Int(Double(player.salary) * scale) / 100) * 100)
+            return DFSPlayer(
+                id: player.id, name: player.name, team: player.team,
+                position: player.position, salary: scaled,
+                projectedPoints: player.projectedPoints,
+                gameID: player.gameID, injuryStatus: player.injuryStatus
+            )
+        }
     }
 
     // MARK: - Projection

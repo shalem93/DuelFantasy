@@ -6318,7 +6318,10 @@ enum DFSEngine {
         case 73...108:   return 35
         case 109...162:  return 30
         case 163...252:  return 25
-        case 253...600:  return 20
+        // 253-423 (171 × +20 = +3,420) against 424-2000 (1,577 × −10 =
+        // −15,770) makes the full-field curve net to ~zero: paid ranks
+        // 1-252 total +12,360, so +15,780 in vs −15,770 out.
+        case 253...423:  return 20
         default:         return -10
         }
     }
@@ -6362,8 +6365,8 @@ enum DFSEngine {
                 ("6th", 220), ("7th", 180), ("8th", 150), ("9th-10th", 130),
                 ("11th-15th", 100), ("16th-20th", 80), ("21st-30th", 65),
                 ("31st-45th", 55), ("46th-72nd", 45), ("73rd-108th", 35),
-                ("109th-162nd", 30), ("163rd-252nd", 25), ("253rd-600th", 20),
-                ("601st+", -10)
+                ("109th-162nd", 30), ("163rd-252nd", 25), ("253rd-423rd", 20),
+                ("424th+", -10)
             ]
         default:
             return DFSEngine.payoutTiers(forEntryCount: 2000)

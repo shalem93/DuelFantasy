@@ -189,7 +189,7 @@ struct ESPNNASCARDFSSlateProvider: DFSSlateProvider {
                 let displayName = lowercaseName.split(separator: " ")
                     .map { String($0).prefix(1).uppercased() + String($0).dropFirst() }
                     .joined(separator: " ")
-                let resolvedID = espnIndex[RotoGrindersSalaryProvider.normalizeName(displayName)]
+                let resolvedID = resolveESPNDriverID(dkName: displayName, in: espnIndex)
                     ?? "dk-\(lowercaseName.replacingOccurrences(of: " ", with: "-"))"
                 return nascarPlayer(id: resolvedID, name: displayName, salary: salary, gameID: event.id)
             }
@@ -232,6 +232,34 @@ struct ESPNNASCARDFSSlateProvider: DFSSlateProvider {
         )
         NASCARSlateCache.shared.set(slate)
         return slate
+    }
+
+    /// DK and ESPN spell drivers differently ("John H. Nemechek" vs ESPN's
+    /// "John Hunter Nemechek"), and an unresolved driver gets a dead "dk-"
+    /// id that can never match a stat row — grading as DNP even though he
+    /// finished the race. Exact normalized match first, then suffix-stripped,
+    /// then first-initial + last-name when it's unambiguous.
+    private func resolveESPNDriverID(dkName: String, in index: [String: String]) -> String? {
+        func stripSuffix(_ s: String) -> String {
+            s.replacingOccurrences(of: " (jr|sr|ii|iii|iv)$", with: "", options: .regularExpression)
+        }
+        let normalized = RotoGrindersSalaryProvider.normalizeName(dkName)
+        if let id = index[normalized] { return id }
+
+        let stripped = stripSuffix(normalized)
+        for (key, id) in index where stripSuffix(key) == stripped {
+            return id
+        }
+
+        let parts = stripped.components(separatedBy: " ")
+        guard parts.count >= 2, let lastName = parts.last else { return nil }
+        let firstInitial = String(parts[0].prefix(1))
+        let candidates = index.filter { key, _ in
+            let kp = stripSuffix(key).components(separatedBy: " ")
+            guard kp.count >= 2, kp.last == lastName else { return false }
+            return String(kp[0].prefix(1)) == firstInitial
+        }
+        return candidates.count == 1 ? candidates.first?.value : nil
     }
 
     private func nascarPlayer(id: String, name: String, salary: Int, gameID: String) -> DFSPlayer {
@@ -421,7 +449,7 @@ struct ESPNNASCARDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
                 // Repurposed stat fields for NASCAR:
                 // points = position, rebounds = laps led, assists = laps
                 // completed, ftm = start position, minutes = "P{pos}".
-                playerLiveStats[playerID] = DFSPlayerLiveStats(
+                let stats = DFSPlayerLiveStats(
                     name: name,
                     points: place,
                     rebounds: lapsLed,
@@ -434,6 +462,21 @@ struct ESPNNASCARDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
                     gameStatus: isFinal ? "Final" : (state == "in" ? "Racing" : "Pre-Race"),
                     gameFinal: isFinal
                 )
+                playerLiveStats[playerID] = stats
+
+                // Alias keys for lineups drafted against the early-week
+                // DK-only pool, whose unresolved ids are name slugs like
+                // "nascar-dk-john-h-nemechek" (DK spells him "John H.
+                // Nemechek"; ESPN "John Hunter Nemechek"). Register the
+                // plausible slug spellings of this driver so those stored
+                // lineups still match a stat row instead of grading DNP.
+                for slug in Self.dkSlugVariants(for: name) {
+                    let aliasID = "nascar-dk-\(slug)"
+                    if playerFantasyPoints[aliasID] == nil {
+                        playerFantasyPoints[aliasID] = fpts
+                        playerLiveStats[aliasID] = stats
+                    }
+                }
             }
         }
 
@@ -461,6 +504,24 @@ struct ESPNNASCARDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
             gameLiveInfo: [event.id: gameInfo],
             allGamesFinal: isFinal
         )
+    }
+
+    /// Slug spellings a DK-derived player id could use for this ESPN
+    /// driver name: full name, first+last, and first + middle-initial +
+    /// last ("john-hunter-nemechek" / "john-nemechek" / "john-h-nemechek").
+    nonisolated static func dkSlugVariants(for espnName: String) -> [String] {
+        let tokens = RotoGrindersSalaryProvider.normalizeName(espnName)
+            .components(separatedBy: " ")
+            .filter { !$0.isEmpty }
+        guard tokens.count >= 2 else { return [tokens.joined(separator: "-")] }
+        var variants = [tokens.joined(separator: "-")]
+        if tokens.count >= 3 {
+            let first = tokens[0], last = tokens[tokens.count - 1]
+            variants.append("\(first)-\(last)")
+            let middleInitial = String(tokens[1].prefix(1))
+            variants.append("\(first)-\(middleInitial)-\(last)")
+        }
+        return variants
     }
 
     private func fetchScoreboardEvent(eventID: String, dateKey: String?) async -> ESPNNASCAREvent? {
