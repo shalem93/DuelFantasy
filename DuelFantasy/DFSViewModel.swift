@@ -1458,11 +1458,17 @@ final class DFSViewModel {
             if effectiveSport == "EPL" || effectiveSport == "UCL" {
                 return position != "GK"
             }
-            // Football FLEX = RB/WR/TE (never QB or DST), like DK.
-            if effectiveSport == "NFL" || effectiveSport == "CFB" {
+            // Football CLASSIC FLEX = RB/WR/TE (never QB or DST), like DK.
+            // Showdown FLEX takes any position — DK lets you roster
+            // multiple QBs in single-game.
+            if tournament?.isSingleGame != true,
+               effectiveSport == "NFL" || effectiveSport == "CFB" {
                 return ["RB", "WR", "TE"].contains(position)
             }
             return true
+        case "SFLEX":
+            // Football superflex: QB-eligible flex (DK college classic).
+            return ["QB", "RB", "WR", "TE"].contains(position)
         case "P":
             return position == "SP" || position == "RP" || position == "P"
         case "C/1B":
@@ -2077,9 +2083,13 @@ final class DFSViewModel {
                 // UTIL shows all skaters (not goalies)
                 result = result.filter { $0.position != "G" }
             } else if filter == "FLEX" && (sport == "NFL" || sport == "CFB") {
-                // FLEX shows RB, WR, TE (not QB, K, DEF)
+                // FLEX shows RB, WR, TE (not QB, K, DST)
                 let flexPositions: Set<String> = ["RB", "WR", "TE"]
                 result = result.filter { flexPositions.contains($0.position) }
+            } else if filter == "SFLEX" && (sport == "NFL" || sport == "CFB") {
+                // Superflex shows QB, RB, WR, TE
+                let sflexPositions: Set<String> = ["QB", "RB", "WR", "TE"]
+                result = result.filter { sflexPositions.contains($0.position) }
             } else if filter == "P" && sport == "MLB" {
                 // P slot accepts SP and RP
                 result = result.filter { $0.position == "SP" || $0.position == "RP" }
@@ -2567,7 +2577,7 @@ final class DFSViewModel {
     /// Whether a player matches a roster slot requirement.
     /// Handles DK roster slots: NBA (PG/SG/SF/PF/C/G/F/UTIL), MLB (P/C/1B/2B/3B/SS/OF),
     /// NHL (C/W/D/UTIL/G), Soccer (GK/DEF/MID/FWD/FLEX).
-    private func playerMatchesSlot(_ player: DFSPlayer, slot: String) -> Bool {
+    private func playerMatchesSlot(_ player: DFSPlayer, slot: String, isSingleGame: Bool = false) -> Bool {
         let effectiveSport = sport
         switch slot {
         case "MVP":
@@ -2577,11 +2587,15 @@ final class DFSViewModel {
             if effectiveSport == "EPL" || effectiveSport == "UCL" {
                 return player.position != "GK"
             }
-            // Football FLEX = RB/WR/TE (never QB or DST), like DK.
-            if effectiveSport == "NFL" || effectiveSport == "CFB" {
+            // Football CLASSIC FLEX = RB/WR/TE; Showdown FLEX takes any
+            // position (DK allows multiple QBs in single-game).
+            if !isSingleGame, effectiveSport == "NFL" || effectiveSport == "CFB" {
                 return ["RB", "WR", "TE"].contains(player.position)
             }
             return true
+        case "SFLEX":
+            // Football superflex: QB-eligible flex (DK college classic).
+            return ["QB", "RB", "WR", "TE"].contains(player.position)
         case "P":
             return player.position == "SP" || player.position == "RP" || player.position == "P"
         case "C/1B":
@@ -3157,7 +3171,7 @@ final class DFSViewModel {
             // Check that a candidate pool can fill every required position slot
             func coversAllSlots(_ pool: [DFSPlayer]) -> Bool {
                 for slot in Set(slots) {
-                    let hasMatch = pool.contains { self.playerMatchesSlot($0, slot: slot) }
+                    let hasMatch = pool.contains { self.playerMatchesSlot($0, slot: slot, isSingleGame: isSingleGame) }
                     if !hasMatch { return false }
                 }
                 return true
@@ -3555,7 +3569,7 @@ final class DFSViewModel {
 
                 // If this slot requires a specific position, filter by position
                 if let requiredPos = slots[slotIndex] {
-                    affordable = affordable.filter { playerMatchesSlot($0, slot: requiredPos) }
+                    affordable = affordable.filter { playerMatchesSlot($0, slot: requiredPos, isSingleGame: isSingleGame) }
                 }
 
                 // NHL goalie handling: Remove backup goalies from the pool.
@@ -3927,7 +3941,7 @@ final class DFSViewModel {
                         !usedIDs.contains(candidate.id)
                         && candidate.salary > cheapPlayer.salary
                         && candidate.salary <= cheapPlayer.salary + maxRawSalaryIncrease
-                        && (requiredPos == nil || self.playerMatchesSlot(candidate, slot: requiredPos!))
+                        && (requiredPos == nil || self.playerMatchesSlot(candidate, slot: requiredPos!, isSingleGame: isSingleGame))
                     }
                     if !upgradeCandidates.isEmpty {
                         // Sort by best cap fit — use effective cost (1.5x for MVP) so MVP upgrades
@@ -3969,7 +3983,7 @@ final class DFSViewModel {
             let reserveRest = slotsAfter * cheapestSalary
             var affordable = fb_pool.filter { $0.salary <= fb_budget - reserveRest }
             if let requiredPos = slots[pickIndex] {
-                affordable = affordable.filter { playerMatchesSlot($0, slot: requiredPos) }
+                affordable = affordable.filter { playerMatchesSlot($0, slot: requiredPos, isSingleGame: isSingleGame) }
             }
             // If the reserve math leaves no affordable option, relax it: any unused player
             // that fits the remaining budget for this single pick is acceptable. Better to
@@ -3978,7 +3992,7 @@ final class DFSViewModel {
                 let mvpFactor = (isSingleGame && pickIndex == 0) ? 1.5 : 1.0
                 var relaxed = fb_pool.filter { Int(Double($0.salary) * mvpFactor) <= fb_budget }
                 if let requiredPos = slots[pickIndex] {
-                    let positional = relaxed.filter { playerMatchesSlot($0, slot: requiredPos) }
+                    let positional = relaxed.filter { playerMatchesSlot($0, slot: requiredPos, isSingleGame: isSingleGame) }
                     if !positional.isEmpty {
                         relaxed = positional
                     } else if isSoccer || requiredPos == "GK" || requiredPos == "G" {
@@ -4040,7 +4054,7 @@ final class DFSViewModel {
                         !fb_usedIDs.contains(candidate.id)
                         && candidate.salary > cheapPlayer.salary
                         && candidate.salary <= cheapPlayer.salary + maxRawSalaryIncrease
-                        && (requiredPos == nil || self.playerMatchesSlot(candidate, slot: requiredPos!))
+                        && (requiredPos == nil || self.playerMatchesSlot(candidate, slot: requiredPos!, isSingleGame: isSingleGame))
                     }
                     if let upgrade = upgradeCandidates.max(by: { $0.salary < $1.salary }) {
                         fb_usedIDs.remove(cheapPlayer.id)
@@ -4064,7 +4078,7 @@ final class DFSViewModel {
             var usedIDs = Set(fallback.map(\.id))
             func cheapestFit(_ source: [DFSPlayer], pos: String?) -> DFSPlayer? {
                 source.filter {
-                    !usedIDs.contains($0.id) && (pos == nil || playerMatchesSlot($0, slot: pos!))
+                    !usedIDs.contains($0.id) && (pos == nil || playerMatchesSlot($0, slot: pos!, isSingleGame: isSingleGame))
                 }.min(by: { $0.salary < $1.salary })
             }
             while fallback.count < lineupSize {
@@ -4122,7 +4136,7 @@ final class DFSViewModel {
                         !safetyUsedIDs.contains(c.id)
                         && c.salary > cheapPlayer.salary
                         && c.salary <= maxNewSalary
-                        && (requiredPos == nil || self.playerMatchesSlot(c, slot: requiredPos!))
+                        && (requiredPos == nil || self.playerMatchesSlot(c, slot: requiredPos!, isSingleGame: isSingleGame))
                     }
                     if let upgrade = candidates.max(by: { $0.salary < $1.salary }) {
                         safetyUsedIDs.remove(cheapPlayer.id)
@@ -9324,7 +9338,7 @@ final class DFSViewModel {
             case "mlb": botRosterSlots = ["P", "P", "UTIL", "UTIL", "UTIL", "UTIL", "UTIL", "UTIL", "UTIL", "UTIL"]
             case "epl", "ucl", "wc": botRosterSlots = ["GK", "DEF", "DEF", "MID", "MID", "FWD", "FWD", "FLEX"]
             case "nfl": botRosterSlots = ["QB", "RB", "RB", "WR", "WR", "WR", "TE", "FLEX", "DST"]
-            case "cfb": botRosterSlots = ["QB", "RB", "RB", "WR", "WR", "WR", "TE", "FLEX"]
+            case "cfb": botRosterSlots = ["QB", "RB", "RB", "WR", "WR", "WR", "FLEX", "SFLEX"]
             case "ufc": botRosterSlots = nil  // no position constraints
             case "nba": botRosterSlots = nil
             default: botRosterSlots = nil
@@ -9378,7 +9392,10 @@ final class DFSViewModel {
             case "epl", "ucl", "wc": return slot == "FLEX" ? pos != "GK" : pos == slot
             case "mlb": let p: Set<String> = ["SP", "RP", "P"]; return slot == "P" ? p.contains(pos) : !p.contains(pos)
             case "nhl": return slot == "G" ? pos == "G" : pos != "G"
-            case "nfl", "cfb": return slot == "FLEX" ? ["RB", "WR", "TE"].contains(pos) : pos == slot
+            case "nfl", "cfb":
+                if slot == "FLEX" { return ["RB", "WR", "TE"].contains(pos) }
+                if slot == "SFLEX" { return ["QB", "RB", "WR", "TE"].contains(pos) }
+                return pos == slot
             default: return false // ncaam: positions are all UTIL → fall back to any
             }
         }

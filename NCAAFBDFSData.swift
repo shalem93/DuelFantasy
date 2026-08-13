@@ -96,7 +96,7 @@ struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
                         gameID: gameID,
                         ratings: ratings
                     )
-                    return Array(roster.prefix(10))
+                    return roster   // already position-capped in fetchNCAAFBRoster
                 }
             }
             var allPlayers: [DFSPlayer] = []
@@ -175,7 +175,8 @@ struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
             league: "CFB",
             mainSalaryCap: 50000,
             mainLineupSize: 8,
-            mainRosterSlots: nil,
+            // DK college classic layout — SFLEX (superflex) takes QB too.
+            mainRosterSlots: ["QB", "RB", "RB", "WR", "WR", "WR", "FLEX", "SFLEX"],
             isSingleGameSlate: isSingleGame,
             includedGames: includedGames,
             mainPlayers: sortedPlayers
@@ -309,7 +310,9 @@ struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
             return []
         }
 
-        let validPositions: Set<String> = ["QB", "RB", "WR", "TE", "K", "PK"]
+        // No K — DK's college classic (QB/2RB/3WR/FLEX/SFLEX) has no
+        // kicker slot, so kickers would be undraftable dead weight.
+        let validPositions: Set<String> = ["QB", "RB", "WR", "TE"]
         var players: [DFSPlayer] = []
 
         // Parse athletes from roster groups
@@ -357,9 +360,21 @@ struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
             }
         }
 
-        // Sort by projected points descending and return top 10
+        // Trim per POSITION, not by a flat projection cut — a flat top-10
+        // keeps QBs/RBs/WRs and cuts every TE, leaving FLEX/SFLEX pools
+        // thin. Caps roughly match a DK college slate's per-team depth.
         players.sort { $0.projectedPoints > $1.projectedPoints }
-        return Array(players.prefix(10))
+        let capsByPosition = ["QB": 2, "RB": 4, "WR": 5, "TE": 2]
+        var counts: [String: Int] = [:]
+        var topPlayers: [DFSPlayer] = []
+        for player in players {
+            let cap = capsByPosition[player.position] ?? 0
+            if (counts[player.position] ?? 0) < cap {
+                topPlayers.append(player)
+                counts[player.position, default: 0] += 1
+            }
+        }
+        return topPlayers
     }
 
     // MARK: - Fetch NCAAFB Ratings
