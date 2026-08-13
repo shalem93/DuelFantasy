@@ -6780,20 +6780,32 @@ final class DFSViewModel {
     func unregisterEntry(lineupNumber: Int = 1) async {
         guard let tournament else { return }
         guard !isTournamentLocked else { return }
+        await unregisterEntry(tournamentID: tournament.id, lineupNumber: lineupNumber)
+    }
+
+    /// Withdraw a submitted lineup by tournament id — usable from the My
+    /// Contests cards, which aren't tied to the currently SELECTED
+    /// tournament. Refunds the entry fee. No-op once the contest locks.
+    func unregisterEntry(tournamentID: String, lineupNumber: Int) async {
+        // Authoritative lock re-check when the slate is loaded; the
+        // upcoming card already gates on pre-lock display.
+        let knownTournament = tournaments.first(where: { $0.id == tournamentID })
+        if let t = knownTournament, Date() >= lockTimeForTournament(t) { return }
         guard let token = accessToken, let userID else { return }
         do {
-            try await SupabaseService.shared.unregisterEntry(tournamentID: tournament.id, userID: userID, lineupNumber: lineupNumber, accessToken: token)
-            selectedPlayerIDs = []
-            // Refund entry fee
-            rrScore += tournament.entryFee
+            try await SupabaseService.shared.unregisterEntry(tournamentID: tournamentID, userID: userID, lineupNumber: lineupNumber, accessToken: token)
+            if tournament?.id == tournamentID { selectedPlayerIDs = [] }
+            // Refund entry fee (all DFS contests are 10 RR; use the real
+            // value when the tournament is loaded)
+            rrScore += knownTournament?.entryFee ?? 10
             // Remove specific lineup from cache
-            if var entries = userEntryRecords[tournament.id] {
+            if var entries = userEntryRecords[tournamentID] {
                 entries.removeAll { ($0.lineupNumber ?? 1) == lineupNumber }
                 if entries.isEmpty {
-                    userEntryRecords.removeValue(forKey: tournament.id)
-                    enteredTournamentIDs.remove(tournament.id)
+                    userEntryRecords.removeValue(forKey: tournamentID)
+                    enteredTournamentIDs.remove(tournamentID)
                 } else {
-                    userEntryRecords[tournament.id] = entries
+                    userEntryRecords[tournamentID] = entries
                 }
             }
             await refreshRemoteEntries()

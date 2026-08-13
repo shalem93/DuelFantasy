@@ -108,6 +108,7 @@ struct DFSContestView: View {
     @Environment(\.scenePhase) private var scenePhase
     /// A past result the admin is confirming deletion of.
     @State private var pendingDeletion: DFSResult?
+    @State private var pendingWithdrawal: DFSEntryRecord?
     @State private var selectedTab: DFSTab = .today
     // Open on the highest-priority IN-SEASON sport (the off-season ones sort to
     // the back), so the tab never lands on a dead pill like NBA in June showing
@@ -3762,6 +3763,25 @@ struct DFSContestView: View {
                             .fixedSize()
                     }
                     Spacer()
+                    // Pre-lock only: back out of the contest entirely
+                    // (confirmation → entry fee refunded).
+                    Button {
+                        Haptics.light()
+                        pendingWithdrawal = entry
+                    } label: {
+                        VStack(spacing: 3) {
+                            Image(systemName: "trash")
+                                .font(.subheadline)
+                            Text("WITHDRAW")
+                                .font(.system(size: 8, weight: .bold))
+                        }
+                        .foregroundStyle(.white.opacity(0.85))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(.white.opacity(0.15))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                    .buttonStyle(.plain)
                 } else {
                     if let rank {
                         VStack(spacing: 2) {
@@ -3804,6 +3824,24 @@ struct DFSContestView: View {
         .background(gradientForTournament(entry.tournamentID))
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .shadow(color: .black.opacity(0.15), radius: 12, y: 6)
+        .confirmationDialog(
+            "Withdraw this lineup?",
+            isPresented: Binding(
+                get: { pendingWithdrawal?.tournamentID == entry.tournamentID
+                    && (pendingWithdrawal?.lineupNumber ?? 1) == lineupNumber },
+                set: { if !$0 { pendingWithdrawal = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Withdraw & Refund Entry", role: .destructive) {
+                pendingWithdrawal = nil
+                Haptics.medium()
+                Task { await vm.unregisterEntry(tournamentID: entry.tournamentID, lineupNumber: lineupNumber) }
+            }
+            Button("Cancel", role: .cancel) { pendingWithdrawal = nil }
+        } message: {
+            Text("Removes this lineup from the contest and refunds your entry fee. You can re-enter any time before lock.")
+        }
         .contextMenu {
             if isAdmin {
                 Button(role: .destructive) {
