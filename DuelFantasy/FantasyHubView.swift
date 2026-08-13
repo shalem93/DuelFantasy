@@ -169,10 +169,10 @@ struct FantasyHubView: View {
                 soccerTiersViewModel.hasAttemptedLoad = true
                 // Load Best Ball leagues (with matchup previews) so the
                 // ACTIVE CONTESTS section shows live scoreboards without the
-                // user having to open Best Ball first.
-                if bestBallViewModel.myLeagues.isEmpty {
-                    await bestBallViewModel.loadMyLeagues()
-                }
+                // user having to open Best Ball first. Stale-aware: an
+                // empty-only guard once froze a partially-loaded list (a
+                // single league) for the whole session.
+                await bestBallViewModel.refreshMyLeaguesIfStale()
             }
             // Load past results keyed on accessToken — `.task(id:)` fires
             // both on initial appearance AND every time the id changes,
@@ -183,8 +183,8 @@ struct FantasyHubView: View {
             // on its token guard and the section stays empty until the user
             // opens Best Ball. Re-fire when the token lands.
             .task(id: bestBallViewModel.accessToken) {
-                if bestBallViewModel.accessToken != nil, bestBallViewModel.myLeagues.isEmpty {
-                    await bestBallViewModel.loadMyLeagues()
+                if bestBallViewModel.accessToken != nil {
+                    await bestBallViewModel.refreshMyLeaguesIfStale()
                 }
             }
             .task(id: tennisBracketViewModel.accessToken) {

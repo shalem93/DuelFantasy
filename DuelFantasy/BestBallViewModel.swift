@@ -257,19 +257,55 @@ final class BestBallViewModel {
         }
     }
 
+    private var myLeaguesLoadedAt: Date?
+
+    /// Reload My Leagues when the list is empty OR stale — the old
+    /// empty-only guard meant a partial/failed load could freeze a wrong
+    /// list for the whole session.
+    func refreshMyLeaguesIfStale(maxAge: TimeInterval = 60) async {
+        if myLeagues.isEmpty
+            || myLeaguesLoadedAt == nil
+            || Date().timeIntervalSince(myLeaguesLoadedAt ?? .distantPast) > maxAge {
+            await loadMyLeagues()
+        }
+    }
+
     func loadMyLeagues() async {
         guard let uid = userID, let token = accessToken else { return }
         do {
             let memberships = try await SupabaseService.shared.fetchUserMemberships(userID: uid, accessToken: token)
             myMemberships = memberships
             let leagueIDs = Set(memberships.map { $0.leagueId })
-            var leagues: [BestBallLeague] = []
-            for id in leagueIDs {
-                if let record = try? await SupabaseService.shared.fetchLeague(id: id, accessToken: token) {
-                    leagues.append(record.toModel())
+            var fetched: [String: BestBallLeague] = [:]
+            await withTaskGroup(of: BestBallLeague?.self) { group in
+                for id in leagueIDs {
+                    group.addTask {
+                        (try? await SupabaseService.shared.fetchLeague(id: id, accessToken: token))?.toModel()
+                    }
+                }
+                for await league in group {
+                    if let league { fetched[league.id] = league }
                 }
             }
+            // A transient per-league fetch failure must NOT drop a league
+            // from the list — replacing wholesale with the survivors once
+            // left a single league in My Leagues (and the hub only
+            // auto-reloads when the list is EMPTY, so it stuck). Keep the
+            // previously loaded copy for any membership whose fetch failed.
+            let previousByID = Dictionary(myLeagues.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            var leagues: [BestBallLeague] = []
+            for id in leagueIDs {
+                if let league = fetched[id] {
+                    leagues.append(league)
+                } else if let previous = previousByID[id] {
+                    leagues.append(previous)
+                }
+            }
+            if leagues.count < leagueIDs.count {
+                print("[BestBall] loadMyLeagues resolved \(leagues.count)/\(leagueIDs.count) leagues (\(fetched.count) fresh)")
+            }
             myLeagues = leagues.sorted { $0.createdAt > $1.createdAt }
+            myLeaguesLoadedAt = Date()
             BestBallDraftNotifier.syncScheduledDraftNotifications(leagues: myLeagues)
 
             // Check which completed leagues the user won (rank 1)
