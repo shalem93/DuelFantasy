@@ -170,10 +170,18 @@ struct ESPNUFCDFSSlateProvider: DFSSlateProvider {
         let classicRate = cardMatchRate(of: rgSalaries)
         let showdownRate = cardMatchRate(of: ufcShowdownSalaries)
 
+        // 60%, not a bare plurality: DK prices whole cards at once, so the
+        // REAL slate matches ~90% of the ESPN card (name quirks only). A
+        // lower bar let a partial early feed (main card only) or an
+        // adjacent event's slate through, and the unmatched majority got
+        // calibrated into that skewed price range — the "12 fighters all
+        // $10-12K" early-week look. Below 60% we show nothing and wait
+        // for the final card.
+        let offerThreshold = 0.60
         let finalPlayers: [DFSPlayer]
-        if classicRate > 0.30 {
+        if classicRate >= offerThreshold {
             finalPlayers = applyRealSalaries(rgSalaries, to: players, label: "classic \(Int(classicRate * 100))%")
-        } else if showdownRate > 0.30 {
+        } else if showdownRate >= offerThreshold {
             // No classic slate for this card yet, but DK's per-fight
             // showdown prices cover it — real numbers, same scale.
             finalPlayers = applyRealSalaries(ufcShowdownSalaries, to: players, label: "showdown \(Int(showdownRate * 100))%")
