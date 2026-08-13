@@ -427,12 +427,17 @@ struct DFSLineupBuilderView: View {
             "SP": 3, "RP": 11, "1B": 12, "2B": 13, "3B": 14, "SS": 15, "OF": 16, "UTIL": 17,  // MLB (SP before C)
             "W": 20, "D": 21,  // NHL
             "GK": 30, "DEF": 31, "MID": 32, "FWD": 33,  // Soccer
+            "QB": 40, "RB": 41, "WR": 42, "TE": 43, "FLEX": 44, "DST": 45, "K": 46,  // Football
         ]
         let excluded: Set<String> = ["—"]
         var unique = Set(viewModel.activePlayers.map(\.position)).subtracting(excluded)
         // Always include UTIL for MLB and NHL so users can browse all batters/skaters
         if viewModel.sport == "MLB" || viewModel.sport == "NHL" {
             unique.insert("UTIL")
+        }
+        // Virtual FLEX pill for football (RB/WR/TE) — matches the DK slot.
+        if viewModel.sport == "NFL" || viewModel.sport == "CFB" {
+            unique.insert("FLEX")
         }
         return unique.sorted { (order[$0] ?? 99) < (order[$1] ?? 99) }
     }

@@ -184,7 +184,16 @@ struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
                 var applied = 0
                 var calibrated = 0
                 finalPlayers = allPlayers.map { player in
-                    if let realSalary = RotoGrindersSalaryProvider.lookupSalary(espnName: player.name, in: realSalaries) {
+                    // DK names team defenses by nickname ("49ers"); ESPN
+                    // gives the full display name ("San Francisco 49ers"),
+                    // so DSTs need a nickname retry or they all fall into
+                    // the calibrated-estimate branch.
+                    var lookedUp = RotoGrindersSalaryProvider.lookupSalary(espnName: player.name, in: realSalaries)
+                    if lookedUp == nil, player.position == "DST",
+                       let nickname = player.name.split(separator: " ").last {
+                        lookedUp = realSalaries[RotoGrindersSalaryProvider.normalizeName(String(nickname))]
+                    }
+                    if let realSalary = lookedUp {
                         applied += 1
                         var matched = DFSPlayer(
                             id: player.id, name: player.name, team: player.team,
@@ -242,7 +251,9 @@ struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
             league: "NFL",
             mainSalaryCap: 50000,
             mainLineupSize: 9,
-            mainRosterSlots: nil,
+            // DK Classic layout — enforced per-slot by the lineup builder
+            // and the bot drafter (FLEX = RB/WR/TE only).
+            mainRosterSlots: ["QB", "RB", "RB", "WR", "WR", "WR", "TE", "FLEX", "DST"],
             isSingleGameSlate: isSingleGame,
             includedGames: includedGames,
             mainPlayers: sortedPlayers
@@ -466,22 +477,29 @@ struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
 
         // Add synthetic DEF player for the team defense
         let defFPPG = estimateTeamDefenseFPPG(ratings: ratings)
-        let defSalary = estimateNFLSalary(position: "DEF", fppg: defFPPG, athleteID: "def-\(teamAbbreviation)")
-        let defProjection = projectNFLPoints(position: "DEF", fppg: defFPPG, salary: defSalary, athleteID: "def-\(teamAbbreviation)")
+        let defSalary = estimateNFLSalary(position: "DST", fppg: defFPPG, athleteID: "def-\(teamAbbreviation)")
+        let defProjection = projectNFLPoints(position: "DST", fppg: defFPPG, salary: defSalary, athleteID: "def-\(teamAbbreviation)")
 
         players.append(DFSPlayer(
             id: "nfl-def-\(teamAbbreviation)",
             name: teamDisplayName,
             team: teamAbbreviation,
-            position: "DEF",
+            position: "DST",
             salary: defSalary,
             projectedPoints: defProjection,
             gameID: gameID
         ))
 
-        // Sort by projected points descending, return top 12
+        // Sort by projected points descending, keep the top 12 — but the
+        // team defense must ALWAYS survive the trim (its ~7-9 pt
+        // projection used to get cut on deep rosters, leaving the DST
+        // slot unfillable for that team).
         players.sort { $0.projectedPoints > $1.projectedPoints }
-        let topPlayers = Array(players.prefix(12))
+        var topPlayers = Array(players.prefix(12))
+        if !topPlayers.contains(where: { $0.position == "DST" }),
+           let def = players.first(where: { $0.position == "DST" }) {
+            topPlayers.append(def)
+        }
         return topPlayers
     }
 
@@ -590,7 +608,7 @@ struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
         case "WR":  (minSal, maxSal, maxFPPG) = (3500, 8000, 18.0)
         case "TE":  (minSal, maxSal, maxFPPG) = (3000, 6500, 14.0)
         case "K":   (minSal, maxSal, maxFPPG) = (3500, 5000, 10.0)
-        case "DEF": (minSal, maxSal, maxFPPG) = (3000, 5500, 12.0)
+        case "DST": (minSal, maxSal, maxFPPG) = (3000, 5500, 12.0)
         default:    (minSal, maxSal, maxFPPG) = (3500, 7000, 15.0)
         }
 
@@ -619,7 +637,7 @@ struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
         case "WR":  salaryProj = 5.0 + salaryFraction * 15.0    // 5-20 pts
         case "TE":  salaryProj = 4.0 + salaryFraction * 12.0    // 4-16 pts
         case "K":   salaryProj = 5.0 + salaryFraction * 7.0     // 5-12 pts
-        case "DEF": salaryProj = 4.0 + salaryFraction * 8.0     // 4-12 pts
+        case "DST": salaryProj = 4.0 + salaryFraction * 8.0     // 4-12 pts
         default:    salaryProj = 5.0 + salaryFraction * 12.0
         }
 
@@ -698,14 +716,16 @@ struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
         case "WR": return "WR"
         case "TE": return "TE"
         case "K", "PK": return "K"
-        case "DEF", "DST": return "DEF"
+        case "DEF", "DST": return "DST"
         default: return upper
         }
     }
 
-    /// Check if position is relevant for NFL DFS player pool
+    /// Check if position is relevant for NFL DFS player pool. No K — DK
+    /// Classic has no kicker slot, so kickers would be undraftable dead
+    /// weight in a positional-slot lineup.
     private func isRelevantNFLPosition(_ position: String) -> Bool {
-        return ["QB", "RB", "WR", "TE", "K"].contains(position)
+        return ["QB", "RB", "WR", "TE"].contains(position)
     }
 
     /// Map NFL injury status strings to abbreviated codes

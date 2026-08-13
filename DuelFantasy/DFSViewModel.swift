@@ -1458,6 +1458,10 @@ final class DFSViewModel {
             if effectiveSport == "EPL" || effectiveSport == "UCL" {
                 return position != "GK"
             }
+            // Football FLEX = RB/WR/TE (never QB or DST), like DK.
+            if effectiveSport == "NFL" || effectiveSport == "CFB" {
+                return ["RB", "WR", "TE"].contains(position)
+            }
             return true
         case "P":
             return position == "SP" || position == "RP" || position == "P"
@@ -2572,6 +2576,10 @@ final class DFSViewModel {
             // Soccer FLEX excludes goalkeepers
             if effectiveSport == "EPL" || effectiveSport == "UCL" {
                 return player.position != "GK"
+            }
+            // Football FLEX = RB/WR/TE (never QB or DST), like DK.
+            if effectiveSport == "NFL" || effectiveSport == "CFB" {
+                return ["RB", "WR", "TE"].contains(player.position)
             }
             return true
         case "P":
@@ -9303,7 +9311,7 @@ final class DFSViewModel {
             case "nhl": botRosterSlots = ["C", "C", "W", "W", "D", "D", "UTIL", "UTIL", "G"]
             case "mlb": botRosterSlots = ["P", "P", "UTIL", "UTIL", "UTIL", "UTIL", "UTIL", "UTIL", "UTIL", "UTIL"]
             case "epl", "ucl", "wc": botRosterSlots = ["GK", "DEF", "DEF", "MID", "MID", "FWD", "FWD", "FLEX"]
-            case "nfl": botRosterSlots = ["QB", "RB", "RB", "WR", "WR", "WR", "TE", "FLEX", "DEF"]
+            case "nfl": botRosterSlots = ["QB", "RB", "RB", "WR", "WR", "WR", "TE", "FLEX", "DST"]
             case "cfb": botRosterSlots = ["QB", "RB", "RB", "WR", "WR", "WR", "TE", "FLEX"]
             case "ufc": botRosterSlots = nil  // no position constraints
             case "nba": botRosterSlots = nil
@@ -9358,7 +9366,8 @@ final class DFSViewModel {
             case "epl", "ucl", "wc": return slot == "FLEX" ? pos != "GK" : pos == slot
             case "mlb": let p: Set<String> = ["SP", "RP", "P"]; return slot == "P" ? p.contains(pos) : !p.contains(pos)
             case "nhl": return slot == "G" ? pos == "G" : pos != "G"
-            default: return false // football/ncaam: positions are all UTIL → fall back to any
+            case "nfl", "cfb": return slot == "FLEX" ? ["RB", "WR", "TE"].contains(pos) : pos == slot
+            default: return false // ncaam: positions are all UTIL → fall back to any
             }
         }
         // Precompute the candidate list per distinct slot name (salary-sorted),
