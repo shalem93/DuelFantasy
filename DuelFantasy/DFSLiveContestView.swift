@@ -555,6 +555,8 @@ struct DFSLiveContestView: View {
                                         .font(.caption2.monospacedDigit())
                                         .foregroundStyle(.secondary)
                                         .lineLimit(1)
+                                } else if isFootball {
+                                    footballStatLine(stats: stats)
                                 } else {
                                     Text("\(stats.points) PTS  \(stats.rebounds) REB  \(stats.assists) AST  \(stats.blocks) BLK  \(stats.steals) STL  \(stats.turnovers) TO")
                                         .font(.caption2.monospacedDigit())
@@ -1105,6 +1107,67 @@ struct DFSLiveContestView: View {
         viewModel.sport == "NASCAR"
     }
 
+    private var isFootball: Bool {
+        viewModel.sport == "NFL" || viewModel.sport == "CFB"
+    }
+
+    /// Football stat line from the repurposed live-stat fields (see
+    /// ESPNNFLDFSLiveScoringProvider): points=passYds, rebounds=rushYds,
+    /// assists=REC, steals=passTD, blocks=rushTD, turnovers=INT+FumL,
+    /// fgm/fga=comp/att, threePM=recTD, fta=recYds. DST rows (named
+    /// "XXX Defense"): steals=sacks, blocks=INTs, turnovers=fumbles
+    /// recovered, fgm=defTDs, fta=points allowed.
+    private func footballStatLine(stats: DFSPlayerLiveStats) -> some View {
+        Text(footballStatText(stats: stats))
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+    }
+
+    private func footballStatText(stats: DFSPlayerLiveStats) -> String {
+        if stats.name.hasSuffix("Defense") {
+            var parts = ["\(stats.steals) SCK", "\(stats.blocks) INT", "\(stats.turnovers) FR"]
+            if stats.fgm > 0 { parts.append("\(stats.fgm) TD") }
+            parts.append("\(stats.fta) PA")
+            return parts.joined(separator: "  ")
+        }
+        var parts: [String] = []
+        if stats.fga > 0 || stats.points != 0 {
+            parts.append("\(stats.fgm)/\(stats.fga) \(stats.points) PaYd")
+            if stats.steals > 0 { parts.append("\(stats.steals) PaTD") }
+        }
+        if stats.rebounds != 0 || stats.blocks > 0 {
+            parts.append("\(stats.rebounds) RuYd")
+            if stats.blocks > 0 { parts.append("\(stats.blocks) RuTD") }
+        }
+        if stats.assists > 0 || stats.fta != 0 || stats.threePM > 0 {
+            parts.append("\(stats.assists) REC \(stats.fta) ReYd")
+            if stats.threePM > 0 { parts.append("\(stats.threePM) ReTD") }
+        }
+        if stats.turnovers > 0 { parts.append("\(stats.turnovers) TO") }
+        return parts.isEmpty ? "No stats yet" : parts.joined(separator: "  ")
+    }
+
+    /// Ultra-compact football line for the 100pt leaderboard stat column.
+    private func footballCompactStats(stats: DFSPlayerLiveStats) -> String {
+        if stats.name.hasSuffix("Defense") {
+            return "\(stats.steals) SCK \(stats.blocks) INT \(stats.fta) PA"
+        }
+        if stats.fga > 0 || stats.points != 0 {
+            var line = "\(stats.points) PaYd"
+            if stats.steals > 0 { line += " \(stats.steals) TD" }
+            if stats.turnovers > 0 { line += " \(stats.turnovers) TO" }
+            return line
+        }
+        var parts: [String] = []
+        if stats.rebounds != 0 { parts.append("\(stats.rebounds) RuYd") }
+        if stats.assists > 0 || stats.fta != 0 { parts.append("\(stats.assists)-\(stats.fta) Rec") }
+        let tds = stats.blocks + stats.threePM
+        if tds > 0 { parts.append("\(tds) TD") }
+        return parts.isEmpty ? "—" : parts.joined(separator: " ")
+    }
+
     /// NASCAR stat line from the repurposed live-stat fields:
     /// points = position, rebounds = laps led, assists = laps completed,
     /// ftm = start position.
@@ -1133,8 +1196,8 @@ struct DFSLiveContestView: View {
                         .frame(width: 24, alignment: .trailing)
                     Text("TOT")
                         .frame(width: 28, alignment: .trailing)
-                } else if isMLB || isNHL {
-                    // MLB/NHL use inline stat lines per player,
+                } else if isMLB || isNHL || isFootball {
+                    // MLB/NHL/football use inline stat lines per player,
                     // so we just show a single STATS + FPTS header
                     Text("STATS")
                         .frame(width: 100, alignment: .trailing)
@@ -1352,6 +1415,14 @@ struct DFSLiveContestView: View {
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                                 .frame(width: 100, alignment: .trailing)
+                        } else if isFootball {
+                            // Football: dominant stat group (pass/rush/rec or DST)
+                            Text(footballCompactStats(stats: stats))
+                                .font(.system(size: 9).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                                .frame(width: 100, alignment: .trailing)
                         } else if isSoccer {
                             // Soccer: G, A, SOT, SV, FD
                             Text("\(stats.points)")
@@ -1409,7 +1480,7 @@ struct DFSLiveContestView: View {
                         Text("-").frame(width: 24, alignment: .trailing)
                         Text("-").frame(width: 24, alignment: .trailing)
                         Text("-").frame(width: 28, alignment: .trailing)
-                    } else if isMLB || isNHL {
+                    } else if isMLB || isNHL || isFootball {
                         Text(gameStartedOrDone ? "—" : "")
                             .frame(width: 100, alignment: .trailing)
                     } else if isSoccer {
