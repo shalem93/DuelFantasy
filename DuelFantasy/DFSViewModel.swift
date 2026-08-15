@@ -3259,7 +3259,24 @@ final class DFSViewModel {
                 // Batting orders not yet posted or don't cover all positions —
                 // use projection/salary as a proxy.
                 let likelyStarters = basePool.filter { $0.projectedPoints >= 6.0 || $0.position == "SP" || $0.position == "G" }
-                if likelyStarters.count >= lineupSize * 2 && coversAllSlots(likelyStarters) {
+                // Football also needs DEPTH per slot, not mere coverage: the
+                // 6.0-projection trim can leave 1-2 candidates per position
+                // (preseason projections cluster low), and with one candidate
+                // per slot every bot drafts the IDENTICAL lineup — the
+                // 98-100%-ownership field with three-way score ties. Require
+                // ~3 candidates per slot instance before trusting the trim.
+                let isFootballSport = effectiveSport == "NFL" || effectiveSport == "CFB"
+                func hasSlotDepth(_ pool: [DFSPlayer]) -> Bool {
+                    var needed: [String: Int] = [:]
+                    for slot in slots { needed[slot, default: 0] += 3 }
+                    for (slot, count) in needed {
+                        let have = pool.filter { self.playerMatchesSlot($0, slot: slot, isSingleGame: isSingleGame) }.count
+                        if have < count { return false }
+                    }
+                    return true
+                }
+                if likelyStarters.count >= lineupSize * 2 && coversAllSlots(likelyStarters)
+                    && (!isFootballSport || hasSlotDepth(likelyStarters)) {
                     strictBotPool = likelyStarters
                 } else {
                     // Fall back to full eligible pool (confirmed first, then all)
