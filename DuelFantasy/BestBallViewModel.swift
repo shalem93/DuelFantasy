@@ -193,6 +193,11 @@ final class BestBallViewModel {
     private let playerProvider: BestBallPlayerProvider
     private let scoringProvider: BestBallWeeklyScoringProvider
 
+    // Draft queue: player ids the user has starred to draft next, in
+    // priority order. Lives on the VM (not the view) so backing out of
+    // the draft screen doesn't lose it; auto-pick drafts from it first.
+    var draftQueue: [String] = []
+
     // Draft polling
     private var draftPollTask: Task<Void, Never>?
     /// Wall-clock of the last observed pick landing (or the drafting state
@@ -207,20 +212,29 @@ final class BestBallViewModel {
     /// Solo league (one human + bots): give a returning user a fresh
     /// clock instead of an instant auto-pick — nobody else is waiting.
     /// Multi-human leagues keep the continuous clock.
+    private var soloClockRestartAt: Date?
     func restartPickClockIfSolo() {
         let humans = currentMembers.filter { !$0.isBot }
-        if humans.count <= 1 { lastPickActivityAt = Date() }
+        if humans.count <= 1 {
+            lastPickActivityAt = Date()
+            soloClockRestartAt = Date()
+        }
     }
 
-    /// The instant the current pick's clock started: the last pick
-    /// landing, or the draft-open time if that's later — startDraft sets
-    /// draft_start_time to now+30s so every device runs the same in-draft
-    /// countdown before pick 1's clock begins.
+    /// The instant the current pick's clock started. SERVER-derived:
+    /// every device computes it from the last pick's persisted
+    /// `picked_at` timestamp, so all screens in a multi-human draft run
+    /// the SAME countdown. (The old version stamped the moment each
+    /// device OBSERVED the pick land — 2s polling plus the failover
+    /// stagger made each drafter's clock differ by many seconds.)
+    /// Draft-open time wins before pick 1 (startDraft sets it to now+30s
+    /// for the shared pre-pick countdown); the solo restart wins for a
+    /// returning solo drafter.
     var pickClockStart: Date {
-        if let opens = currentLeague?.draftStartTime, opens > lastPickActivityAt {
-            return opens
-        }
-        return lastPickActivityAt
+        var start = draftState?.picks.map(\.pickedAt).max() ?? lastPickActivityAt
+        if let opens = currentLeague?.draftStartTime, opens > start { start = opens }
+        if let solo = soloClockRestartAt, solo > start { start = solo }
+        return start
     }
 
     /// False while the in-draft pre-pick countdown is still running.
@@ -1116,6 +1130,8 @@ final class BestBallViewModel {
     }
 
     func makePick(player: BestBallPlayer) async {
+        // Drafted (by anyone) or drafting now — either way it leaves the queue.
+        draftQueue.removeAll { $0 == player.id }
         guard let state = draftState, !state.isDraftComplete,
               let token = accessToken, let uid = userID else { return }
         guard draftHasOpened else {
@@ -1901,12 +1917,22 @@ final class BestBallViewModel {
     /// Display string for a team's bye week(s): NFL has exactly one
     /// ("10"); CFB can have several open weeks in the Best Ball grid
     /// ("6,12"). nil when unknown or the table hasn't loaded.
+    /// SPORT-GATED: one VM serves every league, and CFB/NFL team
+    /// abbreviations collide ("MIA" = Hurricanes AND Dolphins) — an
+    /// ungated lookup showed Dolphins byes on Hurricanes players after
+    /// visiting an NFL league.
     func byeLabel(forTeam team: String) -> String? {
-        if let bye = nflByeWeeks[team.uppercased()] { return String(bye) }
-        if let byes = cfbByeWeeks[team.uppercased()], !byes.isEmpty {
-            return byes.map(String.init).joined(separator: ",")
+        switch currentLeague?.sport {
+        case "NFL":
+            return nflByeWeeks[team.uppercased()].map(String.init)
+        case "CFB":
+            if let byes = cfbByeWeeks[team.uppercased()], !byes.isEmpty {
+                return byes.map(String.init).joined(separator: ",")
+            }
+            return nil
+        default:
+            return nil
         }
-        return nil
     }
 
     private var byeWeeksFetchAttempted = false
@@ -1923,6 +1949,11 @@ final class BestBallViewModel {
               !cfbByeWeeksFetchAttempted else { return }
         cfbByeWeeksFetchAttempted = true
         cfbByeWeeks = await CFBByeWeekProvider.fetchByeWeeks()
+        // A partial result (network flake mid-draft) shouldn't stick for
+        // the whole session — let the next league load retry.
+        if cfbByeWeeks.count < 100 {
+            cfbByeWeeksFetchAttempted = false
+        }
     }
 
     /// Positions still needed to meet draft minimums for a member

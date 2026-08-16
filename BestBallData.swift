@@ -274,12 +274,20 @@ enum CFBByeWeekProvider {
             return (week, s, e.addingTimeInterval(24 * 3600))  // end-of-day inclusive
         }
 
+        // Dedicated session: ~138 schedule fetches through the shared
+        // 6-connections-per-host session took 30s+ mid-draft and timed
+        // out partially on slow networks.
+        let config = URLSessionConfiguration.default
+        config.httpMaximumConnectionsPerHost = 24
+        config.timeoutIntervalForRequest = 15
+        let session = URLSession(configuration: config)
+
         var byes: [String: [Int]] = [:]
         await withTaskGroup(of: (String, [Int])?.self) { group in
             for team in teams {
                 group.addTask {
                     guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/football/college-football/teams/\(team.id)/schedule?season=\(season)&seasontype=2"),
-                          let (data, response) = try? await URLSession.shared.data(from: url),
+                          let (data, response) = try? await session.data(from: url),
                           let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
                           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                           let events = json["events"] as? [[String: Any]], !events.isEmpty else { return nil }
@@ -304,7 +312,10 @@ enum CFBByeWeekProvider {
                 if let (abbr, open) = item { byes[abbr] = open }
             }
         }
-        if !byes.isEmpty, let encoded = try? JSONEncoder().encode(byes) {
+        // Only cache a substantially complete table — caching a partial
+        // fetch (network flake) used to freeze "no bye shown" for most
+        // teams permanently.
+        if byes.count >= (teams.count * 9) / 10, let encoded = try? JSONEncoder().encode(byes) {
             UserDefaults.standard.set(encoded, forKey: cacheKey)
         }
         return byes
@@ -2071,12 +2082,16 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
         if !cache.cfbAvgFetched {
             cache.cfbAvgFetched = true
             let season = cache.cfbLeadersSeason ?? (espnSeasonYear(for: "CFB") - 1)
-            let projectedIDs = Set(cache.leagueProjections.keys)
             var avgs: [String: Double] = [:]
             await withTaskGroup(of: (String, Double)?.self) { group in
+                // The whole pool (~900 players after per-team position
+                // caps), not just leaders-projected ones — restricting to
+                // leaders left most draftable players showing "–" even
+                // when they played last season. ~20KB per request on the
+                // 24-connection sweep session; players with no stats last
+                // season 404 cheaply.
                 for player in players {
                     let espnID = String(player.id.dropFirst("cfb-".count))
-                    guard projectedIDs.contains(espnID) else { continue }
                     group.addTask {
                         guard let avg = await self.fetchCFBSeasonAverage(espnID: espnID, season: season) else { return nil }
                         return (player.id, avg)

@@ -5,7 +5,16 @@ struct BestBallDraftView: View {
     @EnvironmentObject private var auth: AuthViewModel
     @State private var searchText: String = ""
     @State private var selectedPosition: String? = nil
+    @State private var selectedTeam: String? = nil
     @State private var showRoster: Bool = false
+    /// Available vs already-drafted list.
+    private enum DraftListMode { case available, drafted }
+    @State private var listMode: DraftListMode = .available
+    /// Tappable column sort. nil = the board's default order.
+    private enum DraftSortColumn { case adp, avg, proj }
+    @State private var sortColumn: DraftSortColumn? = nil
+    @State private var sortAscending = false
+    @FocusState private var searchFocused: Bool
     @State private var pickTimer: Int = 30
     @State private var timerTask: Task<Void, Never>? = nil
     @State private var isAutoPicking: Bool = false
@@ -256,8 +265,9 @@ struct BestBallDraftView: View {
                 HStack {
                     Image(systemName: "magnifyingglass")
                         .foregroundStyle(.secondary)
-                    TextField("Search players", text: $searchText)
+                    TextField("Search players or teams", text: $searchText)
                         .font(.subheadline)
+                        .focused($searchFocused)
                 }
                 .padding(8)
                 .background(Color(.systemGray6))
@@ -280,9 +290,42 @@ struct BestBallDraftView: View {
                     .background(Color(.systemGray6))
                     .clipShape(Capsule())
                 }
+
+                Menu {
+                    Button("All") { selectedTeam = nil }
+                    ForEach(teamsInPool(state), id: \.self) { team in
+                        Button(team) { selectedTeam = team }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(selectedTeam ?? "TEAM")
+                            .font(.caption.weight(.semibold))
+                        Image(systemName: "chevron.down")
+                            .font(.caption2)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(Color(.systemGray6))
+                    .clipShape(Capsule())
+                }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
+
+            // Available / Drafted toggle
+            Picker("", selection: $listMode) {
+                Text("Available").tag(DraftListMode.available)
+                Text("Drafted (\(state.picks.count))").tag(DraftListMode.drafted)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 6)
+
+            // Queue strip
+            let queue = queuedAvailablePlayers(state)
+            if !queue.isEmpty, listMode == .available {
+                queueStrip(queue)
+            }
 
             // Column headers
             HStack {
@@ -305,23 +348,21 @@ struct BestBallDraftView: View {
                         .frame(width: 48, alignment: .trailing)
                 } else {
                     if viewModel.currentLeague?.sport == "NFL" {
-                        Text(isSuperflexLeague ? "ADP·2QB" : "ADP")
-                            .frame(width: 52, alignment: .trailing)
+                        sortableHeader(isSuperflexLeague ? "ADP·2QB" : "ADP", column: .adp, width: 52)
                     }
                     if viewModel.currentLeague?.sport == "EPL" || viewModel.currentLeague?.sport == "CFB" {
-                        Text("AVG")
-                            .frame(width: 44, alignment: .trailing)
+                        sortableHeader("AVG", column: .avg, width: 44)
                     }
-                    Text("PROJ")
-                        .frame(width: 52, alignment: .trailing)
+                    sortableHeader("PROJ", column: .proj, width: 52)
                 }
             }
             .font(.caption2.weight(.bold))
             .foregroundStyle(.secondary)
             .padding(.leading, 16)
-            // Rows always reserve a trailing quick-draft slot (34 + 6);
-            // the header carries the same inset so columns line up.
-            .padding(.trailing, 40)
+            // Rows always reserve trailing queue-star (28) + quick-draft
+            // (34 + 6) slots; the header carries the same inset so the
+            // columns line up.
+            .padding(.trailing, 68)
             .padding(.vertical, 6)
 
             Divider()
@@ -329,6 +370,9 @@ struct BestBallDraftView: View {
             // Players
             ScrollView {
                 LazyVStack(spacing: 0) {
+                    if listMode == .drafted {
+                        draftedRows(state)
+                    } else {
                     ForEach(filteredPlayers(state)) { player in
                         // Row tap opens the player card (game logs); the
                         // trailing + is the one-tap draft when it's the
@@ -345,6 +389,7 @@ struct BestBallDraftView: View {
                                 Text(player.name)
                                     .font(.subheadline)
                                     .lineLimit(1)
+                                    .minimumScaleFactor(0.72)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                 Text(player.position)
                                     .font(.caption)
@@ -422,6 +467,25 @@ struct BestBallDraftView: View {
                         }
                         .buttonStyle(.plain)
 
+                        // Queue star — add to / remove from the auto-pick
+                        // queue (VM-held so it survives leaving the screen).
+                        let isQueued = viewModel.draftQueue.contains(player.id)
+                        Button {
+                            Haptics.light()
+                            if isQueued {
+                                viewModel.draftQueue.removeAll { $0 == player.id }
+                            } else {
+                                viewModel.draftQueue.append(player.id)
+                            }
+                        } label: {
+                            Image(systemName: isQueued ? "star.fill" : "star")
+                                .font(.subheadline)
+                                .foregroundStyle(isQueued ? .yellow : Color(.systemGray3))
+                                .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.plain)
+                        .frame(width: 28)
+
                         // Quick-draft slot is ALWAYS reserved so the stat
                         // columns never shift when the clock flips to the
                         // user — the button just fades in.
@@ -445,9 +509,122 @@ struct BestBallDraftView: View {
 
                         Divider().padding(.leading, 16)
                     }
+                    }
                 }
             }
+            .scrollDismissesKeyboard(.immediately)
+            .simultaneousGesture(TapGesture().onEnded { searchFocused = false })
         }
+    }
+
+    /// The drafted-so-far list (newest first): who took whom, and where.
+    @ViewBuilder
+    private func draftedRows(_ state: BestBallDraftState) -> some View {
+        ForEach(Array(state.picks.reversed()), id: \.id) { pick in
+            HStack(spacing: 8) {
+                Text("R\(pick.round)")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 32, height: 20)
+                    .background(brandPurple.opacity(0.7))
+                    .clipShape(Capsule())
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(pick.playerName)
+                        .font(.subheadline.weight(.medium))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    Text("\(pick.playerPosition) • \(pick.playerTeam)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(viewModel.memberName(for: pick.memberID))
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(pick.memberID == viewModel.myMemberID ? brandPurple : .primary)
+                        .lineLimit(1)
+                    Text("Pick \(pick.pickNumber)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+
+            Divider().padding(.leading, 16)
+        }
+    }
+
+    /// Queued players still on the board, in priority order.
+    private func queuedAvailablePlayers(_ state: BestBallDraftState) -> [BestBallPlayer] {
+        let pickedIDs = state.pickedPlayerIDs()
+        return viewModel.draftQueue.compactMap { id in
+            guard !pickedIDs.contains(id) else { return nil }
+            return viewModel.availablePlayers.first(where: { $0.id == id })
+        }
+    }
+
+    private func queueStrip(_ queue: [BestBallPlayer]) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                Image(systemName: "star.fill")
+                    .font(.caption)
+                    .foregroundStyle(.yellow)
+                ForEach(Array(queue.enumerated()), id: \.element.id) { index, player in
+                    HStack(spacing: 4) {
+                        Text("\(index + 1). \(tickerLastName(player.name))")
+                            .font(.caption.weight(.medium))
+                            .lineLimit(1)
+                        Button {
+                            viewModel.draftQueue.removeAll { $0 == player.id }
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(Color.yellow.opacity(0.12))
+                    .clipShape(Capsule())
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 6)
+        }
+    }
+
+    private func teamsInPool(_ state: BestBallDraftState) -> [String] {
+        Set(viewModel.availablePlayers.map(\.team)).subtracting([""]).sorted()
+    }
+
+    /// Tappable sort header: first tap sorts best-first, second flips,
+    /// third returns to the board's default order.
+    private func sortableHeader(_ title: String, column: DraftSortColumn, width: CGFloat) -> some View {
+        Button {
+            Haptics.light()
+            let bestFirstAscending = (column == .adp)   // low ADP = best
+            if sortColumn != column {
+                sortColumn = column
+                sortAscending = bestFirstAscending
+            } else if sortAscending == bestFirstAscending {
+                sortAscending = !bestFirstAscending
+            } else {
+                sortColumn = nil
+            }
+        } label: {
+            HStack(spacing: 1) {
+                Text(title)
+                if sortColumn == column {
+                    Image(systemName: sortAscending ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 7, weight: .bold))
+                }
+            }
+            .foregroundStyle(sortColumn == column ? brandPurple : .secondary)
+            .frame(width: width, alignment: .trailing)
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Inspect Other Member Sheet
@@ -764,6 +941,10 @@ struct BestBallDraftView: View {
             }
         }
 
+        if let team = selectedTeam {
+            players = players.filter { $0.team == team }
+        }
+
         if !searchText.isEmpty {
             let query = searchText.lowercased()
             players = players.filter {
@@ -791,6 +972,34 @@ struct BestBallDraftView: View {
             players.sort { $0.lastSeasonHR > $1.lastSeasonHR }
         }
 
+        // Tapped-column sort overrides the board's default order.
+        if let column = sortColumn {
+            switch column {
+            case .adp:
+                let superflex = isSuperflexLeague
+                players.sort { a, b in
+                    switch (a.adp(superflex: superflex), b.adp(superflex: superflex)) {
+                    case let (x?, y?): return sortAscending ? x < y : x > y
+                    case (.some, .none): return true
+                    case (.none, .some): return false
+                    default: return a.projectedPoints > b.projectedPoints
+                    }
+                }
+            case .avg:
+                players.sort { a, b in
+                    let x = a.avgPointsPerMatch ?? -1
+                    let y = b.avgPointsPerMatch ?? -1
+                    return sortAscending ? x < y : x > y
+                }
+            case .proj:
+                players.sort {
+                    sortAscending
+                        ? $0.projectedPoints < $1.projectedPoints
+                        : $0.projectedPoints > $1.projectedPoints
+                }
+            }
+        }
+
         return players
     }
 
@@ -815,8 +1024,13 @@ struct BestBallDraftView: View {
                 pickTimer = remainingSeconds()
                 if pickTimer <= 0, viewModel.isMyTurn, !isAutoPicking {
                     isAutoPicking = true
-                    if let state, let first = filteredPlayers(state).first {
-                        await viewModel.makePick(player: first)
+                    if let state {
+                        // Auto-pick honors the queue first, then falls
+                        // back to the best visible player.
+                        let queued = queuedAvailablePlayers(state).first
+                        if let pick = queued ?? filteredPlayers(state).first {
+                            await viewModel.makePick(player: pick)
+                        }
                     }
                     isAutoPicking = false
                 }
