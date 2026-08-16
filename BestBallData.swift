@@ -655,11 +655,11 @@ enum BestBallLineupConfig {
                     return false
                 }) {
                     result.append((label: constraint.label, playerID: remaining.remove(at: idx)))
-                } else if !remaining.isEmpty {
-                    // No eligible match — fall back to next-best by points so
-                    // the slot still renders rather than leaving a blank.
-                    result.append((label: constraint.label, playerID: remaining.removeFirst()))
                 }
+                // No eligible player left → the slot stays EMPTY. The old
+                // fallback shoved the next-best player in regardless of
+                // position, which displayed (and scored) a QB in the
+                // RB/WR/TE FLEX slot on QB-overloaded rosters.
             }
         }
         return result
@@ -783,8 +783,8 @@ enum BestBallScoringEngine {
         )
         let candidates = playerPoints.sorted { $0.value > $1.value }
 
-        guard !constraints.isEmpty, candidates.count >= starters else {
-            // Fallback: top-N by points
+        guard !constraints.isEmpty else {
+            // No positional rules (legacy slot-less shapes): top-N by points.
             let topN = Array(candidates.prefix(scoringSlots))
             return (topN.reduce(0.0) { $0 + $1.value }, topN.map { $0.key })
         }
@@ -806,8 +806,21 @@ enum BestBallScoringEngine {
         }
 
         if bestLineup.isEmpty {
-            let topN = Array(candidates.prefix(scoringSlots))
-            return (topN.reduce(0.0) { $0 + $1.value }, topN.map { $0.key })
+            // The constraints can't ALL be filled from this roster (a
+            // QB-heavy team with no FLEX-eligible player left, or fewer
+            // scored players than starters). Score the best PARTIAL
+            // lineup — fill the slots that are fillable, leave the rest
+            // empty — instead of the old top-N-regardless-of-position
+            // fallback, which quietly scored a 6-QB "lineup" in a 1-QB
+            // league.
+            let assigned = BestBallLineupConfig.assignStartersToSlots(
+                scoringIDs: playerIDs,
+                positions: playerPositions,
+                points: playerPoints,
+                constraints: constraints
+            )
+            let ids = assigned.map(\.playerID)
+            return (ids.reduce(0.0) { $0 + (playerPoints[$1] ?? 0) }, ids)
         }
         return (bestTotal, bestLineup)
     }
