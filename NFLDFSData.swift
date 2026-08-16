@@ -495,7 +495,9 @@ struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
         // teams, leaving the TE/DST slots unfillable. Caps roughly match
         // a DK slate's per-team depth.
         players.sort { $0.projectedPoints > $1.projectedPoints }
-        let capsByPosition = ["QB": 2, "RB": 5, "WR": 6, "TE": 3, "DST": 1]
+        // DK-slate-like depth. QB 4, not 2 — preseason teams rotate 3-4
+        // QBs and the tighter cap cut real DK-priced passers (Mendoza).
+        let capsByPosition = ["QB": 4, "RB": 7, "WR": 9, "TE": 4, "DST": 1]
         var counts: [String: Int] = [:]
         var topPlayers: [DFSPlayer] = []
         for player in players {

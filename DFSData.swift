@@ -6782,10 +6782,134 @@ struct ESPNPlayerGameLogProvider {
         }
 
         if cleanedID.hasPrefix("nfl-") || cleanedID.hasPrefix("cfb-") {
-            return parseFootballGameLog(json: json, limit: limit)
+            let log = parseFootballGameLog(json: json, limit: limit)
+            // ESPN's gamelog endpoint has NO preseason — in August every
+            // NFL log came back empty even for players who just played.
+            // Build one from team schedule + box scores instead. Only for
+            // the current season's tab so a prior year's empty log doesn't
+            // show this preseason under last year's label.
+            let currentYear = Calendar.current.component(.year, from: Date())
+            if log.isEmpty, cleanedID.hasPrefix("nfl-"),
+               season == nil || season == currentYear {
+                return await fetchNFLPreseasonGameLog(espnID: espnID, limit: limit)
+            }
+            return log
         }
 
         return parseGameLog(json: json, limit: limit)
+    }
+
+    /// Preseason NFL game log from team schedule (seasontype=1) + game
+    /// summaries — same schedule→box-score approach as the soccer log.
+    private func fetchNFLPreseasonGameLog(espnID: String, limit: Int) async -> [DFSPlayerGameLog] {
+        // 1. Athlete → current team
+        guard let athURL = URL(string: "https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/\(espnID)") else { return [] }
+        var athReq = URLRequest(url: athURL)
+        athReq.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+        guard let (athData, athResp) = try? await session.data(for: athReq),
+              let athHTTP = athResp as? HTTPURLResponse, (200..<300).contains(athHTTP.statusCode),
+              let athJSON = try? JSONSerialization.jsonObject(with: athData) as? [String: Any] else { return [] }
+        let athlete = (athJSON["athlete"] as? [String: Any]) ?? athJSON
+        let teamDict = athlete["team"] as? [String: Any]
+        guard let teamID = (teamDict?["id"] as? String) ?? (teamDict?["id"] as? Int).map(String.init) else { return [] }
+
+        // 2. Preseason schedule → completed games
+        guard let schedURL = URL(string: "https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/\(teamID)/schedule?seasontype=1"),
+              let (schedData, schedResp) = try? await session.data(from: schedURL),
+              let schedHTTP = schedResp as? HTTPURLResponse, (200..<300).contains(schedHTTP.statusCode),
+              let schedJSON = try? JSONSerialization.jsonObject(with: schedData) as? [String: Any],
+              let events = schedJSON["events"] as? [[String: Any]] else { return [] }
+
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime]
+        let displayFormatter = DateFormatter()
+        displayFormatter.dateFormat = "M/d"
+
+        var logs: [DFSPlayerGameLog] = []
+        for event in events {
+            guard let comp = (event["competitions"] as? [[String: Any]])?.first,
+                  let statusType = (comp["status"] as? [String: Any])?["type"] as? [String: Any],
+                  (statusType["state"] as? String) == "post",
+                  let eventID = event["id"] as? String else { continue }
+            // Schedule dates lack seconds: "2026-08-14T00:00Z"
+            let rawDate = (event["date"] as? String) ?? ""
+            let normalized = rawDate.count == 17 ? String(rawDate.dropLast()) + ":00Z" : rawDate
+            let date = iso.date(from: normalized) ?? .distantPast
+
+            var oppAbbr = "?"
+            var isHome = false
+            for competitor in (comp["competitors"] as? [[String: Any]]) ?? [] {
+                let team = competitor["team"] as? [String: Any]
+                let cid = (team?["id"] as? String) ?? (team?["id"] as? Int).map(String.init) ?? ""
+                if cid == teamID {
+                    isHome = (competitor["homeAway"] as? String) == "home"
+                } else {
+                    oppAbbr = team?["abbreviation"] as? String ?? "?"
+                }
+            }
+
+            guard let sumURL = URL(string: "https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary?event=\(eventID)"),
+                  let (sumData, sumResp) = try? await session.data(from: sumURL),
+                  let sumHTTP = sumResp as? HTTPURLResponse, (200..<300).contains(sumHTTP.statusCode),
+                  let sumJSON = try? JSONSerialization.jsonObject(with: sumData) as? [String: Any],
+                  let teams = (sumJSON["boxscore"] as? [String: Any])?["players"] as? [[String: Any]] else { continue }
+
+            var passYds = 0.0, passTD = 0.0, ints = 0.0
+            var rushYds = 0.0, rushTD = 0.0
+            var rec = 0.0, recYds = 0.0, recTD = 0.0
+            var fumblesLost = 0.0
+            var appeared = false
+            for teamBlock in teams {
+                for category in (teamBlock["statistics"] as? [[String: Any]]) ?? [] {
+                    guard let labels = category["labels"] as? [String],
+                          let catName = category["name"] as? String else { continue }
+                    for ath in (category["athletes"] as? [[String: Any]]) ?? [] {
+                        let aid = ((ath["athlete"] as? [String: Any])?["id"] as? String) ?? ""
+                        guard aid == espnID, let stats = ath["stats"] as? [String] else { continue }
+                        appeared = true
+                        var line: [String: Double] = [:]
+                        for (label, value) in zip(labels, stats) {
+                            line[label] = Double(value.replacingOccurrences(of: ",", with: "")) ?? 0
+                        }
+                        switch catName {
+                        case "passing":
+                            passYds = line["YDS"] ?? 0; passTD = line["TD"] ?? 0; ints = line["INT"] ?? 0
+                        case "rushing":
+                            rushYds = line["YDS"] ?? 0; rushTD = line["TD"] ?? 0
+                        case "receiving":
+                            rec = line["REC"] ?? 0; recYds = line["YDS"] ?? 0; recTD = line["TD"] ?? 0
+                        case "fumbles":
+                            fumblesLost = line["LOST"] ?? 0
+                        default: break
+                        }
+                    }
+                }
+            }
+            guard appeared else { continue }
+
+            // Same DK scoring + field mapping as parseFootballGameLog.
+            var fpts = passYds * 0.04 + passTD * 4 - ints * 1
+                + rushYds * 0.1 + rushTD * 6
+                + rec * 1 + recYds * 0.1 + recTD * 6
+                - fumblesLost * 1
+            if passYds >= 300 { fpts += 3 }
+            if rushYds >= 100 { fpts += 3 }
+            if recYds >= 100 { fpts += 3 }
+
+            logs.append(DFSPlayerGameLog(
+                id: eventID,
+                date: displayFormatter.string(from: date),
+                sortDate: date,
+                opponent: "\(isHome ? "vs" : "@") \(oppAbbr)",
+                minutes: "",
+                points: Int(passYds), rebounds: Int(passTD), assists: Int(ints),
+                steals: Int(rushYds), blocks: Int(rushTD), turnovers: Int(rec),
+                fgm: Int(recYds), fga: Int(recTD), threePM: Int(fumblesLost),
+                threePA: 0, ftm: 0, fta: 0,
+                fantasyPoints: fpts
+            ))
+        }
+        return Array(logs.sorted { $0.sortDate > $1.sortDate }.prefix(limit))
     }
 
     /// Football (NFL/CFB) game log. The gamelog's `names` array gives
