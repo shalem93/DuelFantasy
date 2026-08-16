@@ -9403,6 +9403,25 @@ final class DFSViewModel {
         let appearedSorted: [String] = allPlayers.map(\.id)
             .sorted { detSal($0) != detSal($1) ? detSal($0) > detSal($1) : $0 < $1 }
         let posByID = Dictionary(allPlayers.map { ($0.id, $0.position) }, uniquingKeysWith: { a, _ in a })
+        let isFootballSettle = sportPrefix == "nfl" || sportPrefix == "cfb"
+        // Football settlement often runs after the slate has rolled over,
+        // so pool positions for THIS tournament's players are unknown —
+        // infer from the box-score stat shape instead: Defense rows →
+        // DST, pass attempts/yards → QB, any other ball-toucher → a
+        // generic skill tag that fits RB/WR/TE/FLEX slots. A coarse
+        // position beats the old "any appeared player" fallback, which
+        // stuffed cornerbacks into QB slots.
+        func footballInferredPos(_ pid: String) -> String {
+            let poolPos = posByID[pid] ?? ""
+            if ["QB", "RB", "WR", "TE", "DST"].contains(poolPos) { return poolPos }
+            guard let stats = snapshot.playerLiveStats[pid] else { return "" }
+            if stats.name.hasSuffix("Defense") { return "DST" }
+            if stats.fga > 0 || stats.points != 0 { return "QB" }   // pass att / pass yds
+            if stats.rebounds != 0 || stats.assists > 0 || stats.fta != 0 || stats.threePA > 0 {
+                return "SKILL"                                      // rush/rec activity
+            }
+            return ""
+        }
         // Does an appeared player's derived position fill this roster slot?
         func posFillsSlot(_ pos: String, _ slot: String) -> Bool {
             switch sportPrefix {
@@ -9410,19 +9429,27 @@ final class DFSViewModel {
             case "mlb": let p: Set<String> = ["SP", "RP", "P"]; return slot == "P" ? p.contains(pos) : !p.contains(pos)
             case "nhl": return slot == "G" ? pos == "G" : pos != "G"
             case "nfl", "cfb":
-                if slot == "FLEX" { return ["RB", "WR", "TE"].contains(pos) }
-                if slot == "SFLEX" { return ["QB", "RB", "WR", "TE"].contains(pos) }
-                return pos == slot
+                switch slot {
+                case "FLEX": return ["RB", "WR", "TE", "SKILL"].contains(pos)
+                case "SFLEX": return ["QB", "RB", "WR", "TE", "SKILL"].contains(pos)
+                case "RB", "WR", "TE": return pos == slot || pos == "SKILL"
+                default: return pos == slot   // QB, DST exact
+                }
             default: return false // ncaam: positions are all UTIL → fall back to any
             }
         }
-        // Precompute the candidate list per distinct slot name (salary-sorted),
-        // with a permissive fallback to all appeared players when none match.
+        // Precompute the candidate list per distinct slot name (salary-sorted).
         var candsBySlot: [String: [String]] = [:]
         if isLateSwapSettle, let slots = botRosterSlots {
             for slot in Set(slots) {
-                let matched = appearedSorted.filter { posFillsSlot(posByID[$0] ?? "", slot) }
-                candsBySlot[slot] = matched.isEmpty ? appearedSorted : matched
+                let matched = appearedSorted.filter {
+                    posFillsSlot(isFootballSettle ? footballInferredPos($0) : (posByID[$0] ?? ""), slot)
+                }
+                // Football: NEVER fall back to any-position — keeping the
+                // DNP placeholder beats a cornerback in the QB slot. Other
+                // sports keep the permissive fallback (their slot shapes
+                // are coarse to begin with).
+                candsBySlot[slot] = matched.isEmpty ? (isFootballSettle ? [] : appearedSorted) : matched
             }
         }
         func upgradeBotLineup(_ botName: String, _ ids: [String]) -> [String] {
