@@ -318,6 +318,13 @@ struct BestBallBrowseView: View {
         .navigationDestination(item: $pushedLeague) { ref in
             BestBallLeagueDetailView(viewModel: viewModel, leagueID: ref.id)
         }
+        .onChange(of: showCreateSheet) { _, isShowing in
+            // Runs in the PRESENTING view the instant the sheet opens —
+            // the belt to the sheet-side onAppear's suspenders.
+            if isShowing, let filter = viewModel.sportFilter, sports.contains(filter) {
+                newLeagueSport = filter
+            }
+        }
         .sheet(isPresented: $showCreateSheet) {
             createLeagueSheet
         }
@@ -410,6 +417,11 @@ struct BestBallBrowseView: View {
         return Button {
             Haptics.light()
             viewModel.sportFilter = sport
+            // Keep the create sheet's sport in lockstep with the filter
+            // pill so Create League always opens on the filtered sport.
+            if let sport, sports.contains(sport) {
+                newLeagueSport = sport
+            }
             Task { await viewModel.loadOpenLeagues() }
         } label: {
             HStack(spacing: 5) {
