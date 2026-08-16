@@ -14,6 +14,8 @@ struct BestBallDraftView: View {
     private enum DraftSortColumn { case adp, avg, proj }
     @State private var sortColumn: DraftSortColumn? = nil
     @State private var sortAscending = false
+    @State private var showTeamPicker = false
+    @State private var teamPickerSearch = ""
     @FocusState private var searchFocused: Bool
     @State private var pickTimer: Int = 30
     @State private var timerTask: Task<Void, Never>? = nil
@@ -53,6 +55,9 @@ struct BestBallDraftView: View {
         }
         .sheet(isPresented: $showRoster) {
             rosterSheet
+        }
+        .sheet(isPresented: $showTeamPicker) {
+            teamPickerSheet
         }
         .sheet(item: Binding(
             get: { inspectMemberID.map(InspectMemberID.init(id:)) },
@@ -291,11 +296,12 @@ struct BestBallDraftView: View {
                     .clipShape(Capsule())
                 }
 
-                Menu {
-                    Button("All") { selectedTeam = nil }
-                    ForEach(teamsInPool(state), id: \.self) { team in
-                        Button(team) { selectedTeam = team }
-                    }
+                // Sheet, not Menu: the 2s draft-poll refresh re-rendered
+                // an open Menu and snapped its scroll back to the top —
+                // a 130-team list was unusable.
+                Button {
+                    Haptics.light()
+                    showTeamPicker = true
                 } label: {
                     HStack(spacing: 4) {
                         Text(selectedTeam ?? "TEAM")
@@ -308,6 +314,7 @@ struct BestBallDraftView: View {
                     .background(Color(.systemGray6))
                     .clipShape(Capsule())
                 }
+                .buttonStyle(.plain)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
@@ -389,7 +396,7 @@ struct BestBallDraftView: View {
                                 Text(player.name)
                                     .font(.subheadline)
                                     .lineLimit(1)
-                                    .minimumScaleFactor(0.72)
+                                    .minimumScaleFactor(0.5)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                 Text(player.position)
                                     .font(.caption)
@@ -517,42 +524,116 @@ struct BestBallDraftView: View {
         }
     }
 
-    /// The drafted-so-far list (newest first): who took whom, and where.
+    /// Drafted picks run through the same search / POS / TEAM filters as
+    /// the available list, newest first.
+    private func filteredPicks(_ state: BestBallDraftState) -> [BestBallPick] {
+        var picks = Array(state.picks.reversed())
+        if let pos = selectedPosition { picks = picks.filter { $0.playerPosition == pos } }
+        if let team = selectedTeam { picks = picks.filter { $0.playerTeam == team } }
+        if !searchText.isEmpty {
+            let query = searchText.lowercased()
+            picks = picks.filter {
+                $0.playerName.lowercased().contains(query)
+                    || $0.playerTeam.lowercased().contains(query)
+                    || viewModel.memberName(for: $0.memberID).lowercased().contains(query)
+            }
+        }
+        return picks
+    }
+
+    /// The drafted-so-far list: who took whom, and where. Rows open the
+    /// player's card (game logs) like the available list.
     @ViewBuilder
     private func draftedRows(_ state: BestBallDraftState) -> some View {
-        ForEach(Array(state.picks.reversed()), id: \.id) { pick in
-            HStack(spacing: 8) {
-                Text("R\(pick.round)")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 32, height: 20)
-                    .background(brandPurple.opacity(0.7))
-                    .clipShape(Capsule())
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(pick.playerName)
-                        .font(.subheadline.weight(.medium))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                    Text("\(pick.playerPosition) • \(pick.playerTeam)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+        ForEach(filteredPicks(state), id: \.id) { pick in
+            Button {
+                Haptics.light()
+                listDetail = BBPlayerRef(
+                    playerID: pick.playerID, name: pick.playerName,
+                    team: pick.playerTeam, position: pick.playerPosition
+                )
+            } label: {
+                HStack(spacing: 8) {
+                    Text("R\(pick.round)")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 32, height: 20)
+                        .background(brandPurple.opacity(0.7))
+                        .clipShape(Capsule())
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(pick.playerName)
+                            .font(.subheadline.weight(.medium))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.5)
+                        Text("\(pick.playerPosition) • \(pick.playerTeam)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(viewModel.memberName(for: pick.memberID))
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(pick.memberID == viewModel.myMemberID ? brandPurple : .primary)
+                            .lineLimit(1)
+                        Text("Pick \(pick.pickNumber)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text(viewModel.memberName(for: pick.memberID))
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(pick.memberID == viewModel.myMemberID ? brandPurple : .primary)
-                        .lineLimit(1)
-                    Text("Pick \(pick.pickNumber)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
+            .buttonStyle(.plain)
 
             Divider().padding(.leading, 16)
         }
+    }
+
+    /// Scrollable, searchable team picker — a Menu re-rendered by the 2s
+    /// draft poll kept snapping back to the top of the alphabet.
+    private var teamPickerSheet: some View {
+        NavigationStack {
+            List {
+                Button {
+                    selectedTeam = nil
+                    showTeamPicker = false
+                } label: {
+                    HStack {
+                        Text("All Teams")
+                        Spacer()
+                        if selectedTeam == nil {
+                            Image(systemName: "checkmark").foregroundStyle(brandPurple)
+                        }
+                    }
+                }
+                let teams = teamsInPool().filter {
+                    teamPickerSearch.isEmpty || $0.lowercased().contains(teamPickerSearch.lowercased())
+                }
+                ForEach(teams, id: \.self) { team in
+                    Button {
+                        selectedTeam = team
+                        showTeamPicker = false
+                    } label: {
+                        HStack {
+                            Text(team)
+                            Spacer()
+                            if selectedTeam == team {
+                                Image(systemName: "checkmark").foregroundStyle(brandPurple)
+                            }
+                        }
+                    }
+                }
+            }
+            .searchable(text: $teamPickerSearch, prompt: "Search teams")
+            .navigationTitle("Filter by Team")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { showTeamPicker = false }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 
     /// Queued players still on the board, in priority order.
@@ -595,7 +676,7 @@ struct BestBallDraftView: View {
         }
     }
 
-    private func teamsInPool(_ state: BestBallDraftState) -> [String] {
+    private func teamsInPool() -> [String] {
         Set(viewModel.availablePlayers.map(\.team)).subtracting([""]).sorted()
     }
 

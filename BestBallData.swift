@@ -254,7 +254,8 @@ enum CFBByeWeekProvider {
 
     static func fetchByeWeeks() async -> [String: [Int]] {
         let season = seasonYear
-        let cacheKey = "cfb_bye_weeks_\(season)"
+        // v2: v1 tables were computed with the broken date parse and cached.
+        let cacheKey = "cfb_bye_weeks_v2_\(season)"
         if let data = UserDefaults.standard.data(forKey: cacheKey),
            let cached = try? JSONDecoder().decode([String: [Int]].self, from: data),
            !cached.isEmpty {
@@ -296,8 +297,14 @@ enum CFBByeWeekProvider {
                     var playedWeeks = Set<Int>()
                     for event in events {
                         guard let dateStr = event["date"] as? String else { continue }
-                        // ESPN schedule dates lack seconds: "2026-09-05T16:00Z"
-                        let normalized = dateStr.hasSuffix(":00Z") ? dateStr : dateStr.replacingOccurrences(of: "Z", with: ":00Z")
+                        // ESPN schedule dates lack seconds ("2026-09-05T16:00Z",
+                        // 17 chars) — insert them. The old hasSuffix(":00Z")
+                        // check confused on-the-hour MINUTES for seconds, so
+                        // every top-of-the-hour kickoff failed to parse and
+                        // read as a bye week (the "3,4,5,6,7" garbage).
+                        let normalized = dateStr.count == 17
+                            ? String(dateStr.dropLast()) + ":00Z"
+                            : dateStr
                         guard let date = fmt.date(from: normalized) ?? fmt.date(from: dateStr) else { continue }
                         if let hit = ranges.first(where: { date >= $0.start && date < $0.end }) {
                             playedWeeks.insert(hit.week)
