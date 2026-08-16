@@ -581,6 +581,7 @@ private struct CommishSettingsSheet: View {
     @State private var editEplMID: Int
     @State private var editEplFWD: Int
     @State private var editEplFLEX: Int
+    @State private var editEntryFee: Int
     @State private var isSavingSettings: Bool = false
     @State private var showDeleteConfirmation: Bool = false
     @State private var isDeletingLeague: Bool = false
@@ -623,6 +624,7 @@ private struct CommishSettingsSheet: View {
         _editEplMID = State(initialValue: league.eplMidStarters ?? 4)
         _editEplFWD = State(initialValue: league.eplFwdStarters ?? 2)
         _editEplFLEX = State(initialValue: league.eplFlexStarters ?? 1)
+        _editEntryFee = State(initialValue: league.entryFee)
         _editScheduleDraft = State(initialValue: league.draftStartTime != nil)
         _editDraftDate = State(initialValue: league.draftStartTime ?? Date().addingTimeInterval(3600))
     }
@@ -913,6 +915,37 @@ private struct CommishSettingsSheet: View {
                     }
 
                     // Scoring Model card
+                    settingsCard(title: "Entry Fee (RR)") {
+                        // Editable only pre-draft — members are charged
+                        // this amount when the draft starts.
+                        let feeEditable = league.status == "open"
+                        HStack(spacing: 8) {
+                            ForEach(BestBallViewModel.entryFeeTiers, id: \.self) { fee in
+                                let isSelected = editEntryFee == fee
+                                Button {
+                                    guard feeEditable else { return }
+                                    Haptics.light()
+                                    editEntryFee = fee
+                                } label: {
+                                    Text("\(fee)")
+                                        .font(.subheadline.weight(.bold))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 8)
+                                        .background(isSelected ? brandPurple : Color(.systemGray6))
+                                        .foregroundStyle(isSelected ? .white : .primary)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                }
+                                .buttonStyle(.plain)
+                                .opacity(feeEditable || isSelected ? 1 : 0.4)
+                            }
+                        }
+                        Text(feeEditable
+                             ? "Charged to every member when the draft starts."
+                             : "Entry fee is locked once the draft begins.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
                     settingsCard(title: "Scoring Model") {
                         Text(BestBallLineupConfig.scoringDescription(for: league.sport, scoringMode: league.scoringMode))
                             .font(.caption.monospaced())
@@ -960,7 +993,8 @@ private struct CommishSettingsSheet: View {
                                     eplDEF: league.sport == "EPL" ? editEplDEF : nil,
                                     eplMID: league.sport == "EPL" ? editEplMID : nil,
                                     eplFWD: league.sport == "EPL" ? editEplFWD : nil,
-                                    eplFLEX: league.sport == "EPL" ? editEplFLEX : nil
+                                    eplFLEX: league.sport == "EPL" ? editEplFLEX : nil,
+                                    entryFee: league.status == "open" ? editEntryFee : nil
                                 )
                                 // Persist the draft schedule only when it changed.
                                 let newSchedule: Date? = editScheduleDraft ? editDraftDate : nil

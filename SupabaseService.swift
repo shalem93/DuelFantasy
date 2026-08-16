@@ -2502,6 +2502,7 @@ final class SupabaseService {
         scoringMode: String = "normal",
         nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0,
         eplGK: Int? = nil, eplDEF: Int? = nil, eplMID: Int? = nil, eplFWD: Int? = nil, eplFLEX: Int? = nil,
+        entryFee: Int? = nil,
         accessToken: String
     ) async throws {
         var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/bestball_leagues"), resolvingAgainstBaseURL: false)
@@ -2529,9 +2530,12 @@ final class SupabaseService {
             let eplMidStarters: Int?
             let eplFwdStarters: Int?
             let eplFlexStarters: Int?
+            // Optional: only sent for pre-draft edits.
+            let entryFee: Int?
             enum CodingKeys: String, CodingKey {
                 case title
                 case maxMembers = "max_members"
+                case entryFee = "entry_fee"
                 case rosterSize = "roster_size"
                 case isPrivate = "is_private"
                 case inviteCode = "invite_code"
@@ -2564,7 +2568,8 @@ final class SupabaseService {
                 nflWrStarters: nflWR, nflTeStarters: nflTE, nflFlexStarters: nflFLEX,
                 nflSflexStarters: nflSFLEX,
                 eplGkStarters: eplGK, eplDefStarters: eplDEF, eplMidStarters: eplMID,
-                eplFwdStarters: eplFWD, eplFlexStarters: eplFLEX
+                eplFwdStarters: eplFWD, eplFlexStarters: eplFLEX,
+                entryFee: entryFee
             ),
             bearerToken: accessToken
         )

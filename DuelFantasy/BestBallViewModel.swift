@@ -1129,11 +1129,44 @@ final class BestBallViewModel {
         await startDraft(leagueID: league.id)
     }
 
+    /// Whether drafting `player` still leaves enough roster spots to fill
+    /// every starting slot. Blocks e.g. a 3rd QB in a 1-QB league when
+    /// the remaining picks are needed for open RB/WR/TE/FLEX slots —
+    /// works off the league's actual slot constraints, so FLEX/SFLEX and
+    /// the EPL shapes are handled without per-sport hardcoding.
+    func pickKeepsLineupFillable(_ player: BestBallPlayer) -> Bool {
+        guard let league = currentLeague, let state = draftState,
+              let myID = myMemberID else { return true }
+        let constraints = BestBallLineupConfig.requirements(for: league).constraints
+        guard !constraints.isEmpty else { return true }
+        let roster = state.roster(for: myID)
+        var positions: [String: String] = [:]
+        var points: [String: Double] = [:]
+        for pick in roster {
+            positions[pick.playerID] = pick.playerPosition
+            points[pick.playerID] = 1
+        }
+        positions[player.id] = player.position
+        points[player.id] = 0
+        let ids = roster.map(\.playerID) + [player.id]
+        let assigned = BestBallLineupConfig.assignStartersToSlots(
+            scoringIDs: ids, positions: positions, points: points, constraints: constraints
+        )
+        let starters = constraints.reduce(0) { $0 + $1.count }
+        let unfilledSlots = starters - assigned.count
+        let remainingPicksAfter = league.rosterSize - ids.count
+        return unfilledSlots <= remainingPicksAfter
+    }
+
     func makePick(player: BestBallPlayer) async {
         // Drafted (by anyone) or drafting now — either way it leaves the queue.
         draftQueue.removeAll { $0 == player.id }
         guard let state = draftState, !state.isDraftComplete,
               let token = accessToken, let uid = userID else { return }
+        guard pickKeepsLineupFillable(player) else {
+            self.error = "Can't draft another \(player.position) — your remaining picks are needed to fill your open starting slots."
+            return
+        }
         guard draftHasOpened else {
             self.error = "Draft starts in a few seconds…"
             return
@@ -1862,7 +1895,7 @@ final class BestBallViewModel {
 
     // MARK: - Commissioner Settings
 
-    func updateLeagueSettings(leagueID: String, title: String, maxMembers: Int, rosterSize: Int, isPrivate: Bool, pitcherSlots: Int = 2, batterSlots: Int = 6, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0, eplGK: Int? = nil, eplDEF: Int? = nil, eplMID: Int? = nil, eplFWD: Int? = nil, eplFLEX: Int? = nil) async {
+    func updateLeagueSettings(leagueID: String, title: String, maxMembers: Int, rosterSize: Int, isPrivate: Bool, pitcherSlots: Int = 2, batterSlots: Int = 6, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0, eplGK: Int? = nil, eplDEF: Int? = nil, eplMID: Int? = nil, eplFWD: Int? = nil, eplFLEX: Int? = nil, entryFee: Int? = nil) async {
         guard let token = accessToken else { return }
         do {
             try await SupabaseService.shared.updateLeagueSettings(
@@ -1871,6 +1904,7 @@ final class BestBallViewModel {
                 pitcherSlots: pitcherSlots, batterSlots: batterSlots,
                 nflQB: nflQB, nflRB: nflRB, nflWR: nflWR, nflTE: nflTE, nflFLEX: nflFLEX, nflSFLEX: nflSFLEX,
                 eplGK: eplGK, eplDEF: eplDEF, eplMID: eplMID, eplFWD: eplFWD, eplFLEX: eplFLEX,
+                entryFee: entryFee,
                 accessToken: token
             )
             await loadLeagueDetail(leagueID: leagueID)

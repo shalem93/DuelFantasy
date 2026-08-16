@@ -495,8 +495,11 @@ struct BestBallDraftView: View {
 
                         // Quick-draft slot is ALWAYS reserved so the stat
                         // columns never shift when the clock flips to the
-                        // user — the button just fades in.
-                        let canDraft = viewModel.isMyTurn && !state.isDraftComplete && viewModel.draftHasOpened
+                        // user — the button just fades in. Greyed when
+                        // drafting this position would leave a starting
+                        // slot unfillable (position cap).
+                        let fillable = viewModel.pickKeepsLineupFillable(player)
+                        let canDraft = viewModel.isMyTurn && !state.isDraftComplete && viewModel.draftHasOpened && fillable
                         Button {
                             Haptics.medium()
                             Task { await viewModel.makePick(player: player) }
@@ -1107,9 +1110,13 @@ struct BestBallDraftView: View {
                     isAutoPicking = true
                     if let state {
                         // Auto-pick honors the queue first, then falls
-                        // back to the best visible player.
-                        let queued = queuedAvailablePlayers(state).first
-                        if let pick = queued ?? filteredPlayers(state).first {
+                        // back to the best visible player — skipping any
+                        // player the position caps would reject.
+                        let queued = queuedAvailablePlayers(state)
+                            .first(where: { viewModel.pickKeepsLineupFillable($0) })
+                        let fallback = filteredPlayers(state)
+                            .first(where: { viewModel.pickKeepsLineupFillable($0) })
+                        if let pick = queued ?? fallback {
                             await viewModel.makePick(player: pick)
                         }
                     }
