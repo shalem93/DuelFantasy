@@ -1568,6 +1568,20 @@ struct ESPNPGADFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
             )
 
             playerLiveStats[playerID] = stats
+
+            // Alias keys for lineups drafted from the Monday DK-only pool
+            // when the ESPN athlete-index resolution failed — those ids
+            // are name slugs ("pga-dk-jacob-bridgeman") that can never
+            // match this competitor-id-keyed snapshot, grading the whole
+            // lineup 0.0 while the SAME golfer scores in other lineups
+            // holding his real id. Same remedy as NASCAR's dk-slug fix.
+            for slug in ESPNNASCARDFSLiveScoringProvider.dkSlugVariants(for: name) {
+                let aliasID = "pga-dk-\(slug)"
+                if playerFantasyPoints[aliasID] == nil {
+                    playerFantasyPoints[aliasID] = fpts
+                    playerLiveStats[aliasID] = stats
+                }
+            }
         }
 
         return DFSScoreSnapshot(

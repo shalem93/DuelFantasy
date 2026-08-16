@@ -349,6 +349,16 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
                 return updated
             }
             print("[Soccer-DFS] LineupHQ applied: \(applied)/\(markedPlayers.count) players matched DK prices")
+            // The feed must actually cover THIS slate. A classic feed for
+            // a different slate (e.g. this weekend's games while the user
+            // views next Friday's opener) matched ~nobody, everyone kept
+            // their synthetic salary, and the showdown transform's $4,000
+            // floor rendered a flat-$4,000 pool. Same gate as UFC/golf.
+            let matchRate = Double(applied) / Double(max(1, markedPlayers.count))
+            guard matchRate >= 0.25 else {
+                print("[Soccer-DFS] Classic feed matches only \(Int(matchRate * 100))% of this slate — not offering it")
+                throw NSError(domain: "SoccerDFS", code: 4, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for the \(league.displayName) slate"])
+            }
         } else if isSingleGame && !socShowdownSalaries.isEmpty {
             // One-game day (WC semifinal/3rd-place/final): DK doesn't post a
             // CLASSIC slate for a single game — only a Showdown — so the
@@ -377,6 +387,12 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
                 return updated
             }
             print("[Soccer-DFS] One-game day, no classic slate — showdown prices applied: \(applied)/\(markedPlayers.count)")
+            // Same this-slate coverage gate as the classic branch.
+            let matchRate = Double(applied) / Double(max(1, markedPlayers.count))
+            guard matchRate >= 0.25 else {
+                print("[Soccer-DFS] Showdown feed matches only \(Int(matchRate * 100))% of this slate — not offering it")
+                throw NSError(domain: "SoccerDFS", code: 4, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for the \(league.displayName) slate"])
+            }
         } else {
             // No LineupHQ/DraftKings prices for this soccer slate yet — don't
             // offer a slate built on synthetic salaries. Wait until DK posts it.
