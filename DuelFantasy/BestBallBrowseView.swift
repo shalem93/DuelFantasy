@@ -146,43 +146,45 @@ struct BestBallBrowseView: View {
         }
 
         var body: some View {
-            Button(action: action) {
-                VStack(spacing: 6) {
-                    ZStack {
-                        Circle()
-                            .fill(iconCircleColor)
-                            .frame(width: 42, height: 42)
-                        Image(systemName: option.icon)
-                            .font(.system(size: 19, weight: .semibold))
-                            .foregroundStyle(isSelected ? Color.white : brandPurple)
-                    }
-                    Text(option.name)
-                        .font(.subheadline.weight(.heavy))
-                        .foregroundStyle(isSelected ? Color.white : Color.primary)
-                    Text(option.tagline)
-                        .font(.system(size: 9.5, weight: .medium))
-                        .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                    Text(option.seasonNote)
-                        .font(.system(size: 8.5))
-                        .foregroundStyle(isSelected ? Color.white.opacity(0.7) : Color(.tertiaryLabel))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
+            // A tap gesture, NOT a Button: multiple plain-style buttons in
+            // one Form row get their taps hijacked by the row (only the
+            // first card ever responded — NFL looked "stuck selected").
+            VStack(spacing: 6) {
+                ZStack {
+                    Circle()
+                        .fill(iconCircleColor)
+                        .frame(width: 42, height: 42)
+                    Image(systemName: option.icon)
+                        .font(.system(size: 19, weight: .semibold))
+                        .foregroundStyle(isSelected ? Color.white : brandPurple)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .padding(.horizontal, 4)
-                .background(cardBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 14))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14)
-                        .stroke(isSelected ? Color.white.opacity(0.35) : Color.clear, lineWidth: 1)
-                )
-                .shadow(color: shadowColor, radius: 6, y: 3)
-                .scaleEffect(isSelected ? 1.0 : 0.97)
+                Text(option.name)
+                    .font(.subheadline.weight(.heavy))
+                    .foregroundStyle(isSelected ? Color.white : Color.primary)
+                Text(option.tagline)
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Text(option.seasonNote)
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(isSelected ? Color.white.opacity(0.7) : Color(.tertiaryLabel))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
             }
-            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .padding(.horizontal, 4)
+            .background(cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(isSelected ? Color.white.opacity(0.35) : Color.clear, lineWidth: 1)
+            )
+            .shadow(color: shadowColor, radius: 6, y: 3)
+            .scaleEffect(isSelected ? 1.0 : 0.97)
+            .contentShape(RoundedRectangle(cornerRadius: 14))
+            .onTapGesture(perform: action)
         }
     }
 
@@ -752,6 +754,14 @@ struct BestBallBrowseView: View {
                             .font(.caption)
                             .foregroundStyle(.red)
                     }
+                }
+            }
+            .onAppear {
+                // Mirror the active browse filter pill EVERY time the
+                // sheet opens — the Create-button preselect alone left a
+                // stale sport from a previous open on some entry paths.
+                if let filter = viewModel.sportFilter, sports.contains(filter) {
+                    newLeagueSport = filter
                 }
             }
             .navigationTitle("Create League")
