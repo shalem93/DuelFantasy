@@ -779,17 +779,30 @@ struct DFSLiveContestView: View {
     }
 
     /// Ownership percentage for each player across all field entries.
+    /// Counted by canonical name key so dk-slug lineup IDs merge with the
+    /// real ESPN IDs the rest of the field uses (else those show 0% owned).
     private var ownershipPct: [String: Double] {
         let entries = viewModel.fieldEntries
         guard !entries.isEmpty else { return [:] }
         var counts: [String: Int] = [:]
+        var nameKeyByID: [String: String] = [:]
         for entry in entries {
             for pid in entry.playerIDs {
-                counts[pid, default: 0] += 1
+                let key: String
+                if let cached = nameKeyByID[pid] {
+                    key = cached
+                } else {
+                    let resolved = resolvePlayerName(pid)
+                    key = resolved == pid ? pid : dfsOwnershipNameKey(resolved)
+                    nameKeyByID[pid] = key
+                }
+                counts[key, default: 0] += 1
             }
         }
         let total = Double(entries.count)
-        return counts.mapValues { Double($0) / total * 100.0 }
+        return nameKeyByID.mapValues { key in
+            Double(counts[key] ?? 0) / total * 100.0
+        }
     }
 
     /// Resolves the display name for a player ID, trying multiple sources

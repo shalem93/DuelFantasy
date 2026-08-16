@@ -359,14 +359,26 @@ struct DFSPastStandingsView: View {
 
         let records = viewModel.pastTournamentResultRecords
         let totalEntries = max(records.count, 1)
+        // Count by canonical NAME key, not raw ID — dk-slug lineups (early-week
+        // DK-only pools) carry IDs the rest of the field doesn't, and ID-keyed
+        // counts left every player in those lineups at 0% ownership.
         var counts: [String: Int] = [:]
+        var nameKeyByID: [String: String] = [:]
         for record in records {
-            for pid in record.lineupPlayerIDs {
-                counts[pid, default: 0] += 1
+            let names = record.lineupPlayerNames
+            for (index, pid) in record.lineupPlayerIDs.enumerated() {
+                let key: String
+                if index < names.count, !names[index].isEmpty {
+                    key = dfsOwnershipNameKey(names[index])
+                } else {
+                    key = pid
+                }
+                counts[key, default: 0] += 1
+                if nameKeyByID[pid] == nil { nameKeyByID[pid] = key }
             }
         }
-        cachedOwnershipByPlayerID = counts.mapValues { count in
-            Int((Double(count) / Double(totalEntries) * 100).rounded())
+        cachedOwnershipByPlayerID = nameKeyByID.mapValues { key in
+            Int((Double(counts[key] ?? 0) / Double(totalEntries) * 100).rounded())
         }
     }
 

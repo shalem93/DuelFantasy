@@ -138,6 +138,23 @@ struct DFSFieldEntry: Identifiable, Hashable {
     var realUserID: String? = nil
 }
 
+/// Canonical name key used to merge ownership counts across ID namespaces —
+/// early-week DK-only pools mint `{sport}-dk-slug` player IDs that never match
+/// the real ESPN IDs the rest of the field uses, so ID-keyed ownership leaves
+/// those lineups at 0%. First token + last token (survives middle-initial
+/// differences like "John H. Nemechek" vs "John Hunter Nemechek") without
+/// collapsing distinct players like "Si Woo Kim" / "S.H. Kim".
+func dfsOwnershipNameKey(_ name: String) -> String {
+    let folded = name.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil)
+    let cleaned = String(folded.map { $0.isLetter || $0.isWhitespace ? $0 : " " })
+    var tokens = cleaned.split(separator: " ").map(String.init)
+    let suffixes: Set<String> = ["jr", "sr", "ii", "iii", "iv", "v"]
+    while let last = tokens.last, suffixes.contains(last) { tokens.removeLast() }
+    guard let first = tokens.first else { return folded }
+    guard let last = tokens.last, tokens.count > 1 else { return first }
+    return "\(first) \(last)"
+}
+
 struct DFSResult: Codable, Identifiable, Hashable {
     let id: UUID
     let tournamentTitle: String
