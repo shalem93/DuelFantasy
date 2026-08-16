@@ -709,6 +709,16 @@ struct DFSPastStandingsView: View {
     /// fta=ReYd, threePM=ReTD, turnovers=INT+FumL.
     private func footballStatLine(_ stats: DFSPlayerLiveStats?) -> String {
         guard let stats else { return "Did not play" }
+        // DST rows (stat name "XXX Defense") repurpose the fields
+        // differently: steals=sacks, blocks=INTs, turnovers=fumbles
+        // recovered, fgm=def TDs, fta=points allowed — without this
+        // branch a defense rendered as "0 Rec · 14 ReYd".
+        if stats.name.hasSuffix("Defense") {
+            var parts = ["\(stats.steals) SCK", "\(stats.blocks) INT", "\(stats.turnovers) FR"]
+            if stats.fgm > 0 { parts.append("\(stats.fgm) TD") }
+            parts.append("\(stats.fta) PA")
+            return parts.joined(separator: " · ")
+        }
         var parts: [String] = []
         if stats.fga > 0 || stats.points != 0 {
             parts.append("\(stats.fgm)/\(stats.fga) · \(stats.points) PaYd")
