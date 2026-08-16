@@ -1603,5 +1603,5 @@ select pg_notify('pgrst', 'reload schema');
 -- CFB Best Ball player pool scope (Aug 2026): nullable —
 -- 'power' = ACC/Big Ten/Big 12/SEC + Notre Dame; nil/'all' = all FBS.
 -- ============================================================
-alter table bestball_leagues add column if not exists cfb_pool text;
+alter table public.bestball_leagues add column if not exists cfb_pool text;
 select pg_notify('pgrst', 'reload schema');
