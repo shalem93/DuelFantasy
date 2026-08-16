@@ -4186,6 +4186,17 @@ final class DFSViewModel {
     func adminRegenerateBotField() async -> Int {
         guard let tournament, let token = accessToken else { return 0 }
         let tid = tournament.id
+        // Finished contest? Regenerating against the CURRENT slate builds
+        // bots from the wrong player pool, and the full refreshLive pass
+        // on the main actor hard-froze the app. Route to Regrade, which
+        // re-settles from the contest's OWN event data with current bot
+        // logic (positional slots included).
+        if settledTournaments.contains(tid)
+            || Date() > lockTimeForTournament(tournament).addingTimeInterval(12 * 3600) {
+            print("[DFS-\(sport)] ADMIN regen requested on finished contest — regrading \(tid) instead")
+            await adminRegradeContest(tournamentID: tid)
+            return 0
+        }
         // 1. Clear the shared server field so other devices regenerate too.
         try? await SupabaseService.shared.saveBotField(tournamentID: tid, botField: [], accessToken: token)
         // 2. Drop local bots + the cached field so refreshLive can't restore the
@@ -5922,6 +5933,19 @@ final class DFSViewModel {
             if let snapshot = try? await pgaScoringProvider.fetchScoreSnapshot(for: [slateGame]),
                !snapshot.playerLiveStats.isEmpty {
                 livePlayerStats = snapshot.playerLiveStats
+                // Backfill points the STORED results didn't cover — a
+                // dk-slug lineup graded before the alias fix persisted no
+                // points for those ids, so its players showed round
+                // scores (fresh stats above) but projection-fallback
+                // FPTS. The fresh snapshot carries the alias keys.
+                var backfilled = 0
+                for (pid, pts) in snapshot.playerFantasyPoints where (livePlayerPoints[pid] ?? 0) == 0 && pts != 0 {
+                    livePlayerPoints[pid] = pts
+                    backfilled += 1
+                }
+                if backfilled > 0 {
+                    print("[DFS-PGA] Backfilled \(backfilled) player points missing from stored results")
+                }
                 print("[DFS-PGA] Loaded \(snapshot.playerLiveStats.count) player round stats from ESPN for stored results")
             }
 
