@@ -254,7 +254,12 @@ struct DFSLiveContestView: View {
                         let prefix: String
                         switch tournament.tournamentType {
                         case .singleGame: prefix = "SG "
-                        case .evening: prefix = "EVE "
+                        case .evening:
+                            switch DFSTournamentType.windowLabel(for: tournament.id) {
+                            case "Afternoon Only": prefix = "AFT "
+                            case "Night Only": prefix = "NIGHT "
+                            default: prefix = "EVE "
+                            }
                         case .main: prefix = ""
                         }
                         switch tournament.entryCount {

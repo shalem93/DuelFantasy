@@ -246,6 +246,27 @@ struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
         let tournamentID = "nfl-\(dateKey(for: slateDate))"
         let isSingleGame = includedGames.count == 1
 
+        // DK-style Sunday windows from ET kickoff times: Main = the day
+        // games (1pm + 4pm), Afternoon Only = the 4pm window, and
+        // primetime (SNF, 6:30pm ET onward) is excluded from both — it
+        // lives as its own single-game showdown.
+        var etCal = Calendar(identifier: .gregorian)
+        etCal.timeZone = TimeZone(identifier: "America/New_York")!
+        func kickHourET(_ game: DFSSlateGame) -> Double {
+            let comps = etCal.dateComponents([.hour, .minute], from: game.startTime)
+            return Double(comps.hour ?? 0) + Double(comps.minute ?? 0) / 60.0
+        }
+        let dayGames = includedGames.filter { kickHourET($0) < 18.5 }
+        let primetimeGames = includedGames.filter { kickHourET($0) >= 18.5 }
+        let afternoonGames = dayGames.filter { kickHourET($0) >= 15.0 }
+        // Only carve primetime out of Main when a real day slate remains.
+        let mainWindow: [String]? = (!primetimeGames.isEmpty && dayGames.count >= 2)
+            ? dayGames.map(\.id) : nil
+        var windowSlates: [DFSWindowSlate] = []
+        if afternoonGames.count >= 2, afternoonGames.count < dayGames.count {
+            windowSlates.append(DFSWindowSlate(token: "aft", title: "Afternoon Only", gameIDs: afternoonGames.map(\.id)))
+        }
+
         let (tournaments, sgPlayers) = buildMultiTournamentSlate(
             baseID: tournamentID,
             league: "NFL",
@@ -256,7 +277,9 @@ struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
             mainRosterSlots: ["QB", "RB", "RB", "WR", "WR", "WR", "TE", "FLEX", "DST"],
             isSingleGameSlate: isSingleGame,
             includedGames: includedGames,
-            mainPlayers: sortedPlayers
+            mainPlayers: sortedPlayers,
+            mainWindowGameIDs: mainWindow,
+            windowSlates: windowSlates
         )
 
         let slate = DFSSlate(

@@ -10,7 +10,18 @@ enum DFSTournamentType: String, Codable, Equatable {
     static func from(tournamentID: String) -> DFSTournamentType {
         if tournamentID.contains("-sg-") { return .singleGame }
         if tournamentID.contains("-eve") { return .evening }
+        // Time-window slates (NFL "Afternoon Only", CFB "Night Only")
+        // share the evening type's plumbing.
+        if tournamentID.contains("-aft-") || tournamentID.contains("-night-") { return .evening }
         return .main
+    }
+
+    /// Display label for a window slate's id token; nil for non-window ids.
+    static func windowLabel(for tournamentID: String) -> String? {
+        if tournamentID.contains("-aft-") { return "Afternoon Only" }
+        if tournamentID.contains("-night-") { return "Night Only" }
+        if tournamentID.contains("-eve") { return "Evening" }
+        return nil
     }
 
     /// Whether this is an evening-slate tournament type.
@@ -39,8 +50,12 @@ struct DFSTournament: Equatable {
     let gameID: String?
     /// Entry fee in RR points
     let entryFee: Int
+    /// Explicit game scope for time-window slates (NFL Main excluding
+    /// SNF, "Afternoon Only", CFB "Night Only"). nil = the whole slate.
+    /// Drives the player pool, lock time, and bot pool.
+    let windowGameIDs: [String]?
 
-    init(id: String, title: String, league: String, entryCount: Int, lineupSize: Int, salaryCap: Int, rosterSlots: [String]? = nil, isSingleGame: Bool = false, tournamentType: DFSTournamentType = .main, gameID: String? = nil, entryFee: Int = 10) {
+    init(id: String, title: String, league: String, entryCount: Int, lineupSize: Int, salaryCap: Int, rosterSlots: [String]? = nil, isSingleGame: Bool = false, tournamentType: DFSTournamentType = .main, gameID: String? = nil, entryFee: Int = 10, windowGameIDs: [String]? = nil) {
         self.id = id
         self.title = title
         self.league = league
@@ -52,7 +67,16 @@ struct DFSTournament: Equatable {
         self.tournamentType = tournamentType
         self.gameID = gameID
         self.entryFee = entryFee
+        self.windowGameIDs = windowGameIDs
     }
+}
+
+/// A DK-style time-window slate definition passed by a sport's provider:
+/// e.g. NFL Sunday ("aft", "Afternoon Only", [4pm game ids]).
+struct DFSWindowSlate {
+    let token: String     // id fragment: "\(baseID)-\(token)-\(size)"
+    let title: String     // "Afternoon Only" / "Night Only"
+    let gameIDs: [String]
 }
 
 struct DFSPlayer: Identifiable, Hashable {
@@ -492,7 +516,13 @@ func buildMultiTournamentSlate(
     // only against THEIR game's slate avoids cross-game name collisions — e.g.
     // a globally-merged map mapping star "Julio Rodriguez" (SEA) onto a cheap
     // "J. Rodriguez" from another game via the fuzzy name fallback.
-    perGameShowdownSalaries: [String: [String: Int]]? = nil
+    perGameShowdownSalaries: [String: [String: Int]]? = nil,
+    // Game scope for the MAIN tournaments (e.g. NFL Sunday main = 1pm+4pm,
+    // SNF excluded). nil = every slate game.
+    mainWindowGameIDs: [String]? = nil,
+    // Additional DK-style window slates ("Afternoon Only", "Night Only").
+    // When non-empty, the legacy generic evening slate is skipped.
+    windowSlates: [DFSWindowSlate] = []
 ) -> (tournaments: [DFSTournament], singleGamePlayers: [String: [DFSPlayer]]) {
     var tournaments: [DFSTournament] = []
     var sgPlayers: [String: [DFSPlayer]] = [:]
@@ -581,8 +611,32 @@ func buildMultiTournamentSlate(
             salaryCap: mainSalaryCap,
             rosterSlots: mainRosterSlots,
             isSingleGame: mainIsCaptain,
-            tournamentType: .main
+            tournamentType: .main,
+            windowGameIDs: mainWindowGameIDs
         ))
+    }
+
+    // 1b. DK-style window slates ("Afternoon Only" / "Night Only") from
+    // the provider's window definitions — same format as main, scoped to
+    // the window's games for pool, lock, and bots.
+    for window in windowSlates {
+        let windowIDSet = Set(window.gameIDs)
+        let windowPlayerCount = mainPlayers.filter { windowIDSet.contains($0.gameID ?? "") }.count
+        guard windowPlayerCount >= mainLineupSize else { continue }
+        for size in fieldSizes {
+            tournaments.append(DFSTournament(
+                id: "\(baseID)-\(window.token)-\(size)",
+                title: "\(window.title) \(tournamentTitle(for: size, league: league))",
+                league: league,
+                entryCount: size,
+                lineupSize: mainLineupSize,
+                salaryCap: mainSalaryCap,
+                rosterSlots: mainRosterSlots,
+                isSingleGame: mainIsCaptain,
+                tournamentType: .evening,
+                windowGameIDs: window.gameIDs
+            ))
+        }
     }
 
     // 2. Per-game single-game tournaments — all 8 field sizes per game
@@ -675,6 +729,11 @@ func buildMultiTournamentSlate(
     if league.uppercased() == "UFC" {
         return (tournaments, sgPlayers)
     }
+    // A provider that defines its own DK-style windows replaces the
+    // generic evening slate entirely.
+    if !windowSlates.isEmpty || mainWindowGameIDs != nil {
+        return (tournaments, sgPlayers)
+    }
     let eveningCutoff: Date = {
         let cal = Calendar(identifier: .gregorian)
         let tz = TimeZone(identifier: "America/New_York")!
@@ -705,7 +764,10 @@ func buildMultiTournamentSlate(
                     salaryCap: mainSalaryCap,
                     rosterSlots: mainRosterSlots,
                     isSingleGame: false,
-                    tournamentType: .evening
+                    tournamentType: .evening,
+                    // Explicit scope — downstream pool/lock derivation no
+                    // longer re-derives the 6pm cutoff from Date().
+                    windowGameIDs: eveningGames.map(\.id)
                 ))
             }
         }

@@ -2186,7 +2186,12 @@ struct DFSContestView: View {
             switch tournament.tournamentType {
             case .main: prefix = ""
             case .singleGame: prefix = "SG "
-            case .evening: prefix = "Eve "
+            case .evening:
+                switch DFSTournamentType.windowLabel(for: tournament.id) {
+                case "Afternoon Only": prefix = "Aft "
+                case "Night Only": prefix = "Night "
+                default: prefix = "Eve "
+                }
             }
             switch tournament.entryCount {
             case 2: return "\(prefix)H2H"

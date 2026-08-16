@@ -170,6 +170,25 @@ struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
         let tournamentID = "cfb-\(dateKey(for: slateDate))"
         let isSingleGame = includedGames.count == 1
 
+        // DK-style Saturday windows from ET kickoff times. The Main slate
+        // is DK-like: every game of the day (noon through the late kicks);
+        // Afternoon Only = 3:30ish window onward, Night Only = 7pm onward.
+        var etCal = Calendar(identifier: .gregorian)
+        etCal.timeZone = TimeZone(identifier: "America/New_York")!
+        func kickHourET(_ game: DFSSlateGame) -> Double {
+            let comps = etCal.dateComponents([.hour, .minute], from: game.startTime)
+            return Double(comps.hour ?? 0) + Double(comps.minute ?? 0) / 60.0
+        }
+        var windowSlates: [DFSWindowSlate] = []
+        let afternoonGames = includedGames.filter { kickHourET($0) >= 15.0 }
+        if afternoonGames.count >= 2, afternoonGames.count < includedGames.count {
+            windowSlates.append(DFSWindowSlate(token: "aft", title: "Afternoon Only", gameIDs: afternoonGames.map(\.id)))
+        }
+        let nightGames = includedGames.filter { kickHourET($0) >= 19.0 }
+        if nightGames.count >= 2, nightGames.count < afternoonGames.count {
+            windowSlates.append(DFSWindowSlate(token: "night", title: "Night Only", gameIDs: nightGames.map(\.id)))
+        }
+
         let (tournaments, sgPlayers) = buildMultiTournamentSlate(
             baseID: tournamentID,
             league: "CFB",
@@ -179,7 +198,8 @@ struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
             mainRosterSlots: ["QB", "RB", "RB", "WR", "WR", "WR", "FLEX", "SFLEX"],
             isSingleGameSlate: isSingleGame,
             includedGames: includedGames,
-            mainPlayers: sortedPlayers
+            mainPlayers: sortedPlayers,
+            windowSlates: windowSlates
         )
 
         let slate = DFSSlate(

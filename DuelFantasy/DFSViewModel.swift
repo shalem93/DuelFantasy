@@ -672,6 +672,13 @@ final class DFSViewModel {
                 return converted
             }
         }
+        // Window-scoped slates (NFL Main-sans-SNF, Afternoon/Night Only,
+        // and explicit evening slates): filter the pool by the games baked
+        // into the tournament — not by a re-derived "today at 6pm" cutoff.
+        if let windowIDs = t.windowGameIDs {
+            let idSet = Set(windowIDs)
+            return players.filter { idSet.contains($0.gameID ?? "") }
+        }
         if t.tournamentType.isEvening {
             return eveningPlayers
         }
@@ -1662,6 +1669,13 @@ final class DFSViewModel {
         if t.tournamentType == .singleGame, let gid = t.gameID,
            let game = slateGames.first(where: { $0.id == gid }) {
             return game.startTime
+        }
+        // Window-scoped slates lock at their window's first kickoff.
+        if let windowIDs = t.windowGameIDs {
+            let idSet = Set(windowIDs)
+            if let windowLock = slateGames.filter({ idSet.contains($0.id) }).map(\.startTime).min() {
+                return windowLock
+            }
         }
         if t.tournamentType.isEvening {
             // Evening tournaments lock at the first evening game
@@ -6133,6 +6147,9 @@ final class DFSViewModel {
                         }
                         rawPoolForBots = converted
                     }
+                } else if let windowIDs = tObj.windowGameIDs {
+                    let idSet = Set(windowIDs)
+                    rawPoolForBots = players.filter { idSet.contains($0.gameID ?? "") }
                 } else if tObj.tournamentType.isEvening {
                     rawPoolForBots = eveningPlayers
                 } else {
@@ -9412,7 +9429,12 @@ final class DFSViewModel {
         // multi-game, non-single-game, excluding UFC/PGA. Where the settlement
         // position derivation is coarse (NHL skater-vs-goalie; football all-UTIL),
         // matching falls back to "any appeared player" so DNP slots still upgrade.
-        let isLateSwapSettle = !isSingleGame && !["ufc", "pga", "nascar"].contains(sportPrefix)
+        // Window slates (Afternoon/Night/Evening) skip the DNP-upgrade
+        // pass: the candidate pool spans the WHOLE day's box scores, so an
+        // afternoon-only bot could get "upgraded" with an SNF player from
+        // outside its window. Leaving the DNP placeholder is correct.
+        let isWindowTournament = DFSTournamentType.from(tournamentID: tournamentID) == .evening
+        let isLateSwapSettle = !isSingleGame && !isWindowTournament && !["ufc", "pga", "nascar"].contains(sportPrefix)
         let appearedIDs = Set(allPlayers.map(\.id))
         // Deterministic salary for ranking/budget (NEVER Int.random — every device
         // must agree): canonical tournament price, else a stable id-hash estimate.

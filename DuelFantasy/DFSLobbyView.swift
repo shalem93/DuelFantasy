@@ -283,35 +283,37 @@ struct DFSLobbyView: View {
     }
 
     private var eveningSlateSection: some View {
-        let eveningTournaments = viewModel.availableTournaments.filter { $0.tournamentType == .evening }
-        // First evening game's start time (6pm ET+ cutoff) for a more useful
-        // subtitle than the generic "6pm ET+" label.
-        let eveningSubtitle: String = {
-            let cal = Calendar(identifier: .gregorian)
-            let tz = TimeZone(identifier: "America/New_York")!
-            var comps = cal.dateComponents(in: tz, from: Date())
-            comps.hour = 18
-            comps.minute = 0
-            comps.second = 0
-            let cutoff = cal.date(from: comps) ?? .distantFuture
-            let firstEvening = viewModel.slateGames
-                .filter { $0.startTime >= cutoff }
-                .min(by: { $0.startTime < $1.startTime })
-            if let game = firstEvening {
-                return "\(startVerb) \(game.startTime.formatted(date: .omitted, time: .shortened))"
+        // One card per WINDOW slate ("Afternoon Only", "Night Only",
+        // legacy "Evening"), grouped by tournament id sans trailing size.
+        let windowTournaments = viewModel.availableTournaments.filter { $0.tournamentType == .evening }
+        let groups: [(key: String, tournaments: [DFSTournament])] = {
+            var byKey: [String: [DFSTournament]] = [:]
+            for t in windowTournaments {
+                let key = t.id.split(separator: "-").dropLast().joined(separator: "-")
+                byKey[key, default: []].append(t)
             }
-            return "6pm ET+"
+            return byKey.sorted { a, b in
+                let lockA = a.value.first.map { viewModel.lockTimeForTournament($0) } ?? .distantFuture
+                let lockB = b.value.first.map { viewModel.lockTimeForTournament($0) } ?? .distantFuture
+                return lockA < lockB
+            }.map { (key: $0.key, tournaments: $0.value) }
         }()
         return Group {
-            if !eveningTournaments.isEmpty {
-                slateCard(
-                    title: "Evening Slate",
-                    subtitle: eveningSubtitle,
-                    icon: "moon.stars.fill",
-                    iconColor: .indigo,
-                    tournaments: eveningTournaments,
-                    selectedSize: $selectedEveningSize
-                )
+            ForEach(groups, id: \.key) { group in
+                if let first = group.tournaments.first {
+                    let label = DFSTournamentType.windowLabel(for: first.id) ?? "Evening"
+                    let lock = viewModel.lockTimeForTournament(first)
+                    slateCard(
+                        title: label == "Evening" ? "Evening Slate" : "\(label) Slate",
+                        subtitle: lock == .distantFuture
+                            ? "Locks at first game"
+                            : "\(startVerb) \(lock.formatted(date: .omitted, time: .shortened))",
+                        icon: label == "Night Only" || label == "Evening" ? "moon.stars.fill" : "sun.max.fill",
+                        iconColor: label == "Night Only" || label == "Evening" ? .indigo : .orange,
+                        tournaments: group.tournaments,
+                        selectedSize: $selectedEveningSize
+                    )
+                }
             }
         }
     }
