@@ -1597,3 +1597,11 @@ alter table bestball_leagues add column if not exists epl_mid_starters int;
 alter table bestball_leagues add column if not exists epl_fwd_starters int;
 alter table bestball_leagues add column if not exists epl_flex_starters int;
 select pg_notify('pgrst', 'reload schema');
+
+
+-- ============================================================
+-- CFB Best Ball player pool scope (Aug 2026): nullable —
+-- 'power' = ACC/Big Ten/Big 12/SEC + Notre Dame; nil/'all' = all FBS.
+-- ============================================================
+alter table bestball_leagues add column if not exists cfb_pool text;
+select pg_notify('pgrst', 'reload schema');

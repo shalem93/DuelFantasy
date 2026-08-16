@@ -915,6 +915,16 @@ private struct CommishSettingsSheet: View {
                     }
 
                     // Scoring Model card
+                    if league.sport == "CFB" {
+                        settingsCard(title: "Player Pool") {
+                            Text(league.cfbPool == "power"
+                                 ? "Power Conferences — ACC, Big Ten, Big 12, SEC + Notre Dame"
+                                 : "All FBS programs")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
                     settingsCard(title: "Entry Fee (RR)") {
                         // Editable only pre-draft — members are charged
                         // this amount when the draft starts.

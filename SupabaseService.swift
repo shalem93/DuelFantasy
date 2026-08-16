@@ -336,6 +336,7 @@ struct BestBallLeagueRecord: Codable, Identifiable {
     let eplMidStarters: Int?
     let eplFwdStarters: Int?
     let eplFlexStarters: Int?
+    let cfbPool: String?
 
     enum CodingKeys: String, CodingKey {
         case id, title, sport, season, status, schedule
@@ -374,6 +375,7 @@ struct BestBallLeagueRecord: Codable, Identifiable {
         case eplMidStarters = "epl_mid_starters"
         case eplFwdStarters = "epl_fwd_starters"
         case eplFlexStarters = "epl_flex_starters"
+        case cfbPool = "cfb_pool"
     }
 
     func toModel() -> BestBallLeague {
@@ -412,6 +414,7 @@ struct BestBallLeagueRecord: Codable, Identifiable {
         league.eplMidStarters = eplMidStarters
         league.eplFwdStarters = eplFwdStarters
         league.eplFlexStarters = eplFlexStarters
+        league.cfbPool = cfbPool
         return league
     }
 }
@@ -2230,6 +2233,7 @@ final class SupabaseService {
         entryFee: Int = 10,
         nbaPG: Int? = nil, nbaSG: Int? = nil, nbaSF: Int? = nil, nbaPF: Int? = nil, nbaC: Int? = nil, nbaFLEX: Int? = nil,
         eplGK: Int? = nil, eplDEF: Int? = nil, eplMID: Int? = nil, eplFWD: Int? = nil, eplFLEX: Int? = nil,
+        cfbPool: String? = nil,
         createdBy: String, accessToken: String
     ) async throws -> BestBallLeagueRecord {
         var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/bestball_leagues"), resolvingAgainstBaseURL: false)
@@ -2270,9 +2274,11 @@ final class SupabaseService {
             let eplMidStarters: Int?
             let eplFwdStarters: Int?
             let eplFlexStarters: Int?
+            let cfbPool: String?
             enum CodingKeys: String, CodingKey {
                 case title, sport, season
                 case entryFee = "entry_fee"
+                case cfbPool = "cfb_pool"
                 case totalWeeks = "total_weeks"
                 case isPrivate = "is_private"
                 case createdBy = "created_by"
@@ -2316,7 +2322,8 @@ final class SupabaseService {
             nbaPgStarters: nbaPG, nbaSgStarters: nbaSG, nbaSfStarters: nbaSF,
             nbaPfStarters: nbaPF, nbaCStarters: nbaC, nbaFlexStarters: nbaFLEX,
             eplGkStarters: eplGK, eplDefStarters: eplDEF, eplMidStarters: eplMID,
-            eplFwdStarters: eplFWD, eplFlexStarters: eplFLEX
+            eplFwdStarters: eplFWD, eplFlexStarters: eplFLEX,
+            cfbPool: cfbPool
         )
         let results: [BestBallLeagueRecord] = try await request(url: url, method: "POST", body: payload, bearerToken: accessToken, preferReturn: "representation")
         guard let league = results.first else { throw URLError(.badServerResponse) }

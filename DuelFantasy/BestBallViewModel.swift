@@ -198,6 +198,10 @@ final class BestBallViewModel {
     // the draft screen doesn't lose it; auto-pick drafts from it first.
     var draftQueue: [String] = []
 
+    /// "sport|cfbPool" of the currently loaded availablePlayers, so
+    /// switching leagues with different pools refetches.
+    private var availablePlayersKey: String?
+
     // Draft polling
     private var draftPollTask: Task<Void, Never>?
     /// Wall-clock of the last observed pick landing (or the drafting state
@@ -441,7 +445,7 @@ final class BestBallViewModel {
 
     // MARK: - Create & Join
 
-    func createLeague(title: String, sport: String, isPrivate: Bool = false, maxMembers: Int = 12, rosterSize: Int = 12, pitcherSlots: Int = 2, batterSlots: Int = 6, scoringMode: BestBallScoringMode = .normal, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0, entryFee: Int = 10, nbaPG: Int? = nil, nbaSG: Int? = nil, nbaSF: Int? = nil, nbaPF: Int? = nil, nbaC: Int? = nil, nbaFLEX: Int? = nil, eplGK: Int? = nil, eplDEF: Int? = nil, eplMID: Int? = nil, eplFWD: Int? = nil, eplFLEX: Int? = nil) async -> BestBallLeague? {
+    func createLeague(title: String, sport: String, isPrivate: Bool = false, maxMembers: Int = 12, rosterSize: Int = 12, pitcherSlots: Int = 2, batterSlots: Int = 6, scoringMode: BestBallScoringMode = .normal, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0, entryFee: Int = 10, nbaPG: Int? = nil, nbaSG: Int? = nil, nbaSF: Int? = nil, nbaPF: Int? = nil, nbaC: Int? = nil, nbaFLEX: Int? = nil, eplGK: Int? = nil, eplDEF: Int? = nil, eplMID: Int? = nil, eplFWD: Int? = nil, eplFLEX: Int? = nil, cfbPool: String? = nil) async -> BestBallLeague? {
         guard let uid = userID, let token = accessToken else { return nil }
         guard Self.isSportOpenForNewLeagues(sport) else {
             if sport == "NBA", Self.isSportJoinable(sport) {
@@ -466,6 +470,7 @@ final class BestBallViewModel {
                 entryFee: entryFee,
                 nbaPG: nbaPG, nbaSG: nbaSG, nbaSF: nbaSF, nbaPF: nbaPF, nbaC: nbaC, nbaFLEX: nbaFLEX,
                 eplGK: eplGK, eplDEF: eplDEF, eplMID: eplMID, eplFWD: eplFWD, eplFLEX: eplFLEX,
+                cfbPool: cfbPool,
                 createdBy: uid, accessToken: token
             )
             var league = record.toModel()
@@ -490,6 +495,7 @@ final class BestBallViewModel {
             league.eplMidStarters = eplMID
             league.eplFwdStarters = eplFWD
             league.eplFlexStarters = eplFLEX
+            league.cfbPool = cfbPool
 
             // Cache so the detail view has the correct values right away
             currentLeague = league
@@ -898,12 +904,19 @@ final class BestBallViewModel {
                 if currentLeague?.status == "drafting" {
                     await loadNFLByeWeeksIfNeeded()
                     await loadCFBByeWeeksIfNeeded()
-                    if availablePlayers.isEmpty, let sport = currentLeague?.sport {
-                        var players = (try? await playerProvider.fetchPlayers(sport: sport)) ?? []
-                        if currentLeague?.isDingersOnly == true {
-                            players = players.filter { !BestBallLineupConfig.isPitcher($0.position) }
+                    if let sport = currentLeague?.sport {
+                        // Key the cached pool by sport + CFB scope so
+                        // switching between leagues with different pools
+                        // (or sports) refetches instead of reusing.
+                        let poolKey = "\(sport)|\(currentLeague?.cfbPool ?? "all")"
+                        if availablePlayers.isEmpty || availablePlayersKey != poolKey {
+                            var players = (try? await playerProvider.fetchPlayers(sport: sport, cfbPool: currentLeague?.cfbPool)) ?? []
+                            if currentLeague?.isDingersOnly == true {
+                                players = players.filter { !BestBallLineupConfig.isPitcher($0.position) }
+                            }
+                            availablePlayers = players
+                            availablePlayersKey = poolKey
                         }
-                        availablePlayers = players
                     }
                     let state = BestBallDraftState(
                         league: currentLeague!,
@@ -1080,11 +1093,12 @@ final class BestBallViewModel {
 
             // Load players for draft
             if let league = currentLeague {
-                var players = (try? await playerProvider.fetchPlayers(sport: league.sport)) ?? []
+                var players = (try? await playerProvider.fetchPlayers(sport: league.sport, cfbPool: league.cfbPool)) ?? []
                 if league.isDingersOnly {
                     players = players.filter { !BestBallLineupConfig.isPitcher($0.position) }
                 }
                 availablePlayers = players
+                availablePlayersKey = "\(league.sport)|\(league.cfbPool ?? "all")"
             }
 
             await loadLeagueDetail(leagueID: leagueID)

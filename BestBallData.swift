@@ -74,6 +74,10 @@ struct BestBallLeague: Identifiable, Equatable, Hashable {
     var eplFwdStarters: Int? = nil
     var eplFlexStarters: Int? = nil
 
+    /// CFB player pool scope: "power" = ACC/Big Ten/Big 12/SEC + Notre
+    /// Dame; nil/"all" = every FBS program (legacy default).
+    var cfbPool: String? = nil
+
     var memberCount: Int { draftOrder.count }
     var isFull: Bool { draftOrder.count >= maxMembers }
     var isDingersOnly: Bool { scoringMode == .dingersOnly }
@@ -1199,7 +1203,9 @@ enum BestBallBotDrafter {
 // MARK: - Protocols
 
 protocol BestBallPlayerProvider {
-    func fetchPlayers(sport: String) async throws -> [BestBallPlayer]
+    /// `cfbPool` narrows the CFB pool ("power" = P4 + Notre Dame); other
+    /// sports ignore it.
+    func fetchPlayers(sport: String, cfbPool: String?) async throws -> [BestBallPlayer]
 }
 
 /// Result from weekly scoring with full stat lines
@@ -1246,7 +1252,9 @@ private class BBProjectionCache {
     var cfbLeadersSeason: Int?
     /// CFB avg fantasy points per game played: [playerID: avg].
     var cfbAvgPoints: [String: Double] = [:]
-    var cfbAvgFetched = false
+    /// Pool scopes ("all"/"power") whose averages sweep already ran —
+    /// the two scopes contain different players.
+    var cfbAvgScopesFetched: Set<String> = []
 }
 
 struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
@@ -1257,22 +1265,22 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
         self.session = session
     }
 
-    func fetchPlayers(sport: String) async throws -> [BestBallPlayer] {
+    func fetchPlayers(sport: String, cfbPool: String? = nil) async throws -> [BestBallPlayer] {
         switch sport {
         case "NBA": return try await fetchSportPlayers(sport: "basketball", league: "nba", sportName: "NBA", teamLimit: 30)
         case "MLB": return try await fetchSportPlayers(sport: "baseball", league: "mlb", sportName: "MLB", teamLimit: 30)
         case "NFL": return try await fetchSportPlayers(sport: "football", league: "nfl", sportName: "NFL", teamLimit: 32)
-        case "CFB": return try await fetchSportPlayers(sport: "football", league: "college-football", sportName: "CFB", teamLimit: 140)
+        case "CFB": return try await fetchSportPlayers(sport: "football", league: "college-football", sportName: "CFB", teamLimit: 140, cfbPool: cfbPool)
         case "EPL": return try await fetchSportPlayers(sport: "soccer", league: "eng.1", sportName: "EPL", teamLimit: 20)
         default: return []
         }
     }
 
-    private func fetchSportPlayers(sport: String, league: String, sportName: String, teamLimit: Int) async throws -> [BestBallPlayer] {
+    private func fetchSportPlayers(sport: String, league: String, sportName: String, teamLimit: Int, cfbPool: String? = nil) async throws -> [BestBallPlayer] {
         // Step 1: Fetch league-wide leader stats to get real projections for top players
         try await fetchLeagueWideProjections(sport: sport, league: league, sportName: sportName)
 
-        let teams = try await fetchAllTeams(sport: sport, league: league)
+        let teams = try await fetchAllTeams(sport: sport, league: league, cfbPool: cfbPool)
         // Roster fetches in parallel — the CFB pool is ~130 FBS programs
         // now, and 2 sequential requests per team took minutes.
         var players: [BestBallPlayer] = []
@@ -1297,7 +1305,7 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
             await attachEPLAverages(to: &players)
         }
         if sportName == "CFB" {
-            await attachCFBAverages(to: &players)
+            await attachCFBAverages(to: &players, scope: cfbPool ?? "all")
         }
 
         // NFL: attach real market ADP (PPR + 2QB superflex boards). The
@@ -1330,15 +1338,21 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
         }
     }
 
-    private func fetchAllTeams(sport: String, league: String) async throws -> [BBTeamRef] {
+    private func fetchAllTeams(sport: String, league: String, cfbPool: String? = nil) async throws -> [BBTeamRef] {
         // CFB: ~755 programs across all divisions is far too many rosters
         // to pull (and the long tail has no fantasy relevance). Take the
         // power conferences + independents (~69 teams) from the core API's
         // season group membership — the site API's `groups` query param is
         // silently ignored (it returns D3 schools).
         if league == "college-football" {
-            let ids = await fetchCFBPowerConferenceTeamIDs()
+            // "power" pool = ACC (1), Big 12 (4), Big Ten (5), SEC (8),
+            // plus Notre Dame (team 87) explicitly — the Independents
+            // group would drag in the non-ND randos.
+            let isPowerPool = cfbPool == "power"
+            let groups = isPowerPool ? [1, 4, 5, 8] : [1, 4, 5, 8, 9, 12, 15, 17, 18, 37, 151]
+            var ids = await fetchCFBPowerConferenceTeamIDs(groups: groups)
             guard !ids.isEmpty else { return [] }
+            if isPowerPool { ids.insert("87") }   // Notre Dame
             // One site-API call maps every team ID → abbreviation.
             let allTeams = try await fetchTeamsPage(sport: sport, league: league, query: "limit=1000")
             return allTeams.filter { ids.contains($0.id) }
@@ -1350,14 +1364,14 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
     /// API (ESPN group IDs: ACC 1, Big 12 4, Big Ten 5, SEC 8, Indep 18).
     /// Tries the current season year first, then the prior year (the new
     /// season's group memberships publish over the summer).
-    private func fetchCFBPowerConferenceTeamIDs() async -> Set<String> {
+    private func fetchCFBPowerConferenceTeamIDs(groups: [Int]) async -> Set<String> {
         let year = Calendar.current.component(.year, from: Date())
         for seasonYear in [year, year - 1] {
             var ids = Set<String>()
             await withTaskGroup(of: [String].self) { group in
                 // ACC 1, Big 12 4, Big Ten 5, SEC 8, Pac-12 9, CUSA 12,
                 // MAC 15, MWC 17, Independents 18, Sun Belt 37, American 151
-                for groupID in [1, 4, 5, 8, 9, 12, 15, 17, 18, 37, 151] {
+                for groupID in groups {
                     group.addTask {
                         let urlString = "https://sports.core.api.espn.com/v2/sports/football/leagues/college-football/seasons/\(seasonYear)/types/2/groups/\(groupID)/teams?limit=40"
                         guard let url = URL(string: urlString),
@@ -2098,9 +2112,9 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
     /// per game PLAYED. The PROJ column divides season totals by 17 (the
     /// NFL parser CFB shares), so this is the honest per-game rate for a
     /// 12-13 game college season.
-    private func attachCFBAverages(to players: inout [BestBallPlayer]) async {
-        if !cache.cfbAvgFetched {
-            cache.cfbAvgFetched = true
+    private func attachCFBAverages(to players: inout [BestBallPlayer], scope: String) async {
+        if !cache.cfbAvgScopesFetched.contains(scope) {
+            cache.cfbAvgScopesFetched.insert(scope)
             let season = cache.cfbLeadersSeason ?? (espnSeasonYear(for: "CFB") - 1)
             var avgs: [String: Double] = [:]
             await withTaskGroup(of: (String, Double)?.self) { group in
@@ -2109,8 +2123,9 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
                 // leaders left most draftable players showing "–" even
                 // when they played last season. ~20KB per request on the
                 // 24-connection sweep session; players with no stats last
-                // season 404 cheaply.
-                for player in players {
+                // season 404 cheaply. Skip ids an earlier scope already
+                // resolved.
+                for player in players where cache.cfbAvgPoints[player.id] == nil {
                     let espnID = String(player.id.dropFirst("cfb-".count))
                     group.addTask {
                         guard let avg = await self.fetchCFBSeasonAverage(espnID: espnID, season: season) else { return nil }
@@ -2121,7 +2136,7 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
                     if let (id, avg) = item { avgs[id] = avg }
                 }
             }
-            cache.cfbAvgPoints = avgs
+            cache.cfbAvgPoints.merge(avgs) { existing, _ in existing }
         }
         players = players.map { player in
             var player = player

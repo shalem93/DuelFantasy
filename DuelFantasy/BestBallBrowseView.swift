@@ -28,6 +28,8 @@ struct BestBallBrowseView: View {
     @State private var newNbaPF: Int = 1
     @State private var newNbaC: Int = 1
     @State private var newNbaFLEX: Int = 3
+    /// CFB player pool: "all" FBS or "power" (P4 + Notre Dame).
+    @State private var newCfbPool: String = "all"
     // EPL positional lineup config (defaults to the classic XI).
     @State private var newEplGK: Int = 1
     @State private var newEplDEF: Int = 3
@@ -616,6 +618,21 @@ struct BestBallBrowseView: View {
                     Toggle("Private League", isOn: $newLeaguePrivate)
                 }
 
+                if newLeagueSport == "CFB" {
+                    Section("Player Pool") {
+                        Picker("", selection: $newCfbPool) {
+                            Text("All FBS").tag("all")
+                            Text("Power Conferences").tag("power")
+                        }
+                        .pickerStyle(.segmented)
+                        Text(newCfbPool == "power"
+                             ? "ACC, Big Ten, Big 12, SEC + Notre Dame — household names only."
+                             : "Every FBS program — a deep pool with plenty of sleepers (and randos).")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 if newLeagueSport == "MLB" {
                     Section("Scoring Mode") {
                         Picker("Mode", selection: $newScoringMode) {
@@ -828,7 +845,8 @@ struct BestBallBrowseView: View {
                                 eplDEF: newLeagueSport == "EPL" ? newEplDEF : nil,
                                 eplMID: newLeagueSport == "EPL" ? newEplMID : nil,
                                 eplFWD: newLeagueSport == "EPL" ? newEplFWD : nil,
-                                eplFLEX: newLeagueSport == "EPL" ? newEplFLEX : nil
+                                eplFLEX: newLeagueSport == "EPL" ? newEplFLEX : nil,
+                                cfbPool: newLeagueSport == "CFB" ? newCfbPool : nil
                             )
                             isCreatingLeague = false
                             // Failed create: keep the sheet open so the
@@ -853,6 +871,7 @@ struct BestBallBrowseView: View {
                             newEplMID = 4
                             newEplFWD = 2
                             newEplFLEX = 1
+                            newCfbPool = "all"
                             // Land the creator inside their new league
                             // (shows the invite code for private ones).
                             // Small beat so the sheet dismissal animation
