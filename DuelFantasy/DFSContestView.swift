@@ -3631,7 +3631,7 @@ struct DFSContestView: View {
         // sees which matchup the card refers to. Falls back to the generic
         // sport+type label when no VM has the tournament loaded.
         if isSG {
-            let allVMs: [DFSViewModel] = [viewModel, nhlViewModel, mlbViewModel, pgaViewModel, eplViewModel, uclViewModel, wcViewModel, ufcViewModel, nflViewModel, cfbViewModel]
+            let allVMs: [DFSViewModel] = [viewModel, nhlViewModel, mlbViewModel, pgaViewModel, eplViewModel, uclViewModel, wcViewModel, ufcViewModel, nflViewModel, cfbViewModel, ncaamViewModel, wnbaViewModel, nascarViewModel]
             for vm in allVMs {
                 if let t = vm.tournaments.first(where: { $0.id == tournamentID }),
                    !t.title.isEmpty,
@@ -3736,7 +3736,7 @@ struct DFSContestView: View {
                     // locks so the user has a useful signal instead.
                     let lockLabel: String = {
                         let tid = entry.tournamentID
-                        let allVMs: [DFSViewModel] = [viewModel, nhlViewModel, mlbViewModel, pgaViewModel, eplViewModel, uclViewModel, wcViewModel, ufcViewModel, nflViewModel, cfbViewModel]
+                        let allVMs: [DFSViewModel] = [viewModel, nhlViewModel, mlbViewModel, pgaViewModel, eplViewModel, uclViewModel, wcViewModel, ufcViewModel, nflViewModel, cfbViewModel, ncaamViewModel, wnbaViewModel, nascarViewModel]
                         for vm in allVMs {
                             if let t = vm.tournaments.first(where: { $0.id == tid }) {
                                 let lt = vm.lockTimeForTournament(t)

@@ -1605,3 +1605,14 @@ select pg_notify('pgrst', 'reload schema');
 -- ============================================================
 alter table public.bestball_leagues add column if not exists cfb_pool text;
 select pg_notify('pgrst', 'reload schema');
+
+
+-- ============================================================
+-- DFS tournament position snapshot (Aug 2026): player_id → slate
+-- position, written at entry-submit time (first non-empty snapshot
+-- wins, like player_salaries). Settlement of a rolled-over football
+-- slate uses this to regenerate bots with exact RB/WR/TE typing —
+-- box scores alone can't split those positions.
+-- ============================================================
+alter table public.dfs_tournaments add column if not exists player_positions jsonb not null default '{}';
+select pg_notify('pgrst', 'reload schema');

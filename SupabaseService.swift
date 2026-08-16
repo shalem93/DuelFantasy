@@ -677,6 +677,11 @@ struct DFSTournamentRecord: Codable {
     /// format it was played as, instead of re-deriving it (and getting it wrong)
     /// for a finished slate that's no longer fetchable.
     let isSingleGame: Bool?
+    /// Player ID → slate position, persisted at submit time. Settlement of a
+    /// rolled-over slate can't recover positions (football box scores can't
+    /// split RB/WR/TE), so this snapshot is the authoritative source for
+    /// position-constrained bot regeneration.
+    let playerPositions: [String: String]?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -688,9 +693,10 @@ struct DFSTournamentRecord: Codable {
         case playerSalaries = "player_salaries"
         case botField = "bot_field"
         case isSingleGame = "is_single_game"
+        case playerPositions = "player_positions"
     }
 
-    init(id: String, title: String, league: String, lockTime: Date, isSettled: Bool? = nil, totalEntries: Int? = nil, playerSalaries: [String: Int]? = nil, botField: [BotFieldEntry]? = nil, isSingleGame: Bool? = nil) {
+    init(id: String, title: String, league: String, lockTime: Date, isSettled: Bool? = nil, totalEntries: Int? = nil, playerSalaries: [String: Int]? = nil, botField: [BotFieldEntry]? = nil, isSingleGame: Bool? = nil, playerPositions: [String: String]? = nil) {
         self.id = id
         self.title = title
         self.league = league
@@ -700,6 +706,7 @@ struct DFSTournamentRecord: Codable {
         self.playerSalaries = playerSalaries
         self.botField = botField
         self.isSingleGame = isSingleGame
+        self.playerPositions = playerPositions
     }
 
     // Custom encode to skip nil fields — prevents upsert from overwriting existing values with null
@@ -714,6 +721,7 @@ struct DFSTournamentRecord: Codable {
         try container.encodeIfPresent(playerSalaries, forKey: .playerSalaries)
         try container.encodeIfPresent(botField, forKey: .botField)
         try container.encodeIfPresent(isSingleGame, forKey: .isSingleGame)
+        try container.encodeIfPresent(playerPositions, forKey: .playerPositions)
     }
 }
 

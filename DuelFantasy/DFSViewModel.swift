@@ -1716,6 +1716,20 @@ final class DFSViewModel {
            pgaBaseEventID(from: t.id) != activeEvent {
             return .distantPast
         }
+        // NASCAR rotates race-to-race exactly like PGA rotates weekly: after a
+        // race runs, the slate moves to the NEXT race, but the entered
+        // tournament for the finished race lingers (synthetic reconstruction)
+        // and falling through to the global `lockTime` — the next race's
+        // FUTURE lock — marked it "UPCOMING / LOCKS SOON" forever and blocked
+        // settlement. The tid embeds its own ESPN event id
+        // ("nascar-{eventID}-{size}"); if it isn't the loaded slate's event,
+        // that race has already run — treat it as locked/past.
+        if sport == "NASCAR", let activeEvent = slateGames.first?.id {
+            let parts = t.id.components(separatedBy: "-")
+            if parts.count >= 2, parts[1] != activeEvent {
+                return .distantPast
+            }
+        }
         return lockTime
     }
 
@@ -6642,6 +6656,14 @@ final class DFSViewModel {
 
         // Build full slate salary map so re-settlement can use original prices
         let allPlayerSalaries = Dictionary(activePlayers.map { ($0.id, $0.salary) }, uniquingKeysWith: { a, _ in a })
+        // Position snapshot, persisted alongside salaries: settlement of a
+        // rolled-over slate can't recover positions (football box scores
+        // can't split RB/WR/TE), so bot regeneration needs this to fill
+        // DK-shaped rosters with the right players.
+        let allPlayerPositions = Dictionary(
+            activePlayers.compactMap { p in p.position.isEmpty ? nil : (p.id, p.position) },
+            uniquingKeysWith: { a, _ in a }
+        )
 
         Task {
             do {
@@ -6730,6 +6752,13 @@ final class DFSViewModel {
                 let canonicalToWrite: [String: Int] = serverCanonicalIsValid
                     ? serverCanonical
                     : allPlayerSalaries
+                // Positions: first non-empty snapshot wins (like the salary
+                // canonical) — nil skips the column on upsert so an existing
+                // server snapshot is never overwritten.
+                let positionsToWrite: [String: String]? = {
+                    if let stored = existingTournament?.playerPositions, !stored.isEmpty { return nil }
+                    return allPlayerPositions.isEmpty ? nil : allPlayerPositions
+                }()
                 let record = DFSTournamentRecord(
                     id: resolvedTournamentID,
                     title: tournament.title,
@@ -6739,9 +6768,22 @@ final class DFSViewModel {
                     // slate's lock time (hours too early).
                     lockTime: lockTimeForTournament(tournament),
                     playerSalaries: canonicalToWrite,
-                    isSingleGame: tournament.isSingleGame
+                    isSingleGame: tournament.isSingleGame,
+                    playerPositions: positionsToWrite
                 )
-                try await SupabaseService.shared.upsertTournament(record: record, accessToken: token)
+                do {
+                    try await SupabaseService.shared.upsertTournament(record: record, accessToken: token)
+                } catch where record.playerPositions != nil {
+                    // player_positions column may not exist yet (migration not
+                    // run) — never let the snapshot break submission; retry
+                    // without it.
+                    let fallback = DFSTournamentRecord(
+                        id: record.id, title: record.title, league: record.league,
+                        lockTime: record.lockTime, playerSalaries: record.playerSalaries,
+                        isSingleGame: record.isSingleGame
+                    )
+                    try await SupabaseService.shared.upsertTournament(record: fallback, accessToken: token)
+                }
                 // Pull server's canonical into the local cache so the
                 // builder, persist path, and any subsequent draft of
                 // the SAME slate (H2H / 5-Man / 2000-person etc.) all
@@ -8887,7 +8929,7 @@ final class DFSViewModel {
             let points: Double
             let position: String
         }
-        let allPlayers: [PlayerInfo] = snapshot.playerFantasyPoints.compactMap { (pid, pts) in
+        var allPlayers: [PlayerInfo] = snapshot.playerFantasyPoints.compactMap { (pid, pts) in
             let name = snapshot.playerLiveStats[pid]?.name ?? pid
             // Derive position from live stats
             let pos: String
@@ -9041,6 +9083,19 @@ final class DFSViewModel {
             }
         }
         let isSingleGame = isSingleGameTournament || (serverTournament?.isSingleGame ?? false)
+
+        // Football: overlay the position snapshot persisted at submit time —
+        // exact RB/WR/TE typing that box-score stat-shape inference can't
+        // provide. Players missing from the snapshot keep their inferred
+        // position (QB/DST/SKILL/UTIL).
+        if sportPrefix == "nfl" || sportPrefix == "cfb",
+           let storedPositions = serverTournament?.playerPositions, !storedPositions.isEmpty {
+            let valid: Set<String> = ["QB", "RB", "WR", "TE", "DST"]
+            allPlayers = allPlayers.map { p in
+                guard let sp = storedPositions[p.id], valid.contains(sp) else { return p }
+                return PlayerInfo(id: p.id, name: p.name, points: p.points, position: sp)
+            }
+        }
 
         // Compute per-entry user stats for the primary entry (used for backward compat)
         var userPerPlayerPoints: [String: Double] = [:]
