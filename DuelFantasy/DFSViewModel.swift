@@ -2602,14 +2602,18 @@ final class DFSViewModel {
                 return player.position != "GK"
             }
             // Football CLASSIC FLEX = RB/WR/TE; Showdown FLEX takes any
-            // position (DK allows multiple QBs in single-game).
+            // position (DK allows multiple QBs in single-game). SKILL is the
+            // settlement-inferred "some ball-toucher" position (box-score
+            // shape can't split RB/WR/TE).
             if !isSingleGame, effectiveSport == "NFL" || effectiveSport == "CFB" {
-                return ["RB", "WR", "TE"].contains(player.position)
+                return ["RB", "WR", "TE", "SKILL"].contains(player.position)
             }
             return true
         case "SFLEX":
             // Football superflex: QB-eligible flex (DK college classic).
-            return ["QB", "RB", "WR", "TE"].contains(player.position)
+            return ["QB", "RB", "WR", "TE", "SKILL"].contains(player.position)
+        case "RB", "WR", "TE":
+            return player.position == slot || player.position == "SKILL"
         case "P":
             return player.position == "SP" || player.position == "RP" || player.position == "P"
         case "C/1B":
@@ -4026,11 +4030,13 @@ final class DFSViewModel {
                     let positional = relaxed.filter { playerMatchesSlot($0, slot: requiredPos, isSingleGame: isSingleGame) }
                     if !positional.isEmpty {
                         relaxed = positional
-                    } else if isSoccer || requiredPos == "GK" || requiredPos == "G" {
+                    } else if isSoccer || requiredPos == "GK" || requiredPos == "G"
+                                || effectiveSport == "NFL" || effectiveSport == "CFB" {
                         // NEVER mis-slot a position-strict spot (a defender in the
-                        // GK slot, etc.). Leave it empty — the position-aware pad
-                        // below fills it from the full pool, pulling a cheap keeper
-                        // from another game if the early games' keepers are used up.
+                        // GK slot, a cornerback at QB, etc.). Leave it empty — the
+                        // position-aware pad below fills it from the full pool,
+                        // pulling a cheap fit from another game if this game's
+                        // players at that position are used up.
                         relaxed = []
                     }
                 }
@@ -4115,11 +4121,12 @@ final class DFSViewModel {
             while fallback.count < lineupSize {
                 let requiredPos = slots[fallback.count]
                 var pick = cheapestFit(eligible, pos: requiredPos) ?? cheapestFit(players, pos: requiredPos)
-                // Non-soccer last resort: any unused player (their slot rules are
-                // already permissive via playerMatchesSlot). Soccer keeps the
-                // position exact — if no keeper/etc. exists anywhere, the lineup
-                // stays short and is retried rather than mis-slotted.
-                if pick == nil && !isSoccer {
+                // Non-soccer/football last resort: any unused player (their slot
+                // rules are already permissive via playerMatchesSlot). Soccer and
+                // football keep the position exact — if no QB/keeper/etc. exists
+                // anywhere, the lineup stays short rather than mis-slotted
+                // (Salvon Ahmed showing in a QB slot).
+                if pick == nil && !isSoccer && effectiveSport != "NFL" && effectiveSport != "CFB" {
                     pick = (eligible + players).first { !usedIDs.contains($0.id) }
                 }
                 guard let chosen = pick else { break }
@@ -8904,6 +8911,21 @@ final class DFSViewModel {
                 } else {
                     pos = "MID"
                 }
+            } else if sportPrefix == "nfl" || sportPrefix == "cfb" {
+                // Football: the slate has usually rolled over by settlement, so
+                // real pool positions are gone — infer from box-score stat
+                // shape. Defense rows → DST, pass attempts/yards → QB, any
+                // other ball-toucher → SKILL (fits RB/WR/TE/FLEX slots).
+                // Everyone else (pure defenders, inactive) stays UTIL, which
+                // matches NO football slot — keeps CBs out of bot lineups.
+                if let stats = snapshot.playerLiveStats[pid] {
+                    if stats.name.hasSuffix("Defense") { pos = "DST" }
+                    else if stats.fga > 0 || stats.points != 0 { pos = "QB" }
+                    else if stats.rebounds != 0 || stats.assists > 0 || stats.fta != 0 || stats.threePA > 0 { pos = "SKILL" }
+                    else { pos = "UTIL" }
+                } else {
+                    pos = "UTIL"
+                }
             } else {
                 pos = "UTIL"
             }
@@ -9595,6 +9617,10 @@ final class DFSViewModel {
                 print("[DFS] Padding saved bot field with \(botsNeeded) additional bots (had \(currentBotCount), need \(targetBots))")
                 var seenLineupKeys = Set(field.map { $0.playerIDs.sorted().joined(separator: "|") })
                 for i in 0..<botsNeeded {
+                    // Generating thousands of bots runs on the main actor —
+                    // yield regularly so the UI stays responsive (an admin
+                    // re-grade was hard-freezing the app for minutes).
+                    if i % 10 == 0 { await Task.yield() }
                     let dfsPlayersForBot: [DFSPlayer] = baseBotPlayers.map { p in
                         // Use salary-based projections to avoid hindsight bias.
                         // Higher-salary players get higher projections, matching pre-game expectations.
@@ -9652,6 +9678,9 @@ final class DFSViewModel {
             let botsToGenerate = max(0, entryCount - totalRealEntries)
             var seenLineupKeys = Set(field.map { $0.playerIDs.sorted().joined(separator: "|") })
             for i in 0..<botsToGenerate {
+                // Yield so the main actor can service UI between bots — a
+                // forced regen of a 2000-entry field was freezing the app.
+                if i % 10 == 0 { await Task.yield() }
                 let dfsPlayersForBot: [DFSPlayer] = baseBotPlayers.map { p in
                     let salaryRatio = Double(p.salary) / Double(salaryCap) * Double(botLineupSize)
                     let baseProj = salaryRatio * avgPoints * Double.random(in: 0.5...1.5)

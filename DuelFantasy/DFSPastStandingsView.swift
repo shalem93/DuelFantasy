@@ -660,8 +660,20 @@ struct DFSPastStandingsView: View {
             let isMVP = isSingleGame && index == 0
             let fpts = perPlayerPts[playerID] ?? 0
             let stats = viewModel.pastTournamentPlayerStats[playerID]
+            // Classic lineups are stored in roster-slot order, so label each
+            // row by its SLOT (QB/RB/.../FLEX/DST), not the player's own
+            // position — pre-fix bot lineups may hold a mismatched player,
+            // but the slot is what the lineup structure means.
+            let fbSlots: [String] = (result.tournamentId?.hasPrefix("cfb-") == true)
+                ? ["QB", "RB", "RB", "WR", "WR", "WR", "FLEX", "SFLEX"]
+                : ["QB", "RB", "RB", "WR", "WR", "WR", "TE", "FLEX", "DST"]
             let fbPos = slotPosition(for: playerID)
-            let slotLabel = isMVP ? "MVP" : (isSingleGame ? "FLEX" : (fbPos.isEmpty ? "\(index + 1)" : fbPos))
+            let slotLabel: String = {
+                if isMVP { return "MVP" }
+                if isSingleGame { return "FLEX" }
+                if playerIDs.count == fbSlots.count, index < fbSlots.count { return fbSlots[index] }
+                return fbPos.isEmpty ? "\(index + 1)" : fbPos
+            }()
             let isWideSlot = isMVP || slotLabel == "FLEX" || slotLabel.count > 2
 
             HStack(alignment: .top, spacing: 0) {
@@ -671,7 +683,7 @@ struct DFSPastStandingsView: View {
                             .font(.system(size: isMVP ? 7 : 8, weight: .bold))
                             .foregroundStyle(isMVP ? .black : .white)
                             .lineLimit(1)
-                            .frame(width: isWideSlot ? 28 : 18, height: 18)
+                            .frame(width: isWideSlot ? (slotLabel.count >= 5 ? 36 : 28) : 18, height: 18)
                             .background(isMVP ? Color.yellow : brandPurple.opacity(0.7))
                             .clipShape(isWideSlot ? AnyShape(Capsule()) : AnyShape(Circle()))
 
