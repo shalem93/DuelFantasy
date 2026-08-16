@@ -256,11 +256,16 @@ struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
             let comps = etCal.dateComponents([.hour, .minute], from: game.startTime)
             return Double(comps.hour ?? 0) + Double(comps.minute ?? 0) / 60.0
         }
-        let dayGames = includedGames.filter { kickHourET($0) < 18.5 }
-        let primetimeGames = includedGames.filter { kickHourET($0) >= 18.5 }
+        // Main = the 1pm + 4pm windows ONLY, like DK: morning international
+        // games (9:30am ET London/Germany kicks) and primetime (SNF,
+        // 6:30pm ET onward) are both excluded — each still gets its own
+        // single-game showdown. Afternoon Only = strictly the 4:05/4:25
+        // window (>= 3pm and < 6:30pm).
+        let dayGames = includedGames.filter { kickHourET($0) >= 12.0 && kickHourET($0) < 18.5 }
         let afternoonGames = dayGames.filter { kickHourET($0) >= 15.0 }
-        // Only carve primetime out of Main when a real day slate remains.
-        let mainWindow: [String]? = (!primetimeGames.isEmpty && dayGames.count >= 2)
+        // Only carve when a real day slate remains and something is
+        // actually being excluded.
+        let mainWindow: [String]? = (dayGames.count >= 2 && dayGames.count < includedGames.count)
             ? dayGames.map(\.id) : nil
         var windowSlates: [DFSWindowSlate] = []
         if afternoonGames.count >= 2, afternoonGames.count < dayGames.count {
