@@ -30,6 +30,7 @@ struct BestBallBrowseView: View {
     @State private var newNbaFLEX: Int = 3
     /// CFB player pool: "all" FBS or "power" (P4 + Notre Dame).
     @State private var newCfbPool: String = "all"
+    @State private var newPickTimer: Int = 30
     // EPL positional lineup config (defaults to the classic XI).
     @State private var newEplGK: Int = 1
     @State private var newEplDEF: Int = 3
@@ -601,6 +602,17 @@ struct BestBallBrowseView: View {
 
                 Section("League Settings") {
                     Stepper("League Size: \(newLeagueSize)", value: $newLeagueSize, in: 4...16, step: 2)
+                    HStack {
+                        Text("Pick Clock")
+                        Spacer()
+                        Picker("", selection: $newPickTimer) {
+                            Text("30s").tag(30)
+                            Text("45s").tag(45)
+                            Text("60s").tag(60)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 170)
+                    }
                     if newScoringMode != .dingersOnly {
                         // Sport-aware minimum roster size — it can never
                         // be lower than the configured starting lineup
@@ -846,7 +858,8 @@ struct BestBallBrowseView: View {
                                 eplMID: newLeagueSport == "EPL" ? newEplMID : nil,
                                 eplFWD: newLeagueSport == "EPL" ? newEplFWD : nil,
                                 eplFLEX: newLeagueSport == "EPL" ? newEplFLEX : nil,
-                                cfbPool: newLeagueSport == "CFB" ? newCfbPool : nil
+                                cfbPool: newLeagueSport == "CFB" ? newCfbPool : nil,
+                                pickTimerSeconds: newPickTimer
                             )
                             isCreatingLeague = false
                             // Failed create: keep the sheet open so the
@@ -872,6 +885,7 @@ struct BestBallBrowseView: View {
                             newEplFWD = 2
                             newEplFLEX = 1
                             newCfbPool = "all"
+                            newPickTimer = 30
                             // Land the creator inside their new league
                             // (shows the invite code for private ones).
                             // Small beat so the sheet dismissal animation

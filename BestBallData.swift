@@ -25,7 +25,7 @@ struct BestBallLeague: Identifiable, Equatable, Hashable {
     let draftStartTime: Date?
     var draftOrder: [String]
     var currentPickNumber: Int
-    let pickTimerSeconds: Int
+    var pickTimerSeconds: Int
     var rosterSize: Int
     let scoringSlots: Int
     var currentWeek: Int

@@ -582,6 +582,7 @@ private struct CommishSettingsSheet: View {
     @State private var editEplFWD: Int
     @State private var editEplFLEX: Int
     @State private var editEntryFee: Int
+    @State private var editPickTimer: Int
     @State private var isSavingSettings: Bool = false
     @State private var showDeleteConfirmation: Bool = false
     @State private var isDeletingLeague: Bool = false
@@ -625,6 +626,7 @@ private struct CommishSettingsSheet: View {
         _editEplFWD = State(initialValue: league.eplFwdStarters ?? 2)
         _editEplFLEX = State(initialValue: league.eplFlexStarters ?? 1)
         _editEntryFee = State(initialValue: league.entryFee)
+        _editPickTimer = State(initialValue: league.pickTimerSeconds)
         _editScheduleDraft = State(initialValue: league.draftStartTime != nil)
         _editDraftDate = State(initialValue: league.draftStartTime ?? Date().addingTimeInterval(3600))
     }
@@ -956,6 +958,37 @@ private struct CommishSettingsSheet: View {
                             .foregroundStyle(.secondary)
                     }
 
+                    settingsCard(title: "Pick Clock") {
+                        // Editable only pre-draft — the clock is live once
+                        // the draft starts.
+                        let clockEditable = league.status == "open"
+                        HStack(spacing: 8) {
+                            ForEach([30, 45, 60], id: \.self) { secs in
+                                let isSelected = editPickTimer == secs
+                                Button {
+                                    guard clockEditable else { return }
+                                    Haptics.light()
+                                    editPickTimer = secs
+                                } label: {
+                                    Text("\(secs)s")
+                                        .font(.subheadline.weight(.bold))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 8)
+                                        .background(isSelected ? brandPurple : Color(.systemGray6))
+                                        .foregroundStyle(isSelected ? .white : .primary)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                }
+                                .buttonStyle(.plain)
+                                .opacity(clockEditable || isSelected ? 1 : 0.4)
+                            }
+                        }
+                        Text(clockEditable
+                             ? "Seconds each drafter has per pick."
+                             : "Pick clock is locked once the draft begins.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
                     settingsCard(title: "Scoring Model") {
                         Text(BestBallLineupConfig.scoringDescription(for: league.sport, scoringMode: league.scoringMode))
                             .font(.caption.monospaced())
@@ -1004,7 +1037,8 @@ private struct CommishSettingsSheet: View {
                                     eplMID: league.sport == "EPL" ? editEplMID : nil,
                                     eplFWD: league.sport == "EPL" ? editEplFWD : nil,
                                     eplFLEX: league.sport == "EPL" ? editEplFLEX : nil,
-                                    entryFee: league.status == "open" ? editEntryFee : nil
+                                    entryFee: league.status == "open" ? editEntryFee : nil,
+                                    pickTimerSeconds: league.status == "open" ? editPickTimer : nil
                                 )
                                 // Persist the draft schedule only when it changed.
                                 let newSchedule: Date? = editScheduleDraft ? editDraftDate : nil

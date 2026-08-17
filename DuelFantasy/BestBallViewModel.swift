@@ -445,7 +445,7 @@ final class BestBallViewModel {
 
     // MARK: - Create & Join
 
-    func createLeague(title: String, sport: String, isPrivate: Bool = false, maxMembers: Int = 12, rosterSize: Int = 12, pitcherSlots: Int = 2, batterSlots: Int = 6, scoringMode: BestBallScoringMode = .normal, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0, entryFee: Int = 10, nbaPG: Int? = nil, nbaSG: Int? = nil, nbaSF: Int? = nil, nbaPF: Int? = nil, nbaC: Int? = nil, nbaFLEX: Int? = nil, eplGK: Int? = nil, eplDEF: Int? = nil, eplMID: Int? = nil, eplFWD: Int? = nil, eplFLEX: Int? = nil, cfbPool: String? = nil) async -> BestBallLeague? {
+    func createLeague(title: String, sport: String, isPrivate: Bool = false, maxMembers: Int = 12, rosterSize: Int = 12, pitcherSlots: Int = 2, batterSlots: Int = 6, scoringMode: BestBallScoringMode = .normal, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0, entryFee: Int = 10, nbaPG: Int? = nil, nbaSG: Int? = nil, nbaSF: Int? = nil, nbaPF: Int? = nil, nbaC: Int? = nil, nbaFLEX: Int? = nil, eplGK: Int? = nil, eplDEF: Int? = nil, eplMID: Int? = nil, eplFWD: Int? = nil, eplFLEX: Int? = nil, cfbPool: String? = nil, pickTimerSeconds: Int = 30) async -> BestBallLeague? {
         guard let uid = userID, let token = accessToken else { return nil }
         guard Self.isSportOpenForNewLeagues(sport) else {
             if sport == "NBA", Self.isSportJoinable(sport) {
@@ -471,6 +471,7 @@ final class BestBallViewModel {
                 nbaPG: nbaPG, nbaSG: nbaSG, nbaSF: nbaSF, nbaPF: nbaPF, nbaC: nbaC, nbaFLEX: nbaFLEX,
                 eplGK: eplGK, eplDEF: eplDEF, eplMID: eplMID, eplFWD: eplFWD, eplFLEX: eplFLEX,
                 cfbPool: cfbPool,
+                pickTimerSeconds: pickTimerSeconds,
                 createdBy: uid, accessToken: token
             )
             var league = record.toModel()
@@ -496,6 +497,7 @@ final class BestBallViewModel {
             league.eplFwdStarters = eplFWD
             league.eplFlexStarters = eplFLEX
             league.cfbPool = cfbPool
+            league.pickTimerSeconds = pickTimerSeconds
 
             // Cache so the detail view has the correct values right away
             currentLeague = league
@@ -1909,7 +1911,7 @@ final class BestBallViewModel {
 
     // MARK: - Commissioner Settings
 
-    func updateLeagueSettings(leagueID: String, title: String, maxMembers: Int, rosterSize: Int, isPrivate: Bool, pitcherSlots: Int = 2, batterSlots: Int = 6, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0, eplGK: Int? = nil, eplDEF: Int? = nil, eplMID: Int? = nil, eplFWD: Int? = nil, eplFLEX: Int? = nil, entryFee: Int? = nil) async {
+    func updateLeagueSettings(leagueID: String, title: String, maxMembers: Int, rosterSize: Int, isPrivate: Bool, pitcherSlots: Int = 2, batterSlots: Int = 6, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0, eplGK: Int? = nil, eplDEF: Int? = nil, eplMID: Int? = nil, eplFWD: Int? = nil, eplFLEX: Int? = nil, entryFee: Int? = nil, pickTimerSeconds: Int? = nil) async {
         guard let token = accessToken else { return }
         do {
             try await SupabaseService.shared.updateLeagueSettings(
@@ -1919,6 +1921,7 @@ final class BestBallViewModel {
                 nflQB: nflQB, nflRB: nflRB, nflWR: nflWR, nflTE: nflTE, nflFLEX: nflFLEX, nflSFLEX: nflSFLEX,
                 eplGK: eplGK, eplDEF: eplDEF, eplMID: eplMID, eplFWD: eplFWD, eplFLEX: eplFLEX,
                 entryFee: entryFee,
+                pickTimerSeconds: pickTimerSeconds,
                 accessToken: token
             )
             await loadLeagueDetail(leagueID: leagueID)
