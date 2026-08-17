@@ -656,9 +656,20 @@ struct BestBallDraftView: View {
                     .foregroundStyle(.yellow)
                 ForEach(Array(queue.enumerated()), id: \.element.id) { index, player in
                     HStack(spacing: 4) {
-                        Text("\(index + 1). \(tickerLastName(player.name))")
-                            .font(.caption.weight(.medium))
-                            .lineLimit(1)
+                        // Chip tap opens the player card (game logs), same as
+                        // tapping the player's row; the x removes from queue.
+                        Button {
+                            Haptics.light()
+                            listDetail = BBPlayerRef(
+                                playerID: player.id, name: player.name,
+                                team: player.team, position: player.position
+                            )
+                        } label: {
+                            Text("\(index + 1). \(tickerLastName(player.name))")
+                                .font(.caption.weight(.medium))
+                                .lineLimit(1)
+                        }
+                        .buttonStyle(.plain)
                         Button {
                             viewModel.draftQueue.removeAll { $0 == player.id }
                         } label: {
