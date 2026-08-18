@@ -322,6 +322,18 @@ struct DFSPastStandingsView: View {
     @State private var cachedOwnershipByPlayerID: [String: Int] = [:]
     @State private var cachedDataVersion: Int = -1
 
+    // Standings search: players (ownership % + FPTS) and entries (rank lookup)
+    @State private var showStandingsSearch = false
+    @State private var standingsSearchText = ""
+    @State private var cachedSearchPlayers: [PastSearchPlayer] = []
+
+    private struct PastSearchPlayer: Identifiable {
+        let id: String          // representative player ID (for stats lookup)
+        let name: String
+        let pct: Int
+        let fallbackPoints: Double
+    }
+
     /// Rebuild cached maps only when leaderboard/result data actually changes
     private func rebuildCachesIfNeeded() {
         // Include the first record's id hash in the version — without it,
@@ -364,6 +376,13 @@ struct DFSPastStandingsView: View {
         // counts left every player in those lineups at 0% ownership.
         var counts: [String: Int] = [:]
         var nameKeyByID: [String: String] = [:]
+        // Per-name display info for the standings search: representative
+        // pid, display name, and a fallback FPTS from stored record points
+        // (non-MVP rows only — MVP rows carry the 1.5x multiplier).
+        var displayNameByKey: [String: String] = [:]
+        var pidByKey: [String: String] = [:]
+        var pointsByKey: [String: Double] = [:]
+        let sgTournament = isSingleGameTournament
         for record in records {
             let names = record.lineupPlayerNames
             for (index, pid) in record.lineupPlayerIDs.enumerated() {
@@ -375,11 +394,29 @@ struct DFSPastStandingsView: View {
                 }
                 counts[key, default: 0] += 1
                 if nameKeyByID[pid] == nil { nameKeyByID[pid] = key }
+                if displayNameByKey[key] == nil, index < names.count, !names[index].isEmpty {
+                    displayNameByKey[key] = names[index]
+                }
+                if pidByKey[key] == nil { pidByKey[key] = pid }
+                if pointsByKey[key] == nil, !(sgTournament && index == 0),
+                   let pts = record.playerPoints?[pid] {
+                    pointsByKey[key] = pts
+                }
             }
         }
         cachedOwnershipByPlayerID = nameKeyByID.mapValues { key in
             Int((Double(counts[key] ?? 0) / Double(totalEntries) * 100).rounded())
         }
+        cachedSearchPlayers = counts.keys.compactMap { key in
+            guard let pid = pidByKey[key] else { return nil }
+            let pct = Int((Double(counts[key] ?? 0) / Double(totalEntries) * 100).rounded())
+            return PastSearchPlayer(
+                id: pid,
+                name: displayNameByKey[key] ?? pid,
+                pct: pct,
+                fallbackPoints: pointsByKey[key] ?? 0
+            )
+        }.sorted { $0.pct != $1.pct ? $0.pct > $1.pct : $0.name < $1.name }
     }
 
     /// Map from leaderboard entry ID → result record (for lineup details)
@@ -429,6 +466,107 @@ struct DFSPastStandingsView: View {
         return topSlice
     }
 
+    private var standingsSearchBar: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("Search players or entries…", text: $standingsSearchText)
+                    .font(.subheadline)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                if !standingsSearchText.isEmpty {
+                    Button {
+                        standingsSearchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color(.systemGray6))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            if !standingsSearchText.isEmpty {
+                let query = standingsSearchText.lowercased()
+
+                // Entry (user) matches — find a friend's placement.
+                let matchingEntries = viewModel.pastTournamentLeaderboard
+                    .filter { $0.name.lowercased().contains(query) }
+                    .prefix(10)
+                if !matchingEntries.isEmpty {
+                    ForEach(Array(matchingEntries)) { entry in
+                        HStack(spacing: 8) {
+                            Text("#\(entry.rank)")
+                                .font(.caption.weight(.bold).monospacedDigit())
+                                .foregroundStyle(entry.rank <= 3 ? .yellow : .secondary)
+                                .frame(minWidth: 40, alignment: .leading)
+                            Text(entry.name)
+                                .font(.caption.weight(.semibold))
+                                .lineLimit(1)
+                            if entry.isCurrentUser {
+                                Text("You")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background(brandPurple.opacity(0.15))
+                                    .foregroundStyle(brandPurple)
+                                    .clipShape(Capsule())
+                            }
+                            Spacer()
+                            Text(String(format: "%.1f", entry.points))
+                                .font(.caption.weight(.bold).monospacedDigit())
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(Color(.systemGray6).opacity(0.5))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                }
+
+                // Player matches — ownership % across the field + FPTS.
+                let matchingPlayers = cachedSearchPlayers
+                    .filter { $0.name.lowercased().contains(query) }
+                    .prefix(15)
+                if !matchingPlayers.isEmpty {
+                    ForEach(Array(matchingPlayers)) { player in
+                        let fpts = viewModel.pastTournamentPlayerStats[player.id]?.fantasyPoints
+                            ?? player.fallbackPoints
+                        HStack(spacing: 8) {
+                            Text(player.name)
+                                .font(.caption.weight(.semibold))
+                                .lineLimit(1)
+                            Text("\(player.pct)%")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.orange.opacity(0.8))
+                                .clipShape(Capsule())
+                            Spacer()
+                            Text(String(format: "%.1f", fpts))
+                                .font(.caption.weight(.bold).monospacedDigit())
+                                .foregroundStyle(brandPurple)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(Color(.systemGray6).opacity(0.5))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                }
+
+                if matchingEntries.isEmpty && matchingPlayers.isEmpty {
+                    Text("No players or entries found")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 4)
+                }
+            }
+        }
+    }
+
     private var leaderboardSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
@@ -438,6 +576,20 @@ struct DFSPastStandingsView: View {
                 Text("\(displayTotalEntries) entries")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showStandingsSearch.toggle()
+                        if !showStandingsSearch { standingsSearchText = "" }
+                    }
+                } label: {
+                    Image(systemName: showStandingsSearch ? "xmark" : "magnifyingglass")
+                        .font(.subheadline)
+                        .foregroundStyle(brandPurple)
+                }
+            }
+
+            if showStandingsSearch {
+                standingsSearchBar
             }
 
             if viewModel.isLoadingPastTournament {
