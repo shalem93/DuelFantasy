@@ -817,6 +817,33 @@ final class BestBallViewModel {
         }
     }
 
+    /// ADMIN: force-remove a league from the account — no status/membership
+    /// guards. Deletes the league outright when this user created it (RLS is
+    /// creator-scoped, so the DELETE is a no-op otherwise), and always drops
+    /// this user's own membership row so joined test leagues disappear too.
+    /// Gated to admin emails in the UI (hub long-press).
+    func adminDeleteLeague(_ league: BestBallLeague) async -> Bool {
+        guard let uid = userID, let token = accessToken else { return false }
+        do {
+            if league.createdBy == uid {
+                try await SupabaseService.shared.deleteLeague(leagueID: league.id, accessToken: token)
+            } else {
+                try await SupabaseService.shared.leaveLeague(leagueID: league.id, userID: uid, accessToken: token)
+            }
+            myLeagues.removeAll { $0.id == league.id }
+            openLeagues.removeAll { $0.id == league.id }
+            if currentLeague?.id == league.id {
+                currentLeague = nil
+                currentMembers = []
+                draftState = nil
+            }
+            return true
+        } catch {
+            self.error = error.localizedDescription
+            return false
+        }
+    }
+
     /// Delete a Best Ball league. Restricted to the commissioner
     /// (`createdBy == userID`) AND only while the league is solo —
     /// before anyone else has joined — so we don't ever yank an active

@@ -377,6 +377,18 @@ struct FantasyHubView: View {
                             bestBallLeagueContestCard(league)
                         }
                         .buttonStyle(.plain)
+                        .contextMenu {
+                            if isAdmin {
+                                Button(role: .destructive) {
+                                    Task { _ = await bestBallViewModel.adminDeleteLeague(league) }
+                                } label: {
+                                    Label(league.createdBy == bestBallViewModel.userID
+                                          ? "Delete League (admin)"
+                                          : "Leave League (admin)",
+                                          systemImage: "trash")
+                                }
+                            }
+                        }
                     }
                 }
             }
