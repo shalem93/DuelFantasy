@@ -555,7 +555,7 @@ final class BestBallViewModel {
     /// mid-season entries (e.g. MLB in August) draft against a schedule
     /// that's already half burned.
     static func isSportJoinable(_ sport: String) -> Bool {
-        Date() < BestBallSeasonHelper.seasonStartDate(for: sport)
+        Date() < BestBallSeasonHelper.joinDeadline(for: sport)
     }
 
     /// Whether the sport should be offered for NEW leagues right now.
@@ -574,10 +574,10 @@ final class BestBallViewModel {
     }
 
     static func joinDeadlineNote(for sport: String) -> String {
-        let start = BestBallSeasonHelper.seasonStartDate(for: sport)
+        let deadline = BestBallSeasonHelper.joinDeadline(for: sport)
         let fmt = DateFormatter()
         fmt.dateFormat = "MMM d"
-        return "Join by \(fmt.string(from: start.addingTimeInterval(-24 * 3600)))"
+        return "Join by \(fmt.string(from: deadline.addingTimeInterval(-24 * 3600)))"
     }
 
     func entryDenialReason(fee: Int, sport: String) -> String? {

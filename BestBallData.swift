@@ -2869,6 +2869,21 @@ enum BestBallSeasonHelper {
         }
     }
 
+    /// The moment new joins/creates close for a sport. Usually the week-1
+    /// anchor date, but EPL's anchor is the MONDAY of opening week while
+    /// the first match is that FRIDAY evening — joining Tue–Thu of opening
+    /// week is fine (nothing has scored yet). Closing at the Monday anchor
+    /// hid EPL from Browse four days before a ball was kicked.
+    static func joinDeadline(for sport: String) -> Date {
+        let start = seasonStartDate(for: sport)
+        if sport == "EPL" {
+            let calendar = Calendar(identifier: .gregorian)
+            // Friday of opening week, ~kickoff time (early evening UK).
+            return calendar.date(byAdding: DateComponents(day: 4, hour: 14), to: start) ?? start
+        }
+        return start
+    }
+
     /// Returns the current week number for a sport based on today's date
     static func currentWeekNumber(for sport: String) -> Int {
         let calendar = Calendar(identifier: .gregorian)
