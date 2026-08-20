@@ -806,9 +806,15 @@ struct ESPNPropBoardProvider {
             ]
         }
         if sportKey.hasPrefix("soccer_") {
+            // Names verified against the live DK board for eng.1 401879301
+            // (COV@ARS, Aug 2026): stats post as "... Milestones" items and
+            // the goal market is spelled "Anytime Goalscorer" (one word).
             return [
-                MilestoneType(espnName: "Anytime Goal Scorer", key: "g", shortLabel: "To Score a Goal", yesNo: true, cap: 10),
-                MilestoneType(espnName: "Goals Milestones", key: "g", shortLabel: "To Score a Goal", yesNo: true, cap: 10)
+                MilestoneType(espnName: "Anytime Goalscorer", key: "g", shortLabel: "To Score a Goal", yesNo: true, cap: 10),
+                MilestoneType(espnName: "Shots Milestones", key: "sh", shortLabel: "Shots", cap: 6),
+                MilestoneType(espnName: "Shots on Target Milestones", key: "st", shortLabel: "SOT", cap: 6),
+                MilestoneType(espnName: "Assists Milestones", key: "sa", shortLabel: "To Assist", yesNo: true, cap: 4),
+                MilestoneType(espnName: "Goalkeeper Saves Milestones", key: "gsv", shortLabel: "GK Saves", cap: 4)
             ]
         }
         return []
@@ -907,8 +913,17 @@ struct ESPNPropBoardProvider {
         var f5TotalLineOrder: [Double] = []
 
         func americanOdds(_ item: [String: Any]) -> Double? {
-            (((item["odds"] as? [String: Any])?["american"] as? [String: Any])?["value"] as? String)
-                .flatMap { Double($0.replacingOccurrences(of: "+", with: "")) }
+            if let v = (((item["odds"] as? [String: Any])?["american"] as? [String: Any])?["value"] as? String)
+                .flatMap({ Double($0.replacingOccurrences(of: "+", with: "")) }) {
+                return v
+            }
+            // Soccer boards have no `odds` node — milestone prices live at
+            // current.over.american as a bare string ("+4500" / "-115").
+            if let s = ((item["current"] as? [String: Any])?["over"] as? [String: Any])?["american"] as? String,
+               let v = Double(s.replacingOccurrences(of: "+", with: "")) {
+                return v
+            }
+            return nil
         }
         func lineValue(_ item: [String: Any]) -> Double? {
             (((item["odds"] as? [String: Any])?["total"] as? [String: Any])?["value"] as? String).flatMap(Double.init)
@@ -1436,6 +1451,32 @@ func pickemPropStat(summary: [String: Any], athleteID: String, statKey: String) 
         return nil
     }
 
+    // Soccer summaries have NO boxscore.players — per-player stats live
+    // under rosters[].roster[].stats as {name, value} dicts. Returns nil
+    // (void) when the athlete never got on the pitch or isn't found.
+    func soccerRosterStat(_ names: [String]) -> Double? {
+        guard let rosters = summary["rosters"] as? [[String: Any]] else { return nil }
+        for block in rosters {
+            for entry in (block["roster"] as? [[String: Any]]) ?? [] {
+                guard let ath = entry["athlete"] as? [String: Any],
+                      (ath["id"] as? String ?? (ath["id"] as? Int).map(String.init)) == athleteID else { continue }
+                let played = (entry["active"] as? Bool ?? false)
+                    || (entry["starter"] as? Bool ?? false)
+                    || (entry["subbedIn"] as? Bool ?? false)
+                guard played else { return nil }   // DNP → void
+                var map: [String: Double] = [:]
+                for s in (entry["stats"] as? [[String: Any]]) ?? [] {
+                    if let n = s["name"] as? String {
+                        map[n] = s["value"] as? Double
+                            ?? (s["displayValue"] as? String).flatMap(Double.init) ?? 0
+                    }
+                }
+                return names.reduce(0.0) { $0 + (map[$1] ?? 0) }
+            }
+        }
+        return nil
+    }
+
     switch statKey {
     case "h":
         return statLine(groupType: "batting", labelsWanted: ["H"])?["H"]
@@ -1472,8 +1513,9 @@ func pickemPropStat(summary: [String: Any], athleteID: String, statKey: String) 
         guard rush != nil || recv != nil else { return nil }
         return (rush ?? 0) + (recv ?? 0)
     case "g":
-        // Goals — NHL skaters and soccer players both box under "G".
+        // Goals — NHL skaters box under "G"; soccer grades from rosters.
         return statLine(groupType: nil, labelsWanted: ["G"])?["G"]
+            ?? soccerRosterStat(["totalGoals"])
     case "sog":
         return statLine(groupType: nil, labelsWanted: ["SOG"])?["SOG"]
     case "sv":
@@ -1483,8 +1525,14 @@ func pickemPropStat(summary: [String: Any], athleteID: String, statKey: String) 
         return (line["G"] ?? 0) + (line["A"] ?? 0)
     case "sh":
         return statLine(groupType: nil, labelsWanted: ["SH"])?["SH"]
+            ?? soccerRosterStat(["totalShots"])
     case "st":
         return statLine(groupType: nil, labelsWanted: ["ST"])?["ST"]
+            ?? soccerRosterStat(["shotsOnTarget"])
+    case "sa":
+        return soccerRosterStat(["goalAssists"])
+    case "gsv":
+        return soccerRosterStat(["saves"])
     default:
         return nil
     }
@@ -1724,8 +1772,8 @@ struct ESPNMatchResultProvider: MatchResultProvider {
                                         results[mid] = "PUSH"   // DNP / not in box — void
                                         continue
                                     }
-                                    // Milestone props ("to hit a HR", "to score a TD/goal") are Yes/No
-                                    let isYesNo = statKey == "hr" || statKey == "anytd" || statKey == "g"
+                                    // Milestone props ("to hit a HR", "to score a TD/goal", "to assist") are Yes/No
+                                    let isYesNo = statKey == "hr" || statKey == "anytd" || statKey == "g" || statKey == "sa"
                                     let overLabel = isYesNo ? "Yes" : "Over \(pickemFormatLine(line))"
                                     let underLabel = isYesNo ? "No" : "Under \(pickemFormatLine(line))"
                                     if value > line {
