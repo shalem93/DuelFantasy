@@ -701,11 +701,13 @@ enum BestBallLineupConfig {
             """
         case "EPL":
             return """
-            Soccer Fantasy Points:
-            Goal ×15 · Assist ×7 · Shot on Target ×4 · Shot ×1
-            Foul Drawn ×1 · YC ×−1 · RC ×−3
-            DEF: Clean Sheet +5 · Goal Against ×−0.6
-            GK: Save ×2.5 · Clean Sheet +8 · Win +6 · Goal Against ×−2.5
+            Soccer Fantasy Points (DK-style):
+            Goal ×10 · Assist ×6 · Shot ×1 · Shot on Goal ×+1
+            Cross ×0.7 · Shot Assist ×1 · Accurate Pass ×0.02
+            Foul Drawn ×1 · Foul ×−0.5 · Tackle Won ×1 · INT ×0.5
+            YC ×−1.5 · RC ×−3
+            DEF: Clean Sheet +3
+            GK: Save ×2 · Goal Against ×−2 · Clean Sheet +5 · Win +5
             """
         default:
             return ""
@@ -955,31 +957,41 @@ enum BestBallScoringEngine {
     /// many calls for a season-long weekly refresh. Clean sheets and
     /// goals-against (which ARE in the summary payload) keep DEF/GK
     /// competitive instead.
+    /// DraftKings soccer scoring. The "detail" stats (crosses, shot assists,
+    /// accurate passes, tackles won, interceptions) come from ESPN's core
+    /// per-athlete statistics endpoint — pass 0 when unavailable and the
+    /// summary-derived stats still score.
     nonisolated static func soccerFantasyPoints(
         position: String,
         goals: Int, assists: Int, shotsOnTarget: Int, totalShots: Int,
         saves: Int, yellowCards: Int, redCards: Int,
-        foulsDrawn: Int, goalsAgainst: Int,
+        foulsDrawn: Int, foulsConceded: Int, goalsAgainst: Int,
+        crosses: Int, shotAssists: Int, accuratePasses: Int,
+        tacklesWon: Int, interceptions: Int,
         cleanSheet: Bool, gameFinal: Bool, teamWon: Bool
     ) -> Double {
         var pts = 0.0
-        pts += Double(goals) * 15.0
-        pts += Double(assists) * 7.0
-        pts += Double(shotsOnTarget) * 4.0
-        let nonTargetShots = max(0, totalShots - shotsOnTarget)
-        pts += Double(nonTargetShots) * 1.0
+        pts += Double(goals) * 10.0
+        pts += Double(assists) * 6.0
+        pts += Double(totalShots) * 1.0          // every shot
+        pts += Double(shotsOnTarget) * 1.0       // on-target adds +1 on top
+        pts += Double(crosses) * 0.7
+        pts += Double(shotAssists) * 1.0
+        pts += Double(accuratePasses) * 0.02
         pts += Double(foulsDrawn) * 1.0
-        pts -= Double(yellowCards) * 1.0
+        pts -= Double(foulsConceded) * 0.5
+        pts += Double(tacklesWon) * 1.0
+        pts += Double(interceptions) * 0.5
+        pts -= Double(yellowCards) * 1.5
         pts -= Double(redCards) * 3.0
         if position == "DEF" {
-            if cleanSheet && gameFinal { pts += 5.0 }
-            pts -= Double(goalsAgainst) * 0.6
+            if cleanSheet && gameFinal { pts += 3.0 }
         }
         if position == "GK" {
-            pts += Double(saves) * 2.5
-            if cleanSheet && gameFinal { pts += 8.0 }
-            if gameFinal && teamWon { pts += 6.0 }
-            pts -= Double(goalsAgainst) * 2.5
+            pts += Double(saves) * 2.0
+            pts -= Double(goalsAgainst) * 2.0
+            if cleanSheet && gameFinal { pts += 5.0 }
+            if gameFinal && teamWon { pts += 5.0 }
         }
         return pts
     }
@@ -1221,7 +1233,9 @@ protocol BestBallWeeklyScoringProvider {
     func fetchWeeklyPointsWithStats(sport: String, playerIDs: [String], weekStartDate: Date, weekEndDate: Date) async throws -> BestBallWeeklyStatsResult
     /// Bulk fetch: fetches all ESPN data for a week once and returns stats for ALL players found.
     /// Much faster than calling fetchWeeklyPointsWithStats per member since HTTP requests are shared.
-    func fetchWeeklyAllPlayerStats(sport: String, weekStartDate: Date, weekEndDate: Date) async throws -> BestBallWeeklyStatsResult
+    /// `restrictToPlayerIDs` bounds per-player detail fetches (EPL DK stats)
+    /// to the players a league actually drafted; nil = no restriction.
+    func fetchWeeklyAllPlayerStats(sport: String, weekStartDate: Date, weekEndDate: Date, restrictToPlayerIDs: Set<String>?) async throws -> BestBallWeeklyStatsResult
     /// Lightweight fetch: returns season HR count for each player via ESPN athlete stats endpoint.
     /// Much cheaper than fetching full box scores for every game of the season.
     func fetchSeasonHRCounts(playerIDs: [String]) async -> [String: Int]
@@ -1653,16 +1667,19 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
     /// total-shots categories, but for draft-board ordering that's fine.
     private func parseSoccerLeaders(categories: [[String: Any]]) {
         func pointsPerUnit(for rawCategory: String) -> Double? {
+            // DK-style weights (mirrors soccerFantasyPoints).
             switch rawCategory {
-            case "goals": return 15.0
-            case "assists": return 7.0
-            case "shotsOnTarget": return 4.0
+            case "goals": return 10.0
+            case "assists": return 6.0
+            case "shotsOnTarget": return 1.0
             case "totalShots": return 1.0
-            case "saves": return 2.5
+            case "saves": return 2.0
             case "foulsSuffered": return 1.0
-            case "yellowCards": return -1.0
+            case "foulsCommitted": return -0.5
+            case "accuratePasses": return 0.02
+            case "yellowCards": return -1.5
             case "redCards": return -3.0
-            default: return nil   // goalsLeaders/assistsLeaders dupes, accuratePasses, foulsCommitted
+            default: return nil   // goalsLeaders/assistsLeaders dupes
             }
         }
 
@@ -2207,20 +2224,29 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
         let appearances = stats["appearances"] ?? 0
         guard appearances >= 1 else { return nil }
 
-        // Same additive stats as the leaders projection (no clean-sheet /
-        // win / goals-against context — those need per-match results).
+        // DK-style additive stats (no clean-sheet / win / goals-against
+        // context — those need per-match results).
         let goals = stats["totalGoals"] ?? 0
         let assists = stats["goalAssists"] ?? 0
         let sot = stats["shotsOnTarget"] ?? 0
         let shots = stats["totalShots"] ?? 0
         let saves = stats["saves"] ?? 0
         let foulsDrawn = stats["foulsSuffered"] ?? 0
+        let foulsConceded = stats["foulsCommitted"] ?? 0
         let yc = stats["yellowCards"] ?? 0
         let rc = stats["redCards"] ?? 0
+        let crosses = stats["accurateCrosses"] ?? 0
+        let shotAssists = stats["shotAssists"] ?? 0
+        let accuratePasses = stats["accuratePasses"] ?? 0
+        let tacklesWon = stats["effectiveTackles"] ?? 0
+        let interceptions = stats["interceptions"] ?? 0
 
-        let seasonTotal = goals * 15.0 + assists * 7.0 + sot * 4.0
-            + max(0, shots - sot) * 1.0 + foulsDrawn * 1.0
-            - yc * 1.0 - rc * 3.0 + saves * 2.5
+        let seasonTotal = goals * 10.0 + assists * 6.0
+            + shots * 1.0 + sot * 1.0
+            + crosses * 0.7 + shotAssists * 1.0 + accuratePasses * 0.02
+            + foulsDrawn * 1.0 - foulsConceded * 0.5
+            + tacklesWon * 1.0 + interceptions * 0.5
+            - yc * 1.5 - rc * 3.0 + saves * 2.0
         return seasonTotal / appearances
     }
 }
@@ -2302,7 +2328,11 @@ struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvider {
                 // Soccer summaries have no boxscore.players — stats live
                 // under rosters[] in a different shape entirely.
                 if sport == "EPL" {
-                    for entry in Self.parseSoccerSummaryEntries(json: json, prefix: prefix) {
+                    for entry in await Self.parseSoccerSummaryEntries(
+                        json: json, prefix: prefix,
+                        eventID: gameID, leaguePath: leaguePath,
+                        restrictTo: playerIDSet, session: session
+                    ) {
                         guard playerIDSet.contains(entry.fullID) else { continue }
                         totalPoints[entry.fullID, default: 0] += entry.fpts
                         for (key, val) in entry.lookup {
@@ -2366,7 +2396,7 @@ struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvider {
 
     /// Bulk fetch: fetches all ESPN box scores for a week with concurrent requests,
     /// returning stats for every player found. Call once per week, then filter per member locally.
-    func fetchWeeklyAllPlayerStats(sport: String, weekStartDate: Date, weekEndDate: Date) async throws -> BestBallWeeklyStatsResult {
+    func fetchWeeklyAllPlayerStats(sport: String, weekStartDate: Date, weekEndDate: Date, restrictToPlayerIDs: Set<String>? = nil) async throws -> BestBallWeeklyStatsResult {
         let (sportPath, leaguePath) = espnPaths(for: sport)
         guard !sportPath.isEmpty else {
             return BestBallWeeklyStatsResult(playerPoints: [:], playerStats: [:], dailyBreakdown: [:], dailyStats: [:])
@@ -2459,7 +2489,11 @@ struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvider {
                     if sport == "EPL" {
                         return BoxScoreResult(
                             dateKey: fetch.dateKey,
-                            playerEntries: Self.parseSoccerSummaryEntries(json: json, prefix: prefix)
+                            playerEntries: await Self.parseSoccerSummaryEntries(
+                                json: json, prefix: prefix,
+                                eventID: fetch.gameID, leaguePath: leaguePath,
+                                restrictTo: restrictToPlayerIDs, session: self.session
+                            )
                         )
                     }
 
@@ -2597,9 +2631,38 @@ struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvider {
     /// Stats are `rosters[].roster[].stats` as {name, value} dicts (NOT
     /// the labels/stats string arrays every other sport uses), and the
     /// clean-sheet / win context comes from the header competitors.
+    /// DK "detail" stats not present in the match summary — fetched from the
+    /// core per-athlete statistics endpoint, one request per (kept) player.
+    private nonisolated static func fetchSoccerDetailStatValues(
+        eventID: String, leaguePath: String, teamID: String, athleteID: String,
+        session: URLSession
+    ) async -> [String: Double] {
+        let urlString = "https://sports.core.api.espn.com/v2/sports/soccer/leagues/\(leaguePath)/events/\(eventID)/competitions/\(eventID)/competitors/\(teamID)/roster/\(athleteID)/statistics/0"
+        guard let url = URL(string: urlString) else { return [:] }
+        var request = URLRequest(url: url)
+        request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+        guard let (data, response) = try? await session.data(for: request),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let splits = json["splits"] as? [String: Any],
+              let categories = splits["categories"] as? [[String: Any]] else {
+            return [:]
+        }
+        var values: [String: Double] = [:]
+        for cat in categories {
+            for s in (cat["stats"] as? [[String: Any]]) ?? [] {
+                guard let name = s["name"] as? String else { continue }
+                values[name] = s["value"] as? Double ?? (s["value"] as? Int).map(Double.init) ?? 0
+            }
+        }
+        return values
+    }
+
     private nonisolated static func parseSoccerSummaryEntries(
-        json: [String: Any], prefix: String
-    ) -> [(fullID: String, fpts: Double, lookup: [String: Double])] {
+        json: [String: Any], prefix: String,
+        eventID: String, leaguePath: String,
+        restrictTo: Set<String>?, session: URLSession
+    ) async -> [(fullID: String, fpts: Double, lookup: [String: Double])] {
         guard let rostersArr = json["rosters"] as? [[String: Any]] else { return [] }
 
         var gameFinal = false
@@ -2619,13 +2682,24 @@ struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvider {
             }
         }
 
-        var entries: [(fullID: String, fpts: Double, lookup: [String: Double])] = []
+        struct RawSoccerEntry: Sendable {
+            let athleteID: String
+            let fullID: String
+            let teamID: String
+            let position: String
+            let statMap: [String: Double]
+            let cleanSheet: Bool
+            let teamWon: Bool
+        }
+        var raws: [RawSoccerEntry] = []
         for rosterBlock in rostersArr {
             let homeAway = rosterBlock["homeAway"] as? String ?? ""
             let teamScore = scoreByHomeAway[homeAway] ?? 0
             let oppScore = scoreByHomeAway[homeAway == "home" ? "away" : "home"] ?? 0
             let cleanSheet = gameFinal && oppScore == 0
             let teamWon = gameFinal && teamScore > oppScore
+            let teamDict = rosterBlock["team"] as? [String: Any]
+            let teamID = teamDict?["id"] as? String ?? (teamDict?["id"] as? Int).map({ String($0) }) ?? ""
 
             guard let rosterEntries = rosterBlock["roster"] as? [[String: Any]] else { continue }
             for entry in rosterEntries {
@@ -2636,6 +2710,8 @@ struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvider {
                 guard isActive || isStarter || subbedIn else { continue }
                 guard let athleteDict = entry["athlete"] as? [String: Any],
                       let athleteID = athleteDict["id"] as? String ?? (athleteDict["id"] as? Int).map({ String($0) }) else { continue }
+                let fullID = prefix + athleteID
+                if let restrictTo, !restrictTo.contains(fullID) { continue }
 
                 let posDict = entry["position"] as? [String: Any]
                 let position = bbSoccerPosition(
@@ -2650,32 +2726,72 @@ struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvider {
                             ?? 0
                     }
                 }
-
-                let goals = Int(statMap["totalGoals"] ?? 0)
-                let assists = Int(statMap["goalAssists"] ?? 0)
-                let sot = Int(statMap["shotsOnTarget"] ?? 0)
-                let shots = Int(statMap["totalShots"] ?? 0)
-                let saves = Int(statMap["saves"] ?? 0)
-                let yc = Int(statMap["yellowCards"] ?? 0)
-                let rc = Int(statMap["redCards"] ?? 0)
-                let foulsDrawn = Int(statMap["foulsSuffered"] ?? 0)
-                let goalsAgainst = Int(statMap["goalsConceded"] ?? 0)
-
-                let fpts = BestBallScoringEngine.soccerFantasyPoints(
-                    position: position,
-                    goals: goals, assists: assists, shotsOnTarget: sot, totalShots: shots,
-                    saves: saves, yellowCards: yc, redCards: rc,
-                    foulsDrawn: foulsDrawn, goalsAgainst: goalsAgainst,
-                    cleanSheet: cleanSheet, gameFinal: gameFinal, teamWon: teamWon
-                )
-
-                let lookup: [String: Double] = [
-                    "G": Double(goals), "A": Double(assists),
-                    "SOT": Double(sot), "SH": Double(shots),
-                    "SV": Double(saves), "YC": Double(yc), "RC": Double(rc),
-                ]
-                entries.append((prefix + athleteID, fpts, lookup))
+                raws.append(RawSoccerEntry(
+                    athleteID: athleteID, fullID: fullID, teamID: teamID,
+                    position: position, statMap: statMap,
+                    cleanSheet: cleanSheet, teamWon: teamWon
+                ))
             }
+        }
+
+        // DK detail stats (crosses, shot assists, accurate passes, tackles,
+        // interceptions) live on the core per-athlete endpoint — fan out one
+        // request per kept player. A failed fetch scores that player from
+        // summary stats alone.
+        var detailByID: [String: [String: Double]] = [:]
+        await withTaskGroup(of: (String, [String: Double]).self) { group in
+            for raw in raws where !raw.teamID.isEmpty {
+                group.addTask {
+                    let values = await Self.fetchSoccerDetailStatValues(
+                        eventID: eventID, leaguePath: leaguePath,
+                        teamID: raw.teamID, athleteID: raw.athleteID,
+                        session: session
+                    )
+                    return (raw.fullID, values)
+                }
+            }
+            for await (fullID, values) in group {
+                detailByID[fullID] = values
+            }
+        }
+
+        var entries: [(fullID: String, fpts: Double, lookup: [String: Double])] = []
+        for raw in raws {
+            let statMap = raw.statMap
+            let detail = detailByID[raw.fullID] ?? [:]
+            let goals = Int(statMap["totalGoals"] ?? 0)
+            let assists = Int(statMap["goalAssists"] ?? 0)
+            let sot = Int(statMap["shotsOnTarget"] ?? 0)
+            let shots = Int(statMap["totalShots"] ?? 0)
+            let saves = Int(statMap["saves"] ?? 0)
+            let yc = Int(statMap["yellowCards"] ?? 0)
+            let rc = Int(statMap["redCards"] ?? 0)
+            let foulsDrawn = Int(statMap["foulsSuffered"] ?? 0)
+            let foulsConceded = Int(statMap["foulsCommitted"] ?? 0)
+            let goalsAgainst = Int(statMap["goalsConceded"] ?? 0)
+            let crosses = Int(detail["accurateCrosses"] ?? 0)
+            let shotAssists = Int(detail["shotAssists"] ?? 0)
+            let accuratePasses = Int(detail["accuratePasses"] ?? 0)
+            let tacklesWon = Int(detail["effectiveTackles"] ?? 0)
+            let interceptions = Int(detail["interceptions"] ?? 0)
+
+            let fpts = BestBallScoringEngine.soccerFantasyPoints(
+                position: raw.position,
+                goals: goals, assists: assists, shotsOnTarget: sot, totalShots: shots,
+                saves: saves, yellowCards: yc, redCards: rc,
+                foulsDrawn: foulsDrawn, foulsConceded: foulsConceded, goalsAgainst: goalsAgainst,
+                crosses: crosses, shotAssists: shotAssists, accuratePasses: accuratePasses,
+                tacklesWon: tacklesWon, interceptions: interceptions,
+                cleanSheet: raw.cleanSheet, gameFinal: gameFinal, teamWon: raw.teamWon
+            )
+
+            let lookup: [String: Double] = [
+                "G": Double(goals), "A": Double(assists),
+                "SOT": Double(sot), "SH": Double(shots),
+                "SV": Double(saves), "YC": Double(yc), "RC": Double(rc),
+                "TKL": Double(tacklesWon), "INT": Double(interceptions),
+            ]
+            entries.append((raw.fullID, fpts, lookup))
         }
         return entries
     }

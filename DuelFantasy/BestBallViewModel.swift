@@ -1507,7 +1507,10 @@ final class BestBallViewModel {
 
             // Phase 1: Fetch all ESPN data for this week ONCE (all players, all games)
             let allPlayerResult = try await scoringProvider.fetchWeeklyAllPlayerStats(
-                sport: league.sport, weekStartDate: start, weekEndDate: end
+                sport: league.sport, weekStartDate: start, weekEndDate: end,
+                // Bounds the EPL per-player detail-stat fan-out (DK crosses/
+                // passes/tackles) to players someone actually drafted.
+                restrictToPlayerIDs: Set(state.picks.map(\.playerID))
             )
 
             // Phase 1b: Extract per-member scores from the bulk result

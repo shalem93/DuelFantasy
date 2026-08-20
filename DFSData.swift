@@ -7863,6 +7863,7 @@ struct ESPNPlayerGameLogProvider {
                 let yellowCards = Int(statLookup["yellowCards"] ?? statLookup["YC"] ?? 0)
                 let redCards = Int(statLookup["redCards"] ?? statLookup["RC"] ?? 0)
                 let foulsDrawn = Int(statLookup["foulsSuffered"] ?? statLookup["FA"] ?? 0)
+                let foulsConceded = Int(statLookup["foulsCommitted"] ?? statLookup["FC"] ?? 0)
                 let goalsAgainst = Int(statLookup["goalsConceded"] ?? statLookup["GA"] ?? 0)
                 // Defensive actions are NOT in the summary endpoint. Fetch
                 // them from the per-player core-API stats endpoint. Failures
@@ -7874,8 +7875,9 @@ struct ESPNPlayerGameLogProvider {
                 )
                 let tackles = defStats.tackles
                 let interceptions = defStats.interceptions
-                let blockedShots = defStats.blockedShots
-                let clearances = defStats.clearances
+                let crosses = defStats.crosses
+                let shotAssists = defStats.shotAssists
+                let accuratePasses = defStats.accuratePasses
 
                 // Estimate minutes played from starter/sub status
                 let isStarter = (entry["starter"] as? Int ?? entry["starter"] as? Bool as? Int ?? 0) != 0
@@ -7898,28 +7900,31 @@ struct ESPNPlayerGameLogProvider {
                 // Team won: our team scored more than opponent
                 let teamWon = teamScore > opponentScore
 
-                // Compute fantasy points (FanDuel-style)
+                // DraftKings-style scoring — must match
+                // BestBallScoringEngine.soccerFantasyPoints so the draft AVG
+                // column reflects the points a player would actually score.
                 var fpts = 0.0
-                fpts += Double(goals) * 15.0
-                fpts += Double(assists) * 7.0
-                fpts += Double(shotsOnTarget) * 4.0
-                fpts += Double(max(0, totalShots - shotsOnTarget)) * 1.0  // non-SOT shots
+                fpts += Double(goals) * 10.0
+                fpts += Double(assists) * 6.0
+                fpts += Double(totalShots) * 1.0          // every shot
+                fpts += Double(shotsOnTarget) * 1.0       // on-target adds +1
+                fpts += Double(crosses) * 0.7
+                fpts += Double(shotAssists) * 1.0
+                fpts += Double(accuratePasses) * 0.02
                 fpts += Double(foulsDrawn) * 1.0
-                fpts -= Double(yellowCards) * 1.0
+                fpts -= Double(foulsConceded) * 0.5
+                fpts += Double(tackles) * 1.0
+                fpts += Double(interceptions) * 0.5
+                fpts -= Double(yellowCards) * 1.5
                 fpts -= Double(redCards) * 3.0
-                fpts += Double(tackles) * 1.6
-                fpts += Double(interceptions) * 1.0
-                fpts += Double(blockedShots) * 1.5
-                fpts += Double(clearances) * 0.3
                 if playerPos == "DEF" {
-                    if cleanSheet { fpts += 5.0 }
-                    fpts -= Double(goalsAgainst) * 0.6
+                    if cleanSheet { fpts += 3.0 }
                 }
                 if playerPos == "GK" {
-                    fpts += Double(saves) * 2.5
-                    if cleanSheet { fpts += 8.0 }
-                    if teamWon { fpts += 6.0 }
-                    fpts -= Double(goalsAgainst) * 2.5
+                    fpts += Double(saves) * 2.0
+                    fpts -= Double(goalsAgainst) * 2.0
+                    if cleanSheet { fpts += 5.0 }
+                    if teamWon { fpts += 5.0 }
                 }
 
                 let parsedDate = parseRawDate(eventDate)
@@ -7932,7 +7937,7 @@ struct ESPNPlayerGameLogProvider {
                 // Repurpose threePM/threePA (unused for soccer) to carry the
                 // headline defensive numbers so the gamelog row can show why
                 // a centre-back's FPTS isn't zero on a 0g/0a/0sot night.
-                let defActions = tackles + interceptions + blockedShots + clearances
+                let defActions = tackles + interceptions
                 return DFSPlayerGameLog(
                     id: eventID,
                     date: dateStr,
@@ -7970,9 +7975,9 @@ struct ESPNPlayerGameLogProvider {
         leaguePath: String,
         teamID: String,
         athleteID: String
-    ) async -> (tackles: Int, interceptions: Int, blockedShots: Int, clearances: Int) {
+    ) async -> (tackles: Int, interceptions: Int, crosses: Int, shotAssists: Int, accuratePasses: Int) {
         let urlString = "https://sports.core.api.espn.com/v2/sports/soccer/leagues/\(leaguePath)/events/\(eventID)/competitions/\(eventID)/competitors/\(teamID)/roster/\(athleteID)/statistics/0"
-        guard let url = URL(string: urlString) else { return (0, 0, 0, 0) }
+        guard let url = URL(string: urlString) else { return (0, 0, 0, 0, 0) }
         var request = URLRequest(url: url)
         request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
         guard let (data, response) = try? await session.data(for: request),
@@ -7980,7 +7985,7 @@ struct ESPNPlayerGameLogProvider {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let splits = json["splits"] as? [String: Any],
               let categories = splits["categories"] as? [[String: Any]] else {
-            return (0, 0, 0, 0)
+            return (0, 0, 0, 0, 0)
         }
         var values: [String: Double] = [:]
         for cat in categories {
@@ -7994,15 +7999,14 @@ struct ESPNPlayerGameLogProvider {
                 }
             }
         }
-        // Prefer "totalTackles" over "effectiveTackles" — total includes both
-        // won and lost tackles and is the closer analogue to FanDuel's
-        // "tackle" stat. Defenders get rewarded for attempts even if not all
-        // result in dispossession, mirroring how the live boxscore counts.
-        let tackles = Int(values["totalTackles"] ?? values["effectiveTackles"] ?? 0)
+        // DK scores TACKLES WON, so prefer effectiveTackles (falling back
+        // to totalTackles for older data shapes).
+        let tackles = Int(values["effectiveTackles"] ?? values["totalTackles"] ?? 0)
         let interceptions = Int(values["interceptions"] ?? 0)
-        let blockedShots = Int(values["blockedShots"] ?? 0)
-        let clearances = Int(values["totalClearance"] ?? values["effectiveClearance"] ?? 0)
-        return (tackles, interceptions, blockedShots, clearances)
+        let crosses = Int(values["accurateCrosses"] ?? 0)
+        let shotAssists = Int(values["shotAssists"] ?? 0)
+        let accuratePasses = Int(values["accuratePasses"] ?? 0)
+        return (tackles, interceptions, crosses, shotAssists, accuratePasses)
     }
 
     /// Maps ESPN soccer position abbreviations to DFS positions for game log display
