@@ -1117,7 +1117,7 @@ struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
         // summary payload — fetch them per-player from ESPN's core-API stats
         // endpoint. Collect (athleteID, teamID) pairs in the first pass, then
         // fan out in parallel, then build the final result with merged stats.
-        var defensiveStatsByPlayerID: [String: (tackles: Int, interceptions: Int, blockedShots: Int, clearances: Int)] = [:]
+        var defensiveStatsByPlayerID: [String: (tackles: Int, interceptions: Int, crosses: Int, shotAssists: Int, accuratePasses: Int)] = [:]
         var defensiveFetchInputs: [(playerID: String, athleteID: String, teamID: String)] = []
         for rosterBlock in rostersArr {
             let teamDict = rosterBlock["team"] as? [String: Any]
@@ -1134,7 +1134,7 @@ struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
                 defensiveFetchInputs.append((playerID, athleteID, teamID))
             }
         }
-        await withTaskGroup(of: (String, (Int, Int, Int, Int))?.self) { group in
+        await withTaskGroup(of: (String, (Int, Int, Int, Int, Int))?.self) { group in
             for input in defensiveFetchInputs {
                 group.addTask {
                     let stats = await self.fetchSoccerDefensiveStatsLive(
@@ -1145,7 +1145,7 @@ struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
             }
             for await result in group {
                 if let (pid, s) = result {
-                    defensiveStatsByPlayerID[pid] = (s.0, s.1, s.2, s.3)
+                    defensiveStatsByPlayerID[pid] = (s.0, s.1, s.2, s.3, s.4)
                 }
             }
         }
@@ -1215,13 +1215,15 @@ struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
                 let yellowCards = Int(statMap["yellowCards"] ?? 0)
                 let redCards = Int(statMap["redCards"] ?? 0)
                 let foulsDrawn = Int(statMap["foulsSuffered"] ?? 0)
+                let foulsConceded = Int(statMap["foulsCommitted"] ?? 0)
                 let goalsAgainst = Int(statMap["goalsConceded"] ?? 0)
-                // Defensive stats come from the per-player core-API fetch we
+                // Detail stats come from the per-player core-API fetch we
                 // did above — the `/summary` payload doesn't expose them.
-                let defStats = defensiveStatsByPlayerID[playerID] ?? (tackles: 0, interceptions: 0, blockedShots: 0, clearances: 0)
+                let defStats = defensiveStatsByPlayerID[playerID] ?? (tackles: 0, interceptions: 0, crosses: 0, shotAssists: 0, accuratePasses: 0)
                 let interceptions = defStats.interceptions
-                let blockedShots = defStats.blockedShots
-                let clearances = defStats.clearances
+                let crosses = defStats.crosses
+                let shotAssists = defStats.shotAssists
+                let accuratePasses = defStats.accuratePasses
 
                 // Estimate minutes played from substitution events in "plays" array
                 var minutesPlayed = 0
@@ -1269,12 +1271,14 @@ struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
                     totalShots: totalShots,
                     tackles: tackles,
                     interceptions: interceptions,
-                    blockedShots: blockedShots,
-                    clearances: clearances,
+                    crosses: crosses,
+                    shotAssists: shotAssists,
+                    accuratePasses: accuratePasses,
                     saves: saves,
                     yellowCards: yellowCards,
                     redCards: redCards,
                     foulsDrawn: foulsDrawn,
+                    foulsConceded: foulsConceded,
                     goalsAgainst: goalsAgainst,
                     cleanSheet: cleanSheet,
                     gameFinal: gameFinal,
@@ -1312,7 +1316,9 @@ struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
         return (results, teamRosters)
     }
 
-    // MARK: - Soccer Fantasy Scoring (FanDuel-style)
+    // MARK: - Soccer Fantasy Scoring (DraftKings-style)
+    // Must mirror BestBallScoringEngine.soccerFantasyPoints — the Best Ball
+    // and DFS soccer modes score the same sheet.
 
     nonisolated private func computeSoccerFantasyPoints(
         position: String,
@@ -1322,82 +1328,42 @@ struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
         totalShots: Int,
         tackles: Int,
         interceptions: Int,
-        blockedShots: Int,
-        clearances: Int,
+        crosses: Int,
+        shotAssists: Int,
+        accuratePasses: Int,
         saves: Int,
         yellowCards: Int,
         redCards: Int,
         foulsDrawn: Int,
+        foulsConceded: Int,
         goalsAgainst: Int,
         cleanSheet: Bool,
         gameFinal: Bool,
         teamWon: Bool
     ) -> Double {
         var pts = 0.0
-
-        // --- All outfield players (DEF / MID / FWD) ---
-        // Goal: +15
-        pts += Double(goals) * 15.0
-
-        // Assist: +7
-        pts += Double(assists) * 7.0
-
-        // Shot on Goal: +4
-        pts += Double(shotsOnTarget) * 4.0
-
-        // Shot (total, not on target): +1
-        // Only count non-on-target shots to avoid double counting with SOT
-        let nonTargetShots = max(0, totalShots - shotsOnTarget)
-        pts += Double(nonTargetShots) * 1.0
-
-        // Tackle: +1.6
-        pts += Double(tackles) * 1.6
-
-        // Foul Drawn: +1
+        pts += Double(goals) * 10.0
+        pts += Double(assists) * 6.0
+        pts += Double(totalShots) * 1.0          // every shot
+        pts += Double(shotsOnTarget) * 1.0       // on-target adds +1 on top
+        pts += Double(crosses) * 0.7
+        pts += Double(shotAssists) * 1.0
+        pts += Double(accuratePasses) * 0.02
         pts += Double(foulsDrawn) * 1.0
-
-        // Yellow Card: -1
-        pts -= Double(yellowCards) * 1.0
-
-        // Red Card: -3
+        pts -= Double(foulsConceded) * 0.5
+        pts += Double(tackles) * 1.0             // tackles won
+        pts += Double(interceptions) * 0.5
+        pts -= Double(yellowCards) * 1.5
         pts -= Double(redCards) * 3.0
-
-        // Defensive actions — applied to every position but disproportionately
-        // benefit DEF/CDM players who rack these up without scoring goals.
-        // Without these, centre-backs averaged ~1.7 FPTS and were unplayable.
-        pts += Double(interceptions) * 1.0
-        pts += Double(blockedShots) * 1.5
-        pts += Double(clearances) * 0.3
-
-        // --- Defenders only ---
         if position == "DEF" {
-            // Clean Sheet: +5 (only when match is final)
-            if cleanSheet && gameFinal {
-                pts += 5.0
-            }
-            // Goal Against: -0.6
-            pts -= Double(goalsAgainst) * 0.6
+            if cleanSheet && gameFinal { pts += 3.0 }
         }
-
-        // --- Goalkeeper ---
         if position == "GK" {
-            // Save: +2.5
-            pts += Double(saves) * 2.5
-
-            // Clean Sheet: +8 (only when match is final)
-            if cleanSheet && gameFinal {
-                pts += 8.0
-            }
-
-            // Win Bonus: +6 (only when match is final and team won)
-            if gameFinal && teamWon {
-                pts += 6.0
-            }
-
-            // Goal Against: -2.5
-            pts -= Double(goalsAgainst) * 2.5
+            pts += Double(saves) * 2.0
+            pts -= Double(goalsAgainst) * 2.0
+            if cleanSheet && gameFinal { pts += 5.0 }
+            if gameFinal && teamWon { pts += 5.0 }
         }
-
         return pts
     }
 
@@ -1411,9 +1377,9 @@ struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
         eventID: String,
         teamID: String,
         athleteID: String
-    ) async -> (tackles: Int, interceptions: Int, blockedShots: Int, clearances: Int) {
+    ) async -> (tackles: Int, interceptions: Int, crosses: Int, shotAssists: Int, accuratePasses: Int) {
         let urlString = "https://sports.core.api.espn.com/v2/sports/soccer/leagues/\(self.league.rawValue)/events/\(eventID)/competitions/\(eventID)/competitors/\(teamID)/roster/\(athleteID)/statistics/0"
-        guard let url = URL(string: urlString) else { return (0, 0, 0, 0) }
+        guard let url = URL(string: urlString) else { return (0, 0, 0, 0, 0) }
         var request = URLRequest(url: url)
         request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
         guard let (data, response) = try? await self.session.data(for: request),
@@ -1421,7 +1387,7 @@ struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let splits = json["splits"] as? [String: Any],
               let categories = splits["categories"] as? [[String: Any]] else {
-            return (0, 0, 0, 0)
+            return (0, 0, 0, 0, 0)
         }
         var values: [String: Double] = [:]
         for cat in categories {
@@ -1435,13 +1401,13 @@ struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
                 }
             }
         }
-        // Match the past-gamelog fetcher: prefer `total*` over `effective*`
-        // so attempted-but-failed actions still earn partial credit.
-        let tackles = Int(values["totalTackles"] ?? values["effectiveTackles"] ?? 0)
+        // DK scores TACKLES WON — prefer effectiveTackles.
+        let tackles = Int(values["effectiveTackles"] ?? values["totalTackles"] ?? 0)
         let interceptions = Int(values["interceptions"] ?? 0)
-        let blockedShots = Int(values["blockedShots"] ?? 0)
-        let clearances = Int(values["totalClearance"] ?? values["effectiveClearance"] ?? 0)
-        return (tackles, interceptions, blockedShots, clearances)
+        let crosses = Int(values["accurateCrosses"] ?? 0)
+        let shotAssists = Int(values["shotAssists"] ?? 0)
+        let accuratePasses = Int(values["accuratePasses"] ?? 0)
+        return (tackles, interceptions, crosses, shotAssists, accuratePasses)
     }
 
     // MARK: - Position Helper

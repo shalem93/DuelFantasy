@@ -1941,7 +1941,7 @@ final class BestBallViewModel {
 
     // MARK: - Commissioner Settings
 
-    func updateLeagueSettings(leagueID: String, title: String, maxMembers: Int, rosterSize: Int, isPrivate: Bool, pitcherSlots: Int = 2, batterSlots: Int = 6, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0, eplGK: Int? = nil, eplDEF: Int? = nil, eplMID: Int? = nil, eplFWD: Int? = nil, eplFLEX: Int? = nil, entryFee: Int? = nil, pickTimerSeconds: Int? = nil) async {
+    func updateLeagueSettings(leagueID: String, title: String, maxMembers: Int, rosterSize: Int, isPrivate: Bool, pitcherSlots: Int = 2, batterSlots: Int = 6, nflQB: Int = 1, nflRB: Int = 2, nflWR: Int = 2, nflTE: Int = 1, nflFLEX: Int = 2, nflSFLEX: Int = 0, eplGK: Int? = nil, eplDEF: Int? = nil, eplMID: Int? = nil, eplFWD: Int? = nil, eplFLEX: Int? = nil, entryFee: Int? = nil, pickTimerSeconds: Int? = nil, cfbPool: String? = nil) async {
         guard let token = accessToken else { return }
         do {
             try await SupabaseService.shared.updateLeagueSettings(
@@ -1952,6 +1952,7 @@ final class BestBallViewModel {
                 eplGK: eplGK, eplDEF: eplDEF, eplMID: eplMID, eplFWD: eplFWD, eplFLEX: eplFLEX,
                 entryFee: entryFee,
                 pickTimerSeconds: pickTimerSeconds,
+                cfbPool: cfbPool,
                 accessToken: token
             )
             await loadLeagueDetail(leagueID: leagueID)

@@ -4803,6 +4803,15 @@ struct ContentView: View {
             syncHistoryData(Data())
             syncSettledData(Data())
 
+            // ALWAYS reset the previous account's local record before the
+            // server adoption below — that fetch can miss (a brand-new
+            // profile row may not exist yet, or the request fails), and any
+            // later settlement push would then cement the OLD account's
+            // stats onto the NEW profile (a fresh account showed 211-230).
+            rrScore = rrBaselineScore
+            wins = 0
+            losses = 0
+
             if let serverProfile = try? await SupabaseService.shared.fetchProfiles(userIDs: [userID], accessToken: token).first,
                let serverRR = serverProfile.rrScore, let serverW = serverProfile.wins, let serverL = serverProfile.losses {
                 rrScore = serverRR

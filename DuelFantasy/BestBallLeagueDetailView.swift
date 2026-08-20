@@ -583,6 +583,7 @@ private struct CommishSettingsSheet: View {
     @State private var editEplFLEX: Int
     @State private var editEntryFee: Int
     @State private var editPickTimer: Int
+    @State private var editCfbPool: String
     @State private var isSavingSettings: Bool = false
     @State private var showDeleteConfirmation: Bool = false
     @State private var isDeletingLeague: Bool = false
@@ -627,6 +628,7 @@ private struct CommishSettingsSheet: View {
         _editEplFLEX = State(initialValue: league.eplFlexStarters ?? 1)
         _editEntryFee = State(initialValue: league.entryFee)
         _editPickTimer = State(initialValue: league.pickTimerSeconds)
+        _editCfbPool = State(initialValue: league.cfbPool ?? "all")
         _editScheduleDraft = State(initialValue: league.draftStartTime != nil)
         _editDraftDate = State(initialValue: league.draftStartTime ?? Date().addingTimeInterval(3600))
     }
@@ -916,13 +918,23 @@ private struct CommishSettingsSheet: View {
                         }
                     }
 
-                    // Scoring Model card
                     if league.sport == "CFB" {
                         settingsCard(title: "Player Pool") {
-                            Text(league.cfbPool == "power"
-                                 ? "Power Conferences — ACC, Big Ten, Big 12, SEC + Notre Dame"
-                                 : "All FBS programs")
-                                .font(.subheadline)
+                            // Editable only pre-draft — the pool defines what
+                            // the draft board offers.
+                            let poolEditable = league.status == "open"
+                            Picker("", selection: $editCfbPool) {
+                                Text("All FBS").tag("all")
+                                Text("Power Conferences").tag("power")
+                            }
+                            .pickerStyle(.segmented)
+                            .disabled(!poolEditable)
+                            Text(poolEditable
+                                 ? (editCfbPool == "power"
+                                    ? "ACC, Big Ten, Big 12, SEC + Notre Dame — household names only."
+                                    : "Every FBS program — a deep pool with plenty of sleepers.")
+                                 : "Player pool is locked once the draft begins.")
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -1038,7 +1050,8 @@ private struct CommishSettingsSheet: View {
                                     eplFWD: league.sport == "EPL" ? editEplFWD : nil,
                                     eplFLEX: league.sport == "EPL" ? editEplFLEX : nil,
                                     entryFee: league.status == "open" ? editEntryFee : nil,
-                                    pickTimerSeconds: league.status == "open" ? editPickTimer : nil
+                                    pickTimerSeconds: league.status == "open" ? editPickTimer : nil,
+                                    cfbPool: (league.sport == "CFB" && league.status == "open") ? editCfbPool : nil
                                 )
                                 // Persist the draft schedule only when it changed.
                                 let newSchedule: Date? = editScheduleDraft ? editDraftDate : nil

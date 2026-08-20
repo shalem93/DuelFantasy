@@ -2538,6 +2538,7 @@ final class SupabaseService {
         eplGK: Int? = nil, eplDEF: Int? = nil, eplMID: Int? = nil, eplFWD: Int? = nil, eplFLEX: Int? = nil,
         entryFee: Int? = nil,
         pickTimerSeconds: Int? = nil,
+        cfbPool: String? = nil,
         accessToken: String
     ) async throws {
         var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/bestball_leagues"), resolvingAgainstBaseURL: false)
@@ -2568,11 +2569,13 @@ final class SupabaseService {
             // Optional: only sent for pre-draft edits.
             let entryFee: Int?
             let pickTimerSeconds: Int?
+            let cfbPool: String?
             enum CodingKeys: String, CodingKey {
                 case title
                 case maxMembers = "max_members"
                 case entryFee = "entry_fee"
                 case pickTimerSeconds = "pick_timer_seconds"
+                case cfbPool = "cfb_pool"
                 case rosterSize = "roster_size"
                 case isPrivate = "is_private"
                 case inviteCode = "invite_code"
@@ -2607,7 +2610,8 @@ final class SupabaseService {
                 eplGkStarters: eplGK, eplDefStarters: eplDEF, eplMidStarters: eplMID,
                 eplFwdStarters: eplFWD, eplFlexStarters: eplFLEX,
                 entryFee: entryFee,
-                pickTimerSeconds: pickTimerSeconds
+                pickTimerSeconds: pickTimerSeconds,
+                cfbPool: cfbPool
             ),
             bearerToken: accessToken
         )
