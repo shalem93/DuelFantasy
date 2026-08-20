@@ -796,6 +796,11 @@ struct ESPNPropBoardProvider {
                 MilestoneType(espnName: "Rushing Yards Milestones", key: "ruyds", shortLabel: "Rush Yds", cap: 6),
                 MilestoneType(espnName: "Receiving Yards Milestones", key: "reyds", shortLabel: "Rec Yds", cap: 8),
                 MilestoneType(espnName: "Receptions Milestones", key: "rec", shortLabel: "Receptions", cap: 6),
+                // Verified on the live Week 1 2026 board (SF vs LAR
+                // 401872657): ESPN's DK mirror names the anytime-TD market
+                // "Anytime Touchdown Scorer". "Touchdowns Milestones" kept
+                // as an alias in case later boards use the milestone shape.
+                MilestoneType(espnName: "Anytime Touchdown Scorer", key: "anytd", shortLabel: "To Score a TD", yesNo: true, cap: 10),
                 MilestoneType(espnName: "Touchdowns Milestones", key: "anytd", shortLabel: "To Score a TD", yesNo: true, cap: 10)
             ]
         }
