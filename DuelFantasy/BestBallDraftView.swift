@@ -39,11 +39,20 @@ struct BestBallDraftView: View {
     var body: some View {
         VStack(spacing: 0) {
             if let state {
-                // Draft header
+                // Draft header — tapping it (or the ticker) resigns the
+                // search keyboard; simultaneous so its buttons still work.
+                // (Not on the whole screen: that would dismiss when tapping
+                // inside the search field itself.)
                 draftHeader(state)
+                    .simultaneousGesture(TapGesture().onEnded {
+                        if searchFocused { searchFocused = false }
+                    })
 
                 // Recent picks ticker
                 recentPicksTicker(state)
+                    .simultaneousGesture(TapGesture().onEnded {
+                        if searchFocused { searchFocused = false }
+                    })
 
                 Divider()
 
@@ -301,6 +310,7 @@ struct BestBallDraftView: View {
                 // a 130-team list was unusable.
                 Button {
                     Haptics.light()
+                    searchFocused = false
                     showTeamPicker = true
                 } label: {
                     HStack(spacing: 4) {
@@ -319,7 +329,7 @@ struct BestBallDraftView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
 
-            // Available / Drafted toggle
+            // Available / Drafted toggle — switching tabs resigns the keyboard
             Picker("", selection: $listMode) {
                 Text("Available").tag(DraftListMode.available)
                 Text("Drafted (\(state.picks.count))").tag(DraftListMode.drafted)
@@ -327,6 +337,9 @@ struct BestBallDraftView: View {
             .pickerStyle(.segmented)
             .padding(.horizontal, 16)
             .padding(.bottom, 6)
+            .simultaneousGesture(TapGesture().onEnded {
+                if searchFocused { searchFocused = false }
+            })
 
             // Queue strip
             let queue = queuedAvailablePlayers(state)
