@@ -1566,6 +1566,21 @@ final class SupabaseService {
         throw SupabaseServiceError.invalidAuthResponse
     }
 
+    /// Sign in with a USERNAME instead of an email. The username → email
+    /// mapping happens inside the `signin-with-username` edge function
+    /// (service role), so emails are never exposed to the client. The
+    /// function proxies the password grant and returns the same payload
+    /// as /auth/v1/token, so parsing is identical to email sign-in.
+    func signInWithUsername(username: String, password: String) async throws -> SupabaseAuthSession {
+        let url = SupabaseConfig.url.appending(path: "/functions/v1/signin-with-username")
+        let body: [String: String] = ["username": username, "password": password]
+        let data = try await requestData(url: url, method: "POST", body: body, bearerToken: nil)
+        let parsed = parseAuthPayload(data)
+        if let session = parsed.session { return session }
+        if let message = parsed.message { throw SupabaseServiceError.authMessage(message) }
+        throw SupabaseServiceError.invalidAuthResponse
+    }
+
     func refreshSession(refreshToken: String) async throws -> SupabaseAuthSession {
         var components = URLComponents(url: SupabaseConfig.url.appending(path: "/auth/v1/token"), resolvingAgainstBaseURL: false)
         components?.queryItems = [URLQueryItem(name: "grant_type", value: "refresh_token")]

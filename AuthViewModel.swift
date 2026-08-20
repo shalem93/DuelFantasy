@@ -176,7 +176,16 @@ final class AuthViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
         do {
-            let authSession = try await SupabaseService.shared.signIn(email: email, password: password)
+            // The field accepts email OR username — no "@" means it's a
+            // username, resolved server-side by the signin-with-username
+            // edge function (emails never reach the client).
+            let identifier = email.trimmingCharacters(in: .whitespacesAndNewlines)
+            let authSession: SupabaseAuthSession
+            if identifier.contains("@") {
+                authSession = try await SupabaseService.shared.signIn(email: identifier, password: password)
+            } else {
+                authSession = try await SupabaseService.shared.signInWithUsername(username: identifier, password: password)
+            }
             session = authSession
             persistSession(authSession)
             try await ensureProfile(username: usernameFallback)

@@ -90,7 +90,7 @@ struct AuthView: View {
 
                     AuthTextField(
                         icon: "envelope",
-                        placeholder: "Email",
+                        placeholder: isSignUp ? "Email" : "Email or Username",
                         text: $email,
                         isEmail: true
                     )
