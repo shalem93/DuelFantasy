@@ -3162,7 +3162,10 @@ final class DFSViewModel {
         let upgradePool: [DFSPlayer]
         let mlbHasBattingOrders: Bool
     }
-    @ObservationIgnored private var botGenPoolsCache: (key: String, value: BotGenPools)?
+    /// Small LRU, not single-slot: main-slate generation and single-game
+    /// pre-caches interleave on the task group, and a single slot made them
+    /// evict each other every chunk (re-paying the ~100ms pool rebuild).
+    @ObservationIgnored private var botGenPoolsCache: [(key: String, value: BotGenPools)] = []
 
     private func botGenerationPools(
         from players: [DFSPlayer], lineupSize: Int,
@@ -3170,7 +3173,7 @@ final class DFSViewModel {
         effectiveSport: String, cacheable: Bool
     ) -> BotGenPools {
         let cacheKey = "\(poolRevision)|\(activeTournamentID ?? "-")|\(players.count)|\(lineupSize)|\(isSingleGame)|\(effectiveSport)|\(effectiveRosterSlots?.joined(separator: ",") ?? "-")"
-        if cacheable, let cached = botGenPoolsCache, cached.key == cacheKey {
+        if cacheable, let cached = botGenPoolsCache.first(where: { $0.key == cacheKey }) {
             return cached.value
         }
         // Filter out injured/out/IL players and zero-projection bench warmers.
@@ -3452,7 +3455,11 @@ final class DFSViewModel {
             eligible: eligible, botPool: botPool,
             upgradePool: upgradePool, mlbHasBattingOrders: mlbHasBattingOrders
         )
-        if cacheable { botGenPoolsCache = (cacheKey, value) }
+        if cacheable {
+            botGenPoolsCache.removeAll { $0.key == cacheKey }
+            botGenPoolsCache.append((cacheKey, value))
+            if botGenPoolsCache.count > 4 { botGenPoolsCache.removeFirst() }
+        }
         return value
     }
 
