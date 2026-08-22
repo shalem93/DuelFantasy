@@ -3018,6 +3018,12 @@ final class DFSViewModel {
     func shouldDeferBotGeneration(for t: DFSTournament) -> Bool {
         guard Date() < lockTimeForTournament(t) else { return false }
 
+        // Never compete with the user building a lineup: generating a
+        // 2000-bot field on the main actor makes the builder hitch even
+        // with chunked yields. Pre-lock there is no urgency — it runs on
+        // the next refresh after they leave the builder.
+        if isEditingLineup { return true }
+
         if sport == "NHL", t.isSingleGame {
             let pool: [DFSPlayer]
             if let gid = t.gameID, let sg = singleGamePlayers[gid], !sg.isEmpty {
@@ -3132,16 +3138,25 @@ final class DFSViewModel {
 
     /// Build a competitive bot lineup with varied strategies, injury-adjusted projections,
     /// position diversity, salary cap enforcement, and budget optimization.
-    private func generateBotLineup(from players: [DFSPlayer], salaryCap: Int, lineupSize: Int, rosterSlots: [String]? = nil, isSingleGame: Bool = false, sportOverride: String? = nil) -> [String] {
-        // Use sportOverride when provided (e.g., during settlement of a different sport's tournament)
-        let effectiveSport = sportOverride ?? sport
-        // PGA bots have no position constraints — use salary-weighted random generation
-        if effectiveSport == "PGA" {
-            return generateGolfBotLineup(from: players, salaryCap: salaryCap, lineupSize: lineupSize)
+    /// Deterministic per-slate bot pools (see generateBotLineup). Cached per
+    /// poolRevision so a 2000-bot field pays this cost once, not per bot.
+    private struct BotGenPools {
+        let eligible: [DFSPlayer]
+        let botPool: [DFSPlayer]
+        let upgradePool: [DFSPlayer]
+        let mlbHasBattingOrders: Bool
+    }
+    @ObservationIgnored private var botGenPoolsCache: (key: String, value: BotGenPools)?
+
+    private func botGenerationPools(
+        from players: [DFSPlayer], lineupSize: Int,
+        rosterSlots effectiveRosterSlots: [String]?, isSingleGame: Bool,
+        effectiveSport: String, cacheable: Bool
+    ) -> BotGenPools {
+        let cacheKey = "\(poolRevision)|\(activeTournamentID ?? "-")|\(players.count)|\(lineupSize)|\(isSingleGame)|\(effectiveSport)|\(effectiveRosterSlots?.joined(separator: ",") ?? "-")"
+        if cacheable, let cached = botGenPoolsCache, cached.key == cacheKey {
+            return cached.value
         }
-        // DraftKings Showdown uses MVP + 5 FLEX with no position requirements,
-        // so no goalie override needed for NHL single-game.
-        let effectiveRosterSlots: [String]? = rosterSlots
         // Filter out injured/out/IL players and zero-projection bench warmers.
         // NHL uses a higher projection floor (6.0) to exclude healthy scratches and
         // AHL call-ups who technically have roster spots but won't dress.
@@ -3417,6 +3432,42 @@ final class DFSViewModel {
             print("[DFS-\(effectiveSport)] Bot pool collapsed to \(strictBotPool.count)/\(eligible.count) — relaxed activity gates to \(relaxed.count) healthy players")
             return relaxed.count >= lineupSize ? relaxed : players
         }()
+        let value = BotGenPools(
+            eligible: eligible, botPool: botPool,
+            upgradePool: upgradePool, mlbHasBattingOrders: mlbHasBattingOrders
+        )
+        if cacheable { botGenPoolsCache = (cacheKey, value) }
+        return value
+    }
+
+
+    private func generateBotLineup(from players: [DFSPlayer], salaryCap: Int, lineupSize: Int, rosterSlots: [String]? = nil, isSingleGame: Bool = false, sportOverride: String? = nil) -> [String] {
+        // Use sportOverride when provided (e.g., during settlement of a different sport's tournament)
+        let effectiveSport = sportOverride ?? sport
+        // PGA bots have no position constraints — use salary-weighted random generation
+        if effectiveSport == "PGA" {
+            return generateGolfBotLineup(from: players, salaryCap: salaryCap, lineupSize: lineupSize)
+        }
+        // DraftKings Showdown uses MVP + 5 FLEX with no position requirements,
+        // so no goalie override needed for NHL single-game.
+        let effectiveRosterSlots: [String]? = rosterSlots
+        // The pool-building prefix (eligibility, confirmed starters, soccer
+        // hybrid XI, slot coverage, upgrade pool) is IDENTICAL for every bot
+        // in a field — only the per-bot noise/exclusions differ. Recomputing
+        // it per bot made each EPL bot cost ~100ms (full-pool filters +
+        // team-set builds x 2000 bots = minutes of main-actor work — the
+        // "Bot pool: using N starters" log spam and the builder freeze).
+        // Memoized per slate; settlement (sportOverride) skips the cache
+        // since it feeds custom pools.
+        let pools = botGenerationPools(
+            from: players, lineupSize: lineupSize,
+            rosterSlots: effectiveRosterSlots, isSingleGame: isSingleGame,
+            effectiveSport: effectiveSport, cacheable: sportOverride == nil
+        )
+        let eligible = pools.eligible
+        let upgradePool = pools.upgradePool
+        let botPool = pools.botPool
+        let mlbHasBattingOrders = pools.mlbHasBattingOrders
         guard botPool.count >= lineupSize else {
             // Truly nothing to draft from (pool smaller than a lineup) —
             // return best-effort by projection rather than random.
@@ -5115,7 +5166,7 @@ final class DFSViewModel {
                 if staleVsConfirmedLineups || malformedGeneration {
                     let botsToGenerate = max(0, tournament.entryCount - realEntries.count)
                     var freshBots: [DFSFieldEntry] = []
-                    let chunkSize = 50
+                    let chunkSize = 10
                     for index in 0..<botsToGenerate {
                         let newIDs = generateBotLineup(from: activePlayers, salaryCap: tournament.salaryCap, lineupSize: tournament.lineupSize, rosterSlots: tournament.rosterSlots, isSingleGame: tournament.isSingleGame)
                         let baseName = sampleNames[index % sampleNames.count]
@@ -5132,7 +5183,7 @@ final class DFSViewModel {
                     print("[DFS-\(sport)] \(wrongShapeBots.count)/\(trimmedBots.count) saved bots are wrong-shape — discarding entire bot field and regenerating fresh (one-shot)")
                     let botsToGenerate = max(0, tournament.entryCount - realEntries.count)
                     var freshBots: [DFSFieldEntry] = []
-                    let chunkSize = 50
+                    let chunkSize = 10
                     for index in 0..<botsToGenerate {
                         let newIDs = generateBotLineup(from: activePlayers, salaryCap: tournament.salaryCap, lineupSize: tournament.lineupSize, rosterSlots: tournament.rosterSlots, isSingleGame: tournament.isSingleGame)
                         let baseName = sampleNames[index % sampleNames.count]
@@ -5224,7 +5275,7 @@ final class DFSViewModel {
                     let botsNeeded = targetBots - totalNonUser
                     print("[DFS-\(sport)] Padding bot field with \(botsNeeded) bots (had \(totalNonUser), need \(targetBots), locked=\(tournamentIsLocked))")
                     let startIndex = totalNonUser
-                    let chunkSize = 50
+                    let chunkSize = 10
                     for i in 0..<botsNeeded {
                         let botPlayerIDs = generateBotLineup(from: activePlayers, salaryCap: tournament.salaryCap, lineupSize: tournament.lineupSize, rosterSlots: tournament.rosterSlots, isSingleGame: tournament.isSingleGame)
                         let baseName = sampleNames[(startIndex + i) % sampleNames.count]
@@ -5253,7 +5304,7 @@ final class DFSViewModel {
                 // froze the view for minutes.
                 var accumulated: [DFSFieldEntry] = []
                 accumulated.reserveCapacity(count)
-                let chunkSize = 50
+                let chunkSize = 10
                 for index in 0..<count {
                     let botPlayerIDs = generateBotLineup(from: activePlayers, salaryCap: tournament.salaryCap, lineupSize: tournament.lineupSize, rosterSlots: tournament.rosterSlots, isSingleGame: tournament.isSingleGame)
                     if botPlayerIDs.isEmpty { emptyCount += 1 }
@@ -5271,7 +5322,8 @@ final class DFSViewModel {
                 fieldEntries = accumulated
                 if tournamentIsLocked { needsResave = true }
                 print("[DFS-\(sport)] Generated \(count) bots from scratch (locked=\(tournamentIsLocked)), \(emptyCount) have empty lineups, players=\(activePlayers.count), rosterSlots=\(tournament.rosterSlots?.description ?? "nil")")
-            } else if fieldEntries.count < tournament.entryCount && !activePlayers.isEmpty {
+            } else if fieldEntries.count < tournament.entryCount && !activePlayers.isEmpty
+                        && !shouldDeferBotGeneration(for: tournament) {
                 // Pad the field with simulated bots to reach expected entry count.
                 // We also allow post-lock padding when the field is currently real
                 // users only (no saved bots ever existed) — otherwise a contest joined
@@ -5291,7 +5343,7 @@ final class DFSViewModel {
                     // a chance to render.
                     var botEntries: [DFSFieldEntry] = []
                     var emptyCount = 0
-                    let chunkSize = 50
+                    let chunkSize = 10
                     for index in 0..<botsNeeded {
                         let botPlayerIDs = generateBotLineup(from: activePlayers, salaryCap: tournament.salaryCap, lineupSize: tournament.lineupSize, rosterSlots: tournament.rosterSlots, isSingleGame: tournament.isSingleGame)
                         if botPlayerIDs.isEmpty { emptyCount += 1 }
@@ -6277,7 +6329,7 @@ final class DFSViewModel {
                     if expectedEntries <= 100 { return 10 }
                     return 25
                 }()
-                let chunkSize = 50
+                let chunkSize = 10
                 var publishedReady = false
                 for i in 0..<botsNeeded {
                     let botIDs = generateBotLineup(from: poolForBots, salaryCap: tObj.salaryCap, lineupSize: tObj.lineupSize, rosterSlots: tObj.rosterSlots, isSingleGame: tObj.isSingleGame)
