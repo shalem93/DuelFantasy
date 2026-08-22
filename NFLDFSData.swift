@@ -19,7 +19,7 @@ private final class NFLSlateCache {
     }
 }
 
-struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
+nonisolated struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
     private let session: URLSession
 
     private static let nflDecoder: JSONDecoder = {
@@ -795,7 +795,7 @@ struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
 
 // MARK: - NFL Live Scoring Provider
 
-struct ESPNNFLDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
+nonisolated struct ESPNNFLDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
     private let session: URLSession
 
     private static let nflDecoder: JSONDecoder = {

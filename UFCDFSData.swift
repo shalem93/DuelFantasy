@@ -19,7 +19,7 @@ private final class UFCSlateCache {
     }
 }
 
-struct ESPNUFCDFSSlateProvider: DFSSlateProvider {
+nonisolated struct ESPNUFCDFSSlateProvider: DFSSlateProvider {
     private let session: URLSession
 
     private static let ufcDecoder: JSONDecoder = {
@@ -502,7 +502,7 @@ struct ESPNUFCDFSSlateProvider: DFSSlateProvider {
 
 // MARK: - UFC Live Scoring Provider
 
-struct ESPNUFCDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
+nonisolated struct ESPNUFCDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
     private let session: URLSession
 
     private static let ufcDecoder: JSONDecoder = {

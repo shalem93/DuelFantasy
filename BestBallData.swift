@@ -151,7 +151,7 @@ func bbNormalizeName(_ name: String) -> String {
 
 /// Free NFL ADP from FantasyFootballCalculator (no key): real market
 /// draft position in PPR (1-QB) and 2QB (superflex) formats.
-enum FFCADPProvider {
+nonisolated enum FFCADPProvider {
     struct Board {
         /// "normname|POS" -> (pprADP, twoQBADP)
         var byNamePos: [String: (ppr: Double?, twoQB: Double?)] = [:]
@@ -248,7 +248,7 @@ enum NFLByeWeekProvider {
 /// last regular-season game) so the post-championship tail doesn't read
 /// as a bye for every team. One schedule request per power-conference
 /// team, cached per season in UserDefaults.
-enum CFBByeWeekProvider {
+nonisolated enum CFBByeWeekProvider {
     static var seasonYear: Int {
         let now = Date()
         let year = Calendar.current.component(.year, from: now)
@@ -757,7 +757,7 @@ enum BestBallScheduleGenerator {
 
 // MARK: - Scoring Engine
 
-enum BestBallScoringEngine {
+nonisolated enum BestBallScoringEngine {
     /// Position-constrained best-ball optimizer.
     /// Enumerates C(N, starters) combos — for 12-choose-8 = 495, trivially fast.
     static func bestBallScore(
@@ -1027,7 +1027,7 @@ func bbSoccerPosition(_ raw: String) -> String {
 
 // MARK: - Bot Drafter
 
-enum BestBallBotDrafter {
+nonisolated enum BestBallBotDrafter {
     private static let botNames = [
         "Bot Alpha", "Bot Bravo", "Bot Charlie", "Bot Delta",
         "Bot Echo", "Bot Foxtrot", "Bot Golf", "Bot Hotel",
@@ -1214,7 +1214,7 @@ enum BestBallBotDrafter {
 
 // MARK: - Protocols
 
-protocol BestBallPlayerProvider {
+nonisolated protocol BestBallPlayerProvider {
     /// `cfbPool` narrows the CFB pool ("power" = P4 + Notre Dame); other
     /// sports ignore it.
     func fetchPlayers(sport: String, cfbPool: String?) async throws -> [BestBallPlayer]
@@ -1228,7 +1228,7 @@ struct BestBallWeeklyStatsResult {
     let dailyStats: [String: [String: [String: Double]]]  // "YYYYMMDD" -> { playerID: { stat: val } }
 }
 
-protocol BestBallWeeklyScoringProvider {
+nonisolated protocol BestBallWeeklyScoringProvider {
     func fetchWeeklyPoints(sport: String, playerIDs: [String], weekStartDate: Date, weekEndDate: Date) async throws -> [String: Double]
     func fetchWeeklyPointsWithStats(sport: String, playerIDs: [String], weekStartDate: Date, weekEndDate: Date) async throws -> BestBallWeeklyStatsResult
     /// Bulk fetch: fetches all ESPN data for a week once and returns stats for ALL players found.
@@ -1271,7 +1271,7 @@ private class BBProjectionCache {
     var cfbAvgScopesFetched: Set<String> = []
 }
 
-struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
+nonisolated struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
     private let session: URLSession
     private let cache = BBProjectionCache()
 
@@ -2253,7 +2253,7 @@ struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
 
 // MARK: - ESPN Weekly Scoring Provider (with stat lines)
 
-struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvider {
+nonisolated struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvider {
     private let session: URLSession
 
     init(session: URLSession = .shared) {

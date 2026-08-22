@@ -375,15 +375,15 @@ struct DFSScoreSnapshot: Sendable {
     let allGamesFinal: Bool
 }
 
-protocol DFSSlateProvider {
+nonisolated protocol DFSSlateProvider {
     func fetchSlate() async throws -> DFSSlate
 }
 
-protocol DFSLiveScoringProvider: Sendable {
+nonisolated protocol DFSLiveScoringProvider: Sendable {
     nonisolated func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot
 }
 
-struct ConfiguredDFSSlateProvider: DFSSlateProvider {
+nonisolated struct ConfiguredDFSSlateProvider: DFSSlateProvider {
     private let liveProvider = ESPNNBADFSSlateProvider()
 
     func fetchSlate() async throws -> DFSSlate {
@@ -396,7 +396,7 @@ struct ConfiguredDFSSlateProvider: DFSSlateProvider {
 }
 
 /// Returns a pre-built slate — used when creating per-tournament ViewModels from shared data.
-struct PreloadedDFSSlateProvider: DFSSlateProvider {
+nonisolated struct PreloadedDFSSlateProvider: DFSSlateProvider {
     let slate: DFSSlate
     func fetchSlate() async throws -> DFSSlate { return slate }
 }
@@ -862,7 +862,7 @@ private final class ESPNRosterCache {
     }
 }
 
-struct ESPNNBADFSSlateProvider: DFSSlateProvider {
+nonisolated struct ESPNNBADFSSlateProvider: DFSSlateProvider {
     private let session: URLSession
     private let cache = ESPNRosterCache.shared
 
@@ -2832,7 +2832,7 @@ actor RotoGrindersSalaryProvider {
 
 // MARK: - MLB DFS Slate Provider
 
-struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
+nonisolated struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
     private let session: URLSession
     private let cache = ESPNRosterCache.shared
 
@@ -3827,7 +3827,7 @@ struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
 
 // MARK: - MLB Live Scoring Provider
 
-struct ESPNMLBDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
+nonisolated struct ESPNMLBDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
     private let session: URLSession
     init(session: URLSession = .shared) {
         self.session = session
@@ -4249,7 +4249,7 @@ struct ESPNMLBDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
 
 // MARK: - NCAAM March Madness DFS Providers
 
-struct ESPNNCAAMDFSSlateProvider: DFSSlateProvider {
+nonisolated struct ESPNNCAAMDFSSlateProvider: DFSSlateProvider {
     private let session: URLSession
     private let cache = ESPNRosterCache.shared
 
@@ -4684,7 +4684,7 @@ struct ESPNNCAAMDFSSlateProvider: DFSSlateProvider {
 
 // MARK: - NCAAM Live Scoring Provider
 
-struct ESPNNCAAMDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
+nonisolated struct ESPNNCAAMDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
     private let session: URLSession
     init(session: URLSession = .shared) {
         self.session = session
@@ -4927,7 +4927,7 @@ struct ESPNNCAAMDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
 
 // MARK: - NHL DFS Providers
 
-struct ESPNNHLDFSSlateProvider: DFSSlateProvider {
+nonisolated struct ESPNNHLDFSSlateProvider: DFSSlateProvider {
     private let session: URLSession
     private let cache = ESPNRosterCache.shared
 
@@ -5932,7 +5932,7 @@ struct ESPNNHLDFSSlateProvider: DFSSlateProvider {
 
 // MARK: - NHL Live Scoring Provider
 
-struct ESPNNHLDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
+nonisolated struct ESPNNHLDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
     private let session: URLSession
     init(session: URLSession = .shared) {
         self.session = session
@@ -6190,7 +6190,7 @@ struct ESPNNHLDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
     }
 }
 
-struct MockDFSSlateProvider: DFSSlateProvider {
+nonisolated struct MockDFSSlateProvider: DFSSlateProvider {
     func fetchSlate() async throws -> DFSSlate {
         DFSSlate(
             tournament: DFSTournament(
@@ -6249,7 +6249,7 @@ func fetchSlateGamesForDate(_ dateKey: String, espnSport: String) async -> [DFSS
     }
 }
 
-enum DFSEngine {
+nonisolated enum DFSEngine {
     static func simulateResult(for lineup: [DFSPlayer], tournament: DFSTournament) -> (rank: Int, points: Double, rrDelta: Int) {
         let lineupPoints = lineup.reduce(0.0) { partial, player in
             partial + player.projectedPoints + Double.random(in: -7.0...7.0)
@@ -6780,7 +6780,7 @@ struct DFSPlayerGameLog: Identifiable {
     }
 }
 
-struct ESPNPlayerGameLogProvider {
+nonisolated struct ESPNPlayerGameLogProvider {
     private let session: URLSession
 
     init(session: URLSession = .shared) {
@@ -8651,7 +8651,7 @@ private final class LiveScoreCache: @unchecked Sendable {
     }
 }
 
-struct ESPNDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
+nonisolated struct ESPNDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
     private let session: URLSession
     init(session: URLSession = .shared) {
         self.session = session
@@ -8911,7 +8911,7 @@ struct ESPNDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
 // Roster/scoring config (50000 cap, 8-player classic, showdown) and the
 // DraftKings basketball scoring formula are IDENTICAL to NBA.
 
-struct ESPNWNBADFSSlateProvider: DFSSlateProvider {
+nonisolated struct ESPNWNBADFSSlateProvider: DFSSlateProvider {
     private let session: URLSession
     private let cache = ESPNRosterCache.shared
 
@@ -9545,7 +9545,7 @@ struct ESPNWNBADFSSlateProvider: DFSSlateProvider {
 // player IDs use the `wnba-` prefix. The DraftKings basketball box-score
 // scoring formula is IDENTICAL to NBA.
 
-struct ESPNWNBADFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
+nonisolated struct ESPNWNBADFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
     private let session: URLSession
     init(session: URLSession = .shared) {
         self.session = session

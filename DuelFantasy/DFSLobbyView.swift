@@ -5,6 +5,10 @@ struct DFSLobbyView: View {
     @State private var selectedMainSize: Int = 2000
     @State private var selectedEveningSize: Int = 2000
     @State private var selectedSingleGameSizes: [String: Int] = [:]  // gameID → selected size
+    /// Sticky gameID → kickoff cache: keeps the Single Game card order
+    /// stable through the transient renders while a slate reload is
+    /// mid-publish (see singleGameSection).
+    @State private var sgKnownStartTimes: [String: Date] = [:]
 
     private let fieldSizes = [2, 3, 5, 10, 2000]
 
@@ -53,6 +57,8 @@ struct DFSLobbyView: View {
 
                         // Single Game section
                         singleGameSection
+                            .onAppear { mergeKnownStartTimes() }
+                            .onChange(of: viewModel.slateGames) { mergeKnownStartTimes() }
 
                         if !viewModel.enteredTournamentIDs.isEmpty {
                             enteredLineupsSection
@@ -318,18 +324,28 @@ struct DFSLobbyView: View {
         }
     }
 
+    private func mergeKnownStartTimes() {
+        for g in viewModel.slateGames where sgKnownStartTimes[g.id] != g.startTime {
+            sgKnownStartTimes[g.id] = g.startTime
+        }
+    }
+
     // MARK: - Single Game Section
 
     private var singleGameSection: some View {
         let sgTournaments = viewModel.availableTournaments.filter { $0.tournamentType == .singleGame }
         // Group by gameID to show one card per matchup with size picker.
-        // Sort by start time, then by gameID for a stable tiebreak — without
-        // the secondary key, two games at the same start time (e.g. multiple
-        // 6:35pm MLB matchups) shuffled order on every re-render because
-        // `Set` iteration order is hash-randomized.
+        // Sort by start time, then by gameID for a stable tiebreak. Times
+        // come from `sgKnownStartTimes` — a sticky cache that survives the
+        // transient renders while a slate reload is mid-publish. Reading
+        // `slateGames` directly made every card momentarily sort as
+        // .distantFuture during refresh cycles, so the list visibly
+        // shuffled and re-shuffled ("the order of the games was flickering").
         let gameIDs = Array(Set(sgTournaments.compactMap(\.gameID))).sorted { a, b in
-            let timeA = viewModel.slateGames.first(where: { $0.id == a })?.startTime ?? .distantFuture
-            let timeB = viewModel.slateGames.first(where: { $0.id == b })?.startTime ?? .distantFuture
+            let timeA = sgKnownStartTimes[a]
+                ?? viewModel.slateGames.first(where: { $0.id == a })?.startTime ?? .distantFuture
+            let timeB = sgKnownStartTimes[b]
+                ?? viewModel.slateGames.first(where: { $0.id == b })?.startTime ?? .distantFuture
             if timeA != timeB { return timeA < timeB }
             return a < b
         }

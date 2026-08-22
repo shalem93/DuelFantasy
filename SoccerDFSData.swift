@@ -170,7 +170,7 @@ private final class SoccerSlateCache {
     }
 }
 
-struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
+nonisolated struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
     let league: SoccerLeague
     private let session: URLSession
 
@@ -932,7 +932,7 @@ struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
 
 // MARK: - ESPN Soccer Live Scoring Provider
 
-struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
+nonisolated struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
     let league: SoccerLeague
     private let session: URLSession
 

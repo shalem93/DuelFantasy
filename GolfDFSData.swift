@@ -157,7 +157,7 @@ struct ESPNPGACompetitionStatus: Codable {
 
 // MARK: - ESPN PGA Slate Provider
 
-struct ESPNPGADFSSlateProvider: DFSSlateProvider {
+nonisolated struct ESPNPGADFSSlateProvider: DFSSlateProvider {
     private let session: URLSession
 
     init(session: URLSession = .shared) {
@@ -1056,7 +1056,7 @@ struct ESPNPGADFSSlateProvider: DFSSlateProvider {
 
 // MARK: - ESPN PGA Live Scoring Provider
 
-struct ESPNPGADFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
+nonisolated struct ESPNPGADFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
     private let session: URLSession
 
     init(session: URLSession = .shared) {
@@ -1790,7 +1790,7 @@ extension DFSEngine {
 
 // MARK: - Configured Golf Slate Provider
 
-struct ConfiguredGolfDFSSlateProvider: DFSSlateProvider {
+nonisolated struct ConfiguredGolfDFSSlateProvider: DFSSlateProvider {
     private let liveProvider = ESPNPGADFSSlateProvider()
 
     func fetchSlate() async throws -> DFSSlate {

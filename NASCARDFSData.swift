@@ -117,7 +117,7 @@ private final class NASCARSlateCache {
 
 // MARK: - Slate Provider
 
-struct ESPNNASCARDFSSlateProvider: DFSSlateProvider {
+nonisolated struct ESPNNASCARDFSSlateProvider: DFSSlateProvider {
     private let session: URLSession
 
     init(session: URLSession = .shared) {
@@ -377,7 +377,7 @@ struct ESPNNASCARDFSSlateProvider: DFSSlateProvider {
 
 // MARK: - Live Scoring Provider
 
-struct ESPNNASCARDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
+nonisolated struct ESPNNASCARDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
     private let session: URLSession
 
     init(session: URLSession = .shared) {

@@ -77,7 +77,7 @@ protocol MatchProvider {
     func fetchMatches() async throws -> [Match]
 }
 
-protocol MatchResultProvider {
+nonisolated protocol MatchResultProvider {
     func fetchCompletedWinners(matchIDs: Set<String>) async throws -> [String: String]
 }
 
@@ -730,7 +730,7 @@ struct ESPNTodayGameProvider: GameProvider {
 /// API and converts headline markets into derived pick'em Matches.
 /// Pairs arrive as [over, under] in feed order; RR quotes are juice-scaled
 /// with the same math as moneylines.
-struct ESPNPropBoardProvider {
+nonisolated struct ESPNPropBoardProvider {
     struct PropStatType {
         let espnName: String
         let key: String
@@ -1543,7 +1543,7 @@ func pickemPropStat(summary: [String: Any], athleteID: String, statKey: String) 
     }
 }
 
-struct ESPNMatchResultProvider: MatchResultProvider {
+nonisolated struct ESPNMatchResultProvider: MatchResultProvider {
     private let session: URLSession
 
     init(session: URLSession = .shared) {
@@ -2915,7 +2915,7 @@ private struct OddsOutcome: Codable {
 }
 
 private extension JSONDecoder {
-    static var espnDecoder: JSONDecoder {
+    nonisolated static var espnDecoder: JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { container in
             let value = try container.singleValueContainer().decode(String.self)

@@ -19,7 +19,7 @@ private final class NCAAFBSlateCache {
     }
 }
 
-struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
+nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
     private let session: URLSession
 
     private static let cfbDecoder: JSONDecoder = {
@@ -628,7 +628,7 @@ struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
 
 // MARK: - NCAAFB Live Scoring Provider
 
-struct ESPNNCAAFBDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
+nonisolated struct ESPNNCAAFBDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable {
     private let session: URLSession
 
     private static let cfbDecoder: JSONDecoder = {
