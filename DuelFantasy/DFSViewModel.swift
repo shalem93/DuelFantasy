@@ -1088,7 +1088,7 @@ final class DFSViewModel {
     /// cap. Returns true if any bot changed. Caller gates on
     /// `supportsLateSwap && !allGamesStarted`.
     @discardableResult
-    private func applyLateSwapBotOptimization() -> Bool {
+    private func applyLateSwapBotOptimization() async -> Bool {
         guard let tournament else { return false }
         let cap = tournament.salaryCap
         let byID = Dictionary(activePlayers.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
@@ -1129,8 +1129,20 @@ final class DFSViewModel {
         var changedAny = false
         let isSoccerSlate = sport == "EPL" || sport == "UCL" || sport == "WC"
         let minPoolSalary = pool.map(\.salary).min() ?? 3500
-        for i in fieldEntries.indices {
-            let entry = fieldEntries[i]
+        // Work on a LOCAL snapshot with periodic yields — walking 2000 bots
+        // synchronously blocked the main actor for seconds on every refresh
+        // once the user entered a contest (the post-submit lobby freeze).
+        // Single guarded commit at the end; if the field was replaced
+        // underneath us (regeneration, tournament switch) the stale result
+        // is discarded rather than written over the new field.
+        var workingEntries = fieldEntries
+        let snapshotCount = workingEntries.count
+        for i in workingEntries.indices {
+            if i % 50 == 0 {
+                await Task.yield()
+                guard fieldEntries.count == snapshotCount else { return false }
+            }
+            let entry = workingEntries[i]
             guard !entry.isCurrentUser, !entry.isRealUser else { continue }
             var ids = entry.playerIDs
 
@@ -1215,7 +1227,7 @@ final class DFSViewModel {
                     budgetLeft -= pick.salary
                 }
                 if rowChanged {
-                    fieldEntries[i] = DFSFieldEntry(
+                    workingEntries[i] = DFSFieldEntry(
                         id: entry.id, name: entry.name, playerIDs: ids,
                         isCurrentUser: false, isRealUser: false, realUserID: nil
                     )
@@ -1246,12 +1258,16 @@ final class DFSViewModel {
             }
 
             if rowChanged {
-                fieldEntries[i] = DFSFieldEntry(
+                workingEntries[i] = DFSFieldEntry(
                     id: entry.id, name: entry.name, playerIDs: ids,
                     isCurrentUser: false, isRealUser: false, realUserID: nil
                 )
                 changedAny = true
             }
+        }
+        if changedAny {
+            guard fieldEntries.count == snapshotCount else { return false }
+            fieldEntries = workingEntries
         }
         return changedAny
     }
@@ -5532,7 +5548,7 @@ final class DFSViewModel {
         // after games — so late-game exposure no longer depends on a client being
         // open during each game's confirm→kickoff window. In-memory only here.
         if supportsLateSwap && !allGamesStarted && fieldEntries.count >= 5 {
-            _ = applyLateSwapBotOptimization()
+            _ = await applyLateSwapBotOptimization()
         }
 
         // Off the main actor: sorting/scoring a 2000-entry field takes long
