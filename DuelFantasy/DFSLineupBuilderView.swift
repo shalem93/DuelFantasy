@@ -512,6 +512,7 @@ struct DFSLineupBuilderView: View {
         // rebuild the full active player pool per call. Computing them once per
         // render (instead of once per row) is what keeps this list scrollable
         // on big slates — see fillablePositions in DFSViewModel.
+        let _ = PerfBreadcrumb.set("builder.playerList render \(viewModel.sport)")
         let players = viewModel.filteredPlayers
         let fillable = viewModel.fillablePositions(among: Set(players.map(\.position)))
         let confirmedTeams = viewModel.confirmedXITeams

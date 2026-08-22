@@ -23,6 +23,7 @@ struct GameOnApp: App {
         // MetricKit crash reporting: receives the previous run's crash/hang
         // diagnostics at launch and uploads them to the `crash_reports` table.
         CrashReporter.shared.start()
+        HangWatchdog.shared.start()
     }
 
     var body: some Scene {

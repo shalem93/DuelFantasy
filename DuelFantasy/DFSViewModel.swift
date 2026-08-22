@@ -582,6 +582,7 @@ final class DFSViewModel {
     var activePlayers: [DFSPlayer] {
         let key = "\(poolRevision)|\(activeTournamentID ?? "-")|\(activeLineupNumber)"
         if let cached = activePlayersCache, cached.key == key { return cached.value }
+        PerfBreadcrumb.set("dfs.activePlayers rebuild \(sport)")
         let basePool = computeActivePool()
         let value = applyCanonicalSalaries(to: normalizeMLBTwoWayBatters(basePool))
         // computeActivePool may have written the SG conversion cache (bumping
@@ -1418,6 +1419,7 @@ final class DFSViewModel {
 
     /// Returns a label and fill status for each roster slot.
     var slotStatus: [(label: String, player: DFSPlayer?)] {
+        PerfBreadcrumb.set("dfs.slotStatus \(sport)")
         guard let slots = rosterSlots else {
             return (0..<lineupSize).map { i in
                 let p = i < selectedPlayers.count ? selectedPlayers[i] : nil
@@ -1538,6 +1540,7 @@ final class DFSViewModel {
     /// only on a player's POSITION, so the builder computes this once per
     /// render and answers each row with a set lookup.
     func fillablePositions(among positions: Set<String>) -> Set<String> {
+        PerfBreadcrumb.set("dfs.fillablePositions \(sport)")
         guard let slots = rosterSlots else { return positions }
         let filled = selectedPlayers
         guard filled.count < slots.count else { return [] }
@@ -2106,6 +2109,7 @@ final class DFSViewModel {
         }
         let cacheKey = "\(poolRevision)|\(activeTournamentID ?? "-")|\(activeLineupNumber)|\(selectedPositionFilter ?? "-")|\(selectedGameFilter ?? "-")|\(searchText)|\(sortKey)"
         if let cached = filteredPlayersCache, cached.key == cacheKey { return cached.value }
+        PerfBreadcrumb.set("dfs.filteredPlayers rebuild \(sport)")
         // Use the tournament-appropriate player pool (single-game adjusted or main slate)
         let pool = activePlayers
         // Exclude players from games that are already final
@@ -2254,6 +2258,7 @@ final class DFSViewModel {
     // MARK: - Actions
 
     func togglePlayer(_ player: DFSPlayer) {
+        PerfBreadcrumb.set("dfs.togglePlayer \(player.position) \(selectedPlayerIDs.count) picked")
         // Late swap: a player whose game has already started is frozen — it can
         // neither be added nor removed. (For non-late-swap slates this is the
         // whole-slate lock, matching the builder's disabled state.)
@@ -2392,6 +2397,7 @@ final class DFSViewModel {
     }
 
     func loadSlate(force: Bool) async {
+        PerfBreadcrumb.set("dfs.loadSlate \(sport)")
         if isLoading {
             // Takeover for wedged loads: if a previous attempt has been
             // "loading" for over a minute, it's stuck (hung request, killed
@@ -4299,6 +4305,7 @@ final class DFSViewModel {
     }
 
     func refreshLive() async {
+        PerfBreadcrumb.set("dfs.refreshLive \(sport)")
         // A late-swap edit sheet is open: this refresh re-parses every box
         // score, recomputes full 2000-entry leaderboards, and runs the bot
         // late-swap optimizer — all on the main actor. Landing mid-scroll
