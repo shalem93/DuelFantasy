@@ -9,7 +9,7 @@ enum PlayerSortOrder {
 @Observable
 final class DFSViewModel {
     // MARK: - Tournament State
-    var tournaments: [DFSTournament] = []
+    var tournaments: [DFSTournament] = [] { didSet { poolRevision &+= 1 } }
     var activeTournamentID: String?
     /// Which lineup number is currently being viewed in the live contest (1-based). Defaults to 1.
     var activeLineupNumber: Int = 1
@@ -114,16 +114,34 @@ final class DFSViewModel {
         return pgaBaseEventID(from: tid) != activeEvent
     }
     /// Per-game single-game player pools with adjusted salaries, keyed by ESPN event ID
-    var singleGamePlayers: [String: [DFSPlayer]] = [:]
+    var singleGamePlayers: [String: [DFSPlayer]] = [:] { didSet { poolRevision &+= 1 } }
     /// Tracks which tournament IDs the user has entered today (for entry limit enforcement)
-    var enteredTournamentIDs: Set<String> = []
+    var enteredTournamentIDs: Set<String> = [] { didSet { poolRevision &+= 1 } }
     /// Cached entry records for all of the user's entries today (keyed by tournament ID).
     /// Each tournament can have multiple lineups, stored as an array.
-    var userEntryRecords: [String: [DFSEntryRecord]] = [:]
+    var userEntryRecords: [String: [DFSEntryRecord]] = [:] { didSet { poolRevision &+= 1 } }
     /// Canonical slate-wide player salaries captured at contest creation time, keyed by
     /// tournament ID. Used to render every lineup (yours + every bot's) with the exact
     /// prices that were offered during lineup building, regardless of later slate refreshes.
-    var tournamentPlayerSalaries: [String: [String: Int]] = [:]
+    var tournamentPlayerSalaries: [String: [String: Int]] = [:] { didSet { poolRevision &+= 1 } }
+
+    /// Invalidation counter for the memoized player-pool views below.
+    /// Bumped by didSet on every input that feeds `activePlayers` /
+    /// `filteredPlayers`. @ObservationIgnored (with the caches) because the
+    /// memo bookkeeping must never look like state mutation to SwiftUI —
+    /// writing tracked state while a body evaluates re-renders in a loop.
+    @ObservationIgnored private var poolRevision: Int = 0
+    /// Memoized `activePlayers`: rebuilding the pool (SG conversion +
+    /// two-way normalize + canonical salary overlay) is O(pool) with full
+    /// struct copies, and a single body evaluation of the lineup builder
+    /// hits it ~6 times (filtered list, fillable slots, selected players,
+    /// salary, validation). On big slates that made every re-render —
+    /// live-poll ticks, XI confirmations, toggles — cost hundreds of ms
+    /// and scrolling could spiral into a freeze.
+    @ObservationIgnored private var activePlayersCache: (key: String, value: [DFSPlayer])?
+    /// Memoized `filteredPlayers` — also keeps the ARRAY IDENTITY stable
+    /// across body evaluations so List diffing is a no-op while scrolling.
+    @ObservationIgnored private var filteredPlayersCache: (key: String, value: [DFSPlayer])?
     /// Maximum number of lineups per tournament
     let maxLineupsPerTournament: Int = 5
     /// Maximum number of lineups per sport per day
@@ -221,8 +239,8 @@ final class DFSViewModel {
     var canSubmitMoreLineups: Bool {
         totalLineupsToday < maxLineupsPerDay
     }
-    var slateGames: [DFSSlateGame] = []
-    var players: [DFSPlayer] = []
+    var slateGames: [DFSSlateGame] = [] { didSet { poolRevision &+= 1 } }
+    var players: [DFSPlayer] = [] { didSet { poolRevision &+= 1 } }
     var selectedPlayerIDs: Set<String> = []
     /// Explicitly chosen MVP player for single-game mode. When set, this player
     /// is always placed at index 0 in selectedPlayers (the MVP slot).
@@ -562,8 +580,14 @@ final class DFSViewModel {
     /// For single-game tournaments, returns the game-specific adjusted-salary pool.
     /// For main-slate tournaments, returns the full player pool.
     var activePlayers: [DFSPlayer] {
+        let key = "\(poolRevision)|\(activeTournamentID ?? "-")|\(activeLineupNumber)"
+        if let cached = activePlayersCache, cached.key == key { return cached.value }
         let basePool = computeActivePool()
-        return applyCanonicalSalaries(to: normalizeMLBTwoWayBatters(basePool))
+        let value = applyCanonicalSalaries(to: normalizeMLBTwoWayBatters(basePool))
+        // computeActivePool may have written the SG conversion cache (bumping
+        // poolRevision) — re-read the key so this memo isn't instantly stale.
+        activePlayersCache = ("\(poolRevision)|\(activeTournamentID ?? "-")|\(activeLineupNumber)", value)
+        return value
     }
 
     /// Re-route a two-way player's PITCHING stats from the base batter id to the
@@ -739,7 +763,7 @@ final class DFSViewModel {
     }
 
     /// Players from evening games only (6pm ET+), cached after slate load.
-    var eveningPlayers: [DFSPlayer] = []
+    var eveningPlayers: [DFSPlayer] = [] { didSet { poolRevision &+= 1 } }
 
     /// Switch the active tournament and reset lineup state for the new tournament.
     func selectTournament(_ tournamentID: String, lineupNumber: Int = 1) {
@@ -2073,6 +2097,15 @@ final class DFSViewModel {
     }
 
     var filteredPlayers: [DFSPlayer] {
+        let sortKey: String
+        switch sortOrder {
+        case .salary: sortKey = "sal"
+        case .projected: sortKey = "proj"
+        case .name: sortKey = "name"
+        case .position: sortKey = "pos"
+        }
+        let cacheKey = "\(poolRevision)|\(activeTournamentID ?? "-")|\(activeLineupNumber)|\(selectedPositionFilter ?? "-")|\(selectedGameFilter ?? "-")|\(searchText)|\(sortKey)"
+        if let cached = filteredPlayersCache, cached.key == cacheKey { return cached.value }
         // Use the tournament-appropriate player pool (single-game adjusted or main slate)
         let pool = activePlayers
         // Exclude players from games that are already final
@@ -2163,6 +2196,13 @@ final class DFSViewModel {
             }
         }
 
+        // Dedupe by id — the list's ForEach uses player.id as identity, and
+        // duplicate ids (loan-window players on two rosters, dk-injected
+        // twins) make SwiftUI's List diffing pathological while scrolling.
+        var seenIDs = Set<String>()
+        result = result.filter { seenIDs.insert($0.id).inserted }
+
+        filteredPlayersCache = (cacheKey, result)
         return result
     }
 
