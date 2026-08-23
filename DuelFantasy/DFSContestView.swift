@@ -354,20 +354,31 @@ struct DFSContestView: View {
                 )
             }
 
-            // SERIAL, not parallel: ten concurrent pipelines (each also
-            // spawning a detached settlement pass) all run their CPU on the
-            // SAME main actor — "parallel" just interleaved every sport's
-            // slate-apply/settle/refresh chunks into one continuous grind,
-            // and each pass's Task.yield() handed the frame to another
-            // pipeline instead of SwiftUI (My Contests froze on open and
-            // scroll). One sport at a time with a breather: identical total
-            // work, real UI frames in between. The visible sport's slate
-            // was already loaded above, so its cards paint first either way.
-            for vm in [viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
-                       eplViewModel, uclViewModel, wcViewModel, ufcViewModel,
-                       nflViewModel, cfbViewModel] {
+            // SERIAL, not parallel: concurrent pipelines all run their CPU
+            // on the SAME main actor — "parallel" just interleaved every
+            // sport's chunks into one continuous grind and Task.yield()
+            // handed frames to other pipelines instead of SwiftUI (My
+            // Contests froze on open/scroll). TWO serial phases:
+            //   1. paint: slate/entries/refresh per sport, VISIBLE sport
+            //      first — every sport's cards render before any grinding.
+            //   2. settle: the slow settlement sweeps (10-30s per sport
+            //      with many entered contests) run only after all cards
+            //      are painted.
+            var pipelineVMs: [DFSViewModel] = [viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
+                                               eplViewModel, uclViewModel, wcViewModel, ufcViewModel,
+                                               nflViewModel, cfbViewModel]
+            let visible = selectedSportViewModel
+            if let idx = pipelineVMs.firstIndex(where: { $0 === visible }) {
+                pipelineVMs.remove(at: idx)
+                pipelineVMs.insert(visible, at: 0)
+            }
+            for vm in pipelineVMs {
                 await initSportPipeline(vm)
                 try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            for vm in pipelineVMs {
+                await vm.checkAndSettleUnsettledTournaments()
+                try? await Task.sleep(nanoseconds: 250_000_000)
             }
 
             // Load previous in-progress entries for My Contests
@@ -3955,13 +3966,9 @@ struct DFSContestView: View {
         async let privates: () = vm.loadMyPrivateContests()
         await vm.loadSlateIfNeeded()
         await vm.fetchEntriesIfNeeded()
-        // Settlement iterates past tournaments doing network calls (can be
-        // 10–30s with many entered tournaments). "Detached" was a lie for a
-        // @MainActor VM — the task hopped straight back to the main actor
-        // and ran CONCURRENTLY with every other sport's settle, which is
-        // the interleaving that froze My Contests. Await it inline so the
-        // serial pipeline keeps settles one-at-a-time.
-        await vm.checkAndSettleUnsettledTournaments()
+        // Settlement moved to phase 2 of the serial init (after every
+        // sport's cards have painted) — a slow settle here starved the
+        // VISIBLE sport's refreshLive and left its cards shimmering.
         await vm.refreshLive()
         // Pre-cache OTHER entered tournaments runs in the background — it can
         // take 30–60s on a slow refresh cycle (2000-bot regeneration per
