@@ -189,6 +189,22 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
             windowSlates.append(DFSWindowSlate(token: "night", title: "Night Only", gameIDs: nightGames.map(\.id)))
         }
 
+        // Per-game DK price coverage: a game absent from DK's slates gets
+        // floor/estimated prices across the board (UNC@TCU showed a $4,000
+        // wall with a lone $6,300 QB) — DK isn't running that game, so we
+        // don't offer its showdown either. Matched players carry
+        // isConfirmedActive=true from the salary-application pass above.
+        var sgExcluded: Set<String> = []
+        for game in includedGames {
+            let gamePlayers = finalPlayers.filter { $0.gameID == game.id }
+            guard !gamePlayers.isEmpty else { continue }
+            let real = gamePlayers.filter { $0.isConfirmedActive }.count
+            if Double(real) / Double(gamePlayers.count) < 0.5 {
+                sgExcluded.insert(game.id)
+                print("[CFB-DFS] SG gate: \(game.awayTeam)@\(game.homeTeam) has only \(real)/\(gamePlayers.count) real DK prices — no showdown")
+            }
+        }
+
         let (tournaments, sgPlayers) = buildMultiTournamentSlate(
             baseID: tournamentID,
             league: "CFB",
@@ -199,6 +215,7 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
             isSingleGameSlate: isSingleGame,
             includedGames: includedGames,
             mainPlayers: sortedPlayers,
+            sgExcludedGameIDs: sgExcluded,
             windowSlates: windowSlates
         )
 

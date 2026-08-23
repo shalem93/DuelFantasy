@@ -189,6 +189,9 @@ struct DFSLeaderboardEntry: Identifiable {
 
 /// Live stat line for a single player in the current game
 struct DFSPlayerLiveStats: Sendable {
+    /// Sport-specific extra stat counts that don't fit the repurposed
+    /// legacy fields (soccer: TKL/INT/CRS/SA/PAS/FC).
+    var extraStats: [String: Int]? = nil
     let name: String             // athlete display name
     let points: Int
     let rebounds: Int
@@ -543,6 +546,11 @@ func buildMultiTournamentSlate(
     // Game scope for the MAIN tournaments (e.g. NFL Sunday main = 1pm+4pm,
     // SNF excluded). nil = every slate game.
     mainWindowGameIDs: [String]? = nil,
+    // Games whose single-game contests should NOT be offered — e.g. a CFB
+    // game absent from DK's slates prices as an all-floor synthetic wall
+    // (UNC@TCU showed $4,000 across the board). No real DK prices → no
+    // showdown, per the no-estimated-prices policy.
+    sgExcludedGameIDs: Set<String> = [],
     // Additional DK-style window slates ("Afternoon Only", "Night Only").
     // When non-empty, the legacy generic evening slate is skipped.
     windowSlates: [DFSWindowSlate] = []
@@ -664,6 +672,10 @@ func buildMultiTournamentSlate(
 
     // 2. Per-game single-game tournaments — all 8 field sizes per game
     for game in includedGames {
+        if sgExcludedGameIDs.contains(game.id) {
+            print("[DFS-Slate] \(game.awayTeam) @ \(game.homeTeam): SG excluded — no real DK prices for this game")
+            continue
+        }
         // Prefer this game's own showdown salaries (no cross-game name
         // collisions); fall back to the flat map for sports that don't
         // supply a per-game breakdown.

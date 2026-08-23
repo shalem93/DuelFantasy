@@ -1211,6 +1211,28 @@ struct DFSLiveContestView: View {
             .lineLimit(1)
     }
 
+    /// All nonzero soccer stats: "1 G · 2 SOT · 3 TKL · 35 PAS · 1 YC".
+    /// Field mapping: points=G, assists=A, rebounds=SOT, turnovers=SH,
+    /// blocks=SV, steals=TKL, fgm=FD, ftm=YC, fta=RC; the rest ride in
+    /// extraStats (INT/CRS/SA/PAS/FC).
+    private func soccerCompactStats(stats: DFSPlayerLiveStats) -> String {
+        var parts: [String] = []
+        if stats.points > 0 { parts.append("\(stats.points) G") }
+        if stats.assists > 0 { parts.append("\(stats.assists) A") }
+        if stats.rebounds > 0 { parts.append("\(stats.rebounds) SOT") }
+        if stats.turnovers > 0 { parts.append("\(stats.turnovers) SH") }
+        if stats.blocks > 0 { parts.append("\(stats.blocks) SV") }
+        if stats.steals > 0 { parts.append("\(stats.steals) TKL") }
+        let extras = stats.extraStats ?? [:]
+        for key in ["INT", "CRS", "SA", "PAS", "FC"] {
+            if let v = extras[key], v > 0 { parts.append("\(v) \(key)") }
+        }
+        if stats.fgm > 0 { parts.append("\(stats.fgm) FD") }
+        if stats.ftm > 0 { parts.append("\(stats.ftm) YC") }
+        if stats.fta > 0 { parts.append("\(stats.fta) RC") }
+        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
+    }
+
     private func expandedBoxScore(fieldEntry: DFSFieldEntry) -> some View {
         VStack(spacing: 0) {
             // Box score header — sport-aware
@@ -1228,22 +1250,11 @@ struct DFSLiveContestView: View {
                         .frame(width: 24, alignment: .trailing)
                     Text("TOT")
                         .frame(width: 28, alignment: .trailing)
-                } else if isMLB || isNHL || isFootball {
-                    // MLB/NHL/football use inline stat lines per player,
-                    // so we just show a single STATS + FPTS header
+                } else if isMLB || isNHL || isFootball || isSoccer {
+                    // MLB/NHL/football/soccer use inline stat lines per
+                    // player, so we just show a single STATS + FPTS header
                     Text("STATS")
                         .frame(width: 100, alignment: .trailing)
-                } else if isSoccer {
-                    Text("G")
-                        .frame(width: 22, alignment: .trailing)
-                    Text("A")
-                        .frame(width: 22, alignment: .trailing)
-                    Text("SOT")
-                        .frame(width: 28, alignment: .trailing)
-                    Text("SV")
-                        .frame(width: 22, alignment: .trailing)
-                    Text("FD")
-                        .frame(width: 22, alignment: .trailing)
                 } else if isUFC {
                     Text("SIG")
                         .frame(width: 28, alignment: .trailing)
@@ -1456,17 +1467,13 @@ struct DFSLiveContestView: View {
                                 .minimumScaleFactor(0.7)
                                 .frame(width: 100, alignment: .trailing)
                         } else if isSoccer {
-                            // Soccer: G, A, SOT, SV, FD
-                            Text("\(stats.points)")
-                                .frame(width: 22, alignment: .trailing)
-                            Text("\(stats.assists)")
-                                .frame(width: 22, alignment: .trailing)
-                            Text("\(stats.rebounds)")
-                                .frame(width: 28, alignment: .trailing)
-                            Text("\(stats.blocks)")
-                                .frame(width: 22, alignment: .trailing)
-                            Text("\(stats.fgm)")
-                                .frame(width: 22, alignment: .trailing)
+                            // Soccer: every nonzero DK-scored stat, compact
+                            Text(soccerCompactStats(stats: stats))
+                                .font(.system(size: 9).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .minimumScaleFactor(0.7)
+                                .frame(width: 100, alignment: .trailing)
                         } else if isUFC {
                             // UFC: SIG, TD, KD, SUB, CTRL
                             Text("\(stats.points)")

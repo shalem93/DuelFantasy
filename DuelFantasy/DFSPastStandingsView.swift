@@ -1306,9 +1306,37 @@ struct DFSPastStandingsView: View {
             .font(.caption.monospacedDigit())
             .padding(.horizontal, 12)
             .padding(.vertical, 4)
+
+            // Every remaining DK-scored category (shots, tackles, INT,
+            // crosses, shot assists, passes, fouls conceded, cards) as a
+            // compact sub-line — the columns above only fit the headliners.
+            if let stats, let extraLine = soccerExtraStatLine(stats), !extraLine.isEmpty {
+                Text(extraLine)
+                    .font(.system(size: 9).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.leading, 22)
+                    .padding(.bottom, 3)
+            }
         }
 
         lineupTotalsRow(record: record)
+    }
+
+    /// "2 SH · 3 TKL · 1 INT · 35 PAS · 1 YC" — all nonzero soccer stats
+    /// that aren't columns in the expanded box.
+    private func soccerExtraStatLine(_ stats: DFSPlayerLiveStats) -> String? {
+        var parts: [String] = []
+        if stats.turnovers > 0 { parts.append("\(stats.turnovers) SH") }
+        if stats.steals > 0 { parts.append("\(stats.steals) TKL") }
+        let extras = stats.extraStats ?? [:]
+        for key in ["INT", "CRS", "SA", "PAS", "FC"] {
+            if let v = extras[key], v > 0 { parts.append("\(v) \(key)") }
+        }
+        if stats.ftm > 0 { parts.append("\(stats.ftm) YC") }
+        if stats.fta > 0 { parts.append("\(stats.fta) RC") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     // MARK: - NHL Expanded Lineup

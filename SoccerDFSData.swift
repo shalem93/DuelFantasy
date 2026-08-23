@@ -1289,6 +1289,11 @@ nonisolated struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sen
                 // points → goals, assists → assists, rebounds → shots on target
                 // steals → tackles, blocks → saves, ftm → yellow cards, fta → red cards
                 let liveStats = DFSPlayerLiveStats(
+                    extraStats: [
+                        "TKL": tackles, "INT": interceptions,
+                        "CRS": crosses, "SA": shotAssists, "PAS": accuratePasses,
+                        "FC": foulsConceded,
+                    ],
                     name: athleteName,
                     points: goals,
                     rebounds: shotsOnTarget,

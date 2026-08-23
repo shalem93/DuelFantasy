@@ -3206,9 +3206,9 @@ final class DFSViewModel {
     private func botGenerationPools(
         from players: [DFSPlayer], lineupSize: Int,
         rosterSlots effectiveRosterSlots: [String]?, isSingleGame: Bool,
-        effectiveSport: String, cacheable: Bool
+        effectiveSport: String, cacheable: Bool, cacheToken: String? = nil
     ) -> BotGenPools {
-        let cacheKey = "\(poolRevision)|\(activeTournamentID ?? "-")|\(players.count)|\(lineupSize)|\(isSingleGame)|\(effectiveSport)|\(effectiveRosterSlots?.joined(separator: ",") ?? "-")"
+        let cacheKey = "\(cacheToken ?? "live")|\(poolRevision)|\(activeTournamentID ?? "-")|\(players.count)|\(lineupSize)|\(isSingleGame)|\(effectiveSport)|\(effectiveRosterSlots?.joined(separator: ",") ?? "-")"
         if cacheable, let cached = botGenPoolsCache.first(where: { $0.key == cacheKey }) {
             return cached.value
         }
@@ -3500,7 +3500,7 @@ final class DFSViewModel {
     }
 
 
-    private func generateBotLineup(from players: [DFSPlayer], salaryCap: Int, lineupSize: Int, rosterSlots: [String]? = nil, isSingleGame: Bool = false, sportOverride: String? = nil) -> [String] {
+    private func generateBotLineup(from players: [DFSPlayer], salaryCap: Int, lineupSize: Int, rosterSlots: [String]? = nil, isSingleGame: Bool = false, sportOverride: String? = nil, settlementCacheToken: String? = nil) -> [String] {
         // Use sportOverride when provided (e.g., during settlement of a different sport's tournament)
         let effectiveSport = sportOverride ?? sport
         // PGA bots have no position constraints — use salary-weighted random generation
@@ -3518,10 +3518,16 @@ final class DFSViewModel {
         // "Bot pool: using N starters" log spam and the builder freeze).
         // Memoized per slate; settlement (sportOverride) skips the cache
         // since it feeds custom pools.
+        // Settlement (sportOverride) can't use the live cache key, but its
+        // pool is stable WITHIN one settle call — the caller passes a
+        // per-call token so 2000 bots pay the pool cost once, not per bot
+        // (uncached, the NFL Aft settle ground for 2.5 HOURS).
         let pools = botGenerationPools(
             from: players, lineupSize: lineupSize,
             rosterSlots: effectiveRosterSlots, isSingleGame: isSingleGame,
-            effectiveSport: effectiveSport, cacheable: sportOverride == nil
+            effectiveSport: effectiveSport,
+            cacheable: sportOverride == nil || settlementCacheToken != nil,
+            cacheToken: settlementCacheToken
         )
         let eligible = pools.eligible
         let upgradePool = pools.upgradePool
@@ -9858,6 +9864,7 @@ final class DFSViewModel {
                 let botsNeeded = targetBots - currentBotCount
                 print("[DFS] Padding saved bot field with \(botsNeeded) additional bots (had \(currentBotCount), need \(targetBots))")
                 var seenLineupKeys = Set(field.map { $0.playerIDs.sorted().joined(separator: "|") })
+                let settleToken = UUID().uuidString
                 for i in 0..<botsNeeded {
                     // Generating thousands of bots runs on the main actor —
                     // yield regularly so the UI stays responsive (an admin
@@ -9880,10 +9887,10 @@ final class DFSViewModel {
                     // Duplicate-lineup re-roll: identical builds collapse field
                 // variance (60 clones surfaced in one regen) — try a few
                 // fresh rolls before accepting a repeat.
-                var botPlayerIDs = generateBotLineup(from: dfsPlayersForBot, salaryCap: salaryCap, lineupSize: botLineupSize, rosterSlots: botRosterSlots, isSingleGame: isSingleGame, sportOverride: sportPrefix.uppercased())
+                var botPlayerIDs = generateBotLineup(from: dfsPlayersForBot, salaryCap: salaryCap, lineupSize: botLineupSize, rosterSlots: botRosterSlots, isSingleGame: isSingleGame, sportOverride: sportPrefix.uppercased(), settlementCacheToken: settleToken)
                 var rerolls = 0
                 while rerolls < 3, seenLineupKeys.contains(botPlayerIDs.sorted().joined(separator: "|")) {
-                    botPlayerIDs = generateBotLineup(from: dfsPlayersForBot, salaryCap: salaryCap, lineupSize: botLineupSize, rosterSlots: botRosterSlots, isSingleGame: isSingleGame, sportOverride: sportPrefix.uppercased())
+                    botPlayerIDs = generateBotLineup(from: dfsPlayersForBot, salaryCap: salaryCap, lineupSize: botLineupSize, rosterSlots: botRosterSlots, isSingleGame: isSingleGame, sportOverride: sportPrefix.uppercased(), settlementCacheToken: settleToken)
                     rerolls += 1
                 }
                 seenLineupKeys.insert(botPlayerIDs.sorted().joined(separator: "|"))
@@ -9919,6 +9926,7 @@ final class DFSViewModel {
             print("[DFS] No saved bot field for \(tournamentID), generating with salary-based projections (no hindsight)")
             let botsToGenerate = max(0, entryCount - totalRealEntries)
             var seenLineupKeys = Set(field.map { $0.playerIDs.sorted().joined(separator: "|") })
+            let settleToken = UUID().uuidString
             for i in 0..<botsToGenerate {
                 // Yield so the main actor can service UI between bots — a
                 // forced regen of a 2000-entry field was freezing the app.
@@ -9938,10 +9946,10 @@ final class DFSViewModel {
                 // Duplicate-lineup re-roll: identical builds collapse field
                 // variance (60 clones surfaced in one regen) — try a few
                 // fresh rolls before accepting a repeat.
-                var botPlayerIDs = generateBotLineup(from: dfsPlayersForBot, salaryCap: salaryCap, lineupSize: botLineupSize, rosterSlots: botRosterSlots, isSingleGame: isSingleGame, sportOverride: sportPrefix.uppercased())
+                var botPlayerIDs = generateBotLineup(from: dfsPlayersForBot, salaryCap: salaryCap, lineupSize: botLineupSize, rosterSlots: botRosterSlots, isSingleGame: isSingleGame, sportOverride: sportPrefix.uppercased(), settlementCacheToken: settleToken)
                 var rerolls = 0
                 while rerolls < 3, seenLineupKeys.contains(botPlayerIDs.sorted().joined(separator: "|")) {
-                    botPlayerIDs = generateBotLineup(from: dfsPlayersForBot, salaryCap: salaryCap, lineupSize: botLineupSize, rosterSlots: botRosterSlots, isSingleGame: isSingleGame, sportOverride: sportPrefix.uppercased())
+                    botPlayerIDs = generateBotLineup(from: dfsPlayersForBot, salaryCap: salaryCap, lineupSize: botLineupSize, rosterSlots: botRosterSlots, isSingleGame: isSingleGame, sportOverride: sportPrefix.uppercased(), settlementCacheToken: settleToken)
                     rerolls += 1
                 }
                 seenLineupKeys.insert(botPlayerIDs.sorted().joined(separator: "|"))
