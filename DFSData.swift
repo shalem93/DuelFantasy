@@ -6761,6 +6761,9 @@ private enum DFSDateParsers {
 // MARK: - Player Game Log
 
 struct DFSPlayerGameLog: Identifiable {
+    /// Sport-specific extra stat counts (soccer: TKL/INT/CRS/SA/PAS/FD/FC)
+    /// that don't fit the repurposed legacy fields below.
+    var extraStats: [String: Int]? = nil
     let id: String
     let date: String
     let sortDate: Date      // for reliable chronological sorting
@@ -6809,7 +6812,16 @@ nonisolated struct ESPNPlayerGameLogProvider {
         // Soccer uses a different approach — ESPN's soccer gamelog endpoint doesn't return game data.
         // Instead, fetch team schedule → recent match summaries → extract player stats.
         if isSoccer {
-            return try await fetchSoccerGameLog(espnID: espnID, sportPath: sportPath, position: position, limit: limit, season: season)
+            let currentLog = try await fetchSoccerGameLog(espnID: espnID, sportPath: sportPath, position: position, limit: limit, season: season)
+            // New-season fallback: for the first weeks of a season a player
+            // may have 0 completed matches (Haaland showed "No game log
+            // data" the opening weekend) — fall back to LAST season's log
+            // when no explicit season was requested.
+            if currentLog.isEmpty, season == nil {
+                let lastSeason = Calendar.current.component(.year, from: Date()) - 1
+                return try await fetchSoccerGameLog(espnID: espnID, sportPath: sportPath, position: position, limit: limit, season: lastSeason)
+            }
+            return currentLog
         }
 
         // UFC: fetch fight history from ESPN MMA athlete event log
@@ -7945,6 +7957,11 @@ nonisolated struct ESPNPlayerGameLogProvider {
                 // a centre-back's FPTS isn't zero on a 0g/0a/0sot night.
                 let defActions = tackles + interceptions
                 return DFSPlayerGameLog(
+                    extraStats: [
+                        "TKL": tackles, "INT": interceptions,
+                        "CRS": crosses, "SA": shotAssists, "PAS": accuratePasses,
+                        "FD": foulsDrawn, "FC": foulsConceded,
+                    ],
                     id: eventID,
                     date: dateStr,
                     sortDate: parsedDate,

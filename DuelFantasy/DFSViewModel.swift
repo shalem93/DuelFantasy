@@ -1521,7 +1521,11 @@ final class DFSViewModel {
         case "MVP":
             return true
         case "FLEX":
-            if effectiveSport == "EPL" || effectiveSport == "UCL" {
+            if effectiveSport == "EPL" || effectiveSport == "UCL" || effectiveSport == "WC" {
+                // Showdown (MVP + 5 FLEX) takes ANY position incl. GK, like
+                // DK — the classic-only GK exclusion was blocking goalies
+                // from single-game lineups once other players were picked.
+                if tournament?.isSingleGame == true { return true }
                 return position != "GK"
             }
             // Football CLASSIC FLEX = RB/WR/TE (never QB or DST), like DK.
@@ -2704,9 +2708,10 @@ final class DFSViewModel {
         case "MVP":
             return true
         case "FLEX":
-            // Soccer FLEX excludes goalkeepers
-            if effectiveSport == "EPL" || effectiveSport == "UCL" {
-                return player.position != "GK"
+            // Soccer FLEX excludes goalkeepers — CLASSIC only. Showdown
+            // (MVP + 5 FLEX) takes any position incl. GK, like DK.
+            if effectiveSport == "EPL" || effectiveSport == "UCL" || effectiveSport == "WC" {
+                return isSingleGame || player.position != "GK"
             }
             // Football CLASSIC FLEX = RB/WR/TE; Showdown FLEX takes any
             // position (DK allows multiple QBs in single-game). SKILL is the

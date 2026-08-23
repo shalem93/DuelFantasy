@@ -284,16 +284,22 @@ struct BestBallPlayerDetailSheet: View {
         case "EPL":
             // Soccer field mapping in DFSPlayerGameLog: points=goals,
             // rebounds=SOT, assists=assists, blocks=saves,
-            // turnovers=totalShots, fgm=YC, fga=RC, ftm=cleanSheet.
+            // turnovers=totalShots, fgm=YC, fga=RC, ftm=cleanSheet;
+            // everything else lives in extraStats (TKL/INT/CRS/SA/PAS/FD/FC).
             var parts: [String] = []
             if g.points > 0 { parts.append("\(g.points) G") }
             if g.assists > 0 { parts.append("\(g.assists) A") }
             if g.rebounds > 0 { parts.append("\(g.rebounds) SOT") }
+            if g.turnovers > 0 { parts.append("\(g.turnovers) SH") }
             if g.blocks > 0 { parts.append("\(g.blocks) SV") }
+            let extras = g.extraStats ?? [:]
+            for key in ["TKL", "INT", "CRS", "SA", "PAS", "FD", "FC"] {
+                if let v = extras[key], v > 0 { parts.append("\(v) \(key)") }
+            }
             if g.ftm > 0 { parts.append("CS") }
             if g.fgm > 0 { parts.append("\(g.fgm) YC") }
             if g.fga > 0 { parts.append("\(g.fga) RC") }
-            return parts.isEmpty ? "\(g.turnovers) SH" : parts.joined(separator: " · ")
+            return parts.isEmpty ? "No stats" : parts.joined(separator: " · ")
         default:
             return ""
         }

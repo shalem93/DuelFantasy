@@ -960,6 +960,7 @@ struct DFSPlayerDetailView: View {
     private func soccerOutfieldRow(_ log: DFSPlayerGameLog) -> some View {
         // points=Goals, rebounds=SOT, assists=Assists, threePM=tackles,
         // threePA=defensive actions sum, fgm=YC, fga=RC
+        VStack(alignment: .leading, spacing: 1) {
         HStack(spacing: 0) {
             Text(log.date)
                 .frame(width: 38, alignment: .leading)
@@ -996,6 +997,25 @@ struct DFSPlayerDetailView: View {
                 .fontWeight(log.fantasyPoints >= 15 ? .semibold : .regular)
         }
         .font(.caption.monospacedDigit())
+        // Full remaining stat line — every DK-scored category that isn't a
+        // column above (shots, crosses, shot assists, passes, fouls, INT).
+        let extras = log.extraStats ?? [:]
+        let extraLine: String = {
+            var parts: [String] = []
+            if log.turnovers > 0 { parts.append("\(log.turnovers) SH") }
+            for key in ["INT", "CRS", "SA", "PAS", "FD", "FC"] {
+                if let v = extras[key], v > 0 { parts.append("\(v) \(key)") }
+            }
+            if log.fga > 0 { parts.append("\(log.fga) RC") }
+            return parts.joined(separator: " · ")
+        }()
+        if !extraLine.isEmpty {
+            Text(extraLine)
+                .font(.system(size: 9).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .padding(.leading, 90)
+        }
+        }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(log.fantasyPoints >= 20 ? brandPurple.opacity(0.06) : Color.clear)
