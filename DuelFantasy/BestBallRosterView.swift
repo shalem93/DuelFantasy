@@ -474,12 +474,49 @@ struct BestBallRosterView: View {
         .background(.white)
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
+        // Horizontal swipe pages the stat columns (chevrons in the header
+        // do the same). Horizontal-dominant check so vertical scrolling
+        // and row taps are untouched.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 25)
+                .onEnded { v in
+                    let pages = statPageCount(isPitcher: isPitcher)
+                    guard pages > 1,
+                          abs(v.translation.width) > abs(v.translation.height) * 1.5 else { return }
+                    Haptics.light()
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        if v.translation.width < 0 {
+                            statPage = min(pages - 1, statPage + 1)
+                        } else {
+                            statPage = max(0, statPage - 1)
+                        }
+                    }
+                }
+        )
     }
 
     // MARK: - Stat Column Header
 
-    private func statColumnHeader(isPitcher: Bool) -> some View {
+    /// Page through stat columns 5 at a time (EPL tracks 13: shots, cards,
+    /// tackles, interceptions, crosses, passes, fouls…). All rows read the
+    /// same window so the table stays in sync.
+    @State private var statPage = 0
+
+    private func visibleStatLabels(isPitcher: Bool) -> [String] {
         let labels = BestBallLineupConfig.statLabels(for: sport, isPitcher: isPitcher)
+        guard labels.count > 5 else { return labels }
+        let start = min(statPage * 5, max(0, labels.count - 5))
+        return Array(labels.dropFirst(start).prefix(5))
+    }
+
+    private func statPageCount(isPitcher: Bool) -> Int {
+        let labels = BestBallLineupConfig.statLabels(for: sport, isPitcher: isPitcher)
+        return max(1, Int(ceil(Double(labels.count) / 5.0)))
+    }
+
+    private func statColumnHeader(isPitcher: Bool) -> some View {
+        let labels = visibleStatLabels(isPitcher: isPitcher)
+        let pages = statPageCount(isPitcher: isPitcher)
 
         return HStack(spacing: 0) {
             Text("PLAYER")
@@ -490,9 +527,35 @@ struct BestBallRosterView: View {
                 Text("HR")
                     .frame(width: 44, alignment: .trailing)
             } else {
-                ForEach(labels.prefix(5), id: \.self) { label in
+                if pages > 1 {
+                    Button {
+                        Haptics.light()
+                        statPage = max(0, statPage - 1)
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(statPage > 0 ? brandPurple : Color(.systemGray4))
+                            .frame(width: 16)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(statPage == 0)
+                }
+                ForEach(labels, id: \.self) { label in
                     Text(label)
                         .frame(width: 30, alignment: .trailing)
+                }
+                if pages > 1 {
+                    Button {
+                        Haptics.light()
+                        statPage = min(pages - 1, statPage + 1)
+                    } label: {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(statPage < pages - 1 ? brandPurple : Color(.systemGray4))
+                            .frame(width: 16)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(statPage >= pages - 1)
                 }
 
                 Text("FPTS")
@@ -566,7 +629,8 @@ struct BestBallRosterView: View {
         let pts = effectivePoints(for: pick.playerID)
         let weekPts = weeklyPlayerPoints[pick.playerID] ?? 0
         let stats = effectiveStats(for: pick.playerID)
-        let labels = BestBallLineupConfig.statLabels(for: sport, isPitcher: isPitcher)
+        let labels = visibleStatLabels(isPitcher: isPitcher)
+        let statPages = statPageCount(isPitcher: isPitcher)
         let showingDaily = hasDailyDataForSelectedDate
         // Use the slot label as the badge when the player is filling a
         // role that differs from their actual position (the FLEX/SFLEX
@@ -621,13 +685,19 @@ struct BestBallRosterView: View {
                         .frame(width: 44, alignment: .trailing)
                 }
             } else {
-                // Stat columns
-                ForEach(labels.prefix(5), id: \.self) { label in
+                // Stat columns (aligned under the pager chevrons when present)
+                if statPages > 1 {
+                    Spacer().frame(width: 16)
+                }
+                ForEach(labels, id: \.self) { label in
                     let val = stats[label]
                     Text(val != nil ? formatStat(val!) : "-")
                         .font(.system(size: 11, weight: .medium).monospacedDigit())
                         .foregroundStyle(val != nil ? (isScoring ? .primary : .secondary) : .quaternary)
                         .frame(width: 30, alignment: .trailing)
+                }
+                if statPages > 1 {
+                    Spacer().frame(width: 16)
                 }
 
                 // FPTS box

@@ -608,7 +608,7 @@ enum BestBallLineupConfig {
         case "MLB" where isPitcher: return ["IP", "K", "ER", "W", "SV"]
         case "MLB": return ["H", "AB", "HR", "RBI", "R", "BB", "K", "SB"]
         case "NFL", "CFB": return ["PYDS", "PTD", "INT", "RYDS", "RTD", "REC", "RECYDS", "RECTD"]
-        case "EPL": return ["G", "A", "SOT", "SH", "SV", "YC", "RC"]
+        case "EPL": return ["G", "A", "SOT", "SH", "SV", "TKL", "INT", "YC", "RC", "CRS", "PAS", "FD", "FC"]
         default: return []
         }
     }
@@ -2790,6 +2790,8 @@ nonisolated struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvi
                 "SOT": Double(sot), "SH": Double(shots),
                 "SV": Double(saves), "YC": Double(yc), "RC": Double(rc),
                 "TKL": Double(tacklesWon), "INT": Double(interceptions),
+                "CRS": Double(crosses), "PAS": Double(accuratePasses),
+                "FD": Double(foulsDrawn), "FC": Double(foulsConceded),
             ]
             entries.append((raw.fullID, fpts, lookup))
         }
