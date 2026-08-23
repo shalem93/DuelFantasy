@@ -883,11 +883,27 @@ struct DFSLiveContestView: View {
                 }
                 .padding(.horizontal, 12)
 
-                ForEach(Array(visibleLeaderboardEntries.enumerated()), id: \.element.id) { idx, entry in
+                // Hoisted ONCE: `visibleLeaderboardEntries` is an O(field)
+                // filter with array copies, and the per-row pinned-separator
+                // check below used to re-evaluate it PER ROW — O(rows x
+                // field) work while scrolling, which froze the live screen.
+                let entries = visibleLeaderboardEntries
+                let firstPinnedIdx = entries.firstIndex { $0.isCurrentUser && $0.rank > leaderboardPageSize }
+                // Per-row O(field) work, hoisted: the row used to scan all
+                // 2000 fieldEntries AND rebuild an O(pool) player dictionary
+                // (inside timeRemainingLabel) for EVERY row materialized
+                // while scrolling.
+                let fieldByID: [UUID: DFSFieldEntry] = {
+                    let wanted = Set(entries.map(\.id))
+                    var m: [UUID: DFSFieldEntry] = [:]
+                    for fe in viewModel.fieldEntries where wanted.contains(fe.id) { m[fe.id] = fe }
+                    return m
+                }()
+                let timeLabels = viewModel.timeRemainingLabels(for: Array(fieldByID.values))
+                ForEach(Array(entries.enumerated()), id: \.element.id) { idx, entry in
                     // Show separator once before pinned user entries outside the current page
                     if entry.isCurrentUser && entry.rank > leaderboardPageSize {
-                        let isFirstPinned = !visibleLeaderboardEntries.prefix(idx).contains(where: { $0.isCurrentUser && $0.rank > leaderboardPageSize })
-                        if isFirstPinned {
+                        if idx == firstPinnedIdx {
                             HStack {
                                 Spacer()
                                 Text("···")
@@ -898,7 +914,7 @@ struct DFSLiveContestView: View {
                             .padding(.vertical, 2)
                         }
                     }
-                    leaderboardRow(entry)
+                    leaderboardRow(entry, fieldEntry: fieldByID[entry.id], timeLabel: timeLabels[entry.id] ?? "")
                 }
             }
 
@@ -1042,10 +1058,8 @@ struct DFSLiveContestView: View {
         .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
-    private func leaderboardRow(_ entry: DFSLeaderboardEntry) -> some View {
+    private func leaderboardRow(_ entry: DFSLeaderboardEntry, fieldEntry: DFSFieldEntry?, timeLabel: String) -> some View {
         let isExpanded = expandedEntryID == entry.id
-        let fieldEntry = viewModel.fieldEntries.first(where: { $0.id == entry.id })
-        let timeLabel = fieldEntry.map { viewModel.timeRemainingLabel(for: $0) } ?? ""
 
         return VStack(spacing: 0) {
             Button {

@@ -2049,6 +2049,20 @@ final class DFSViewModel {
     /// Shows count of live/remaining games, e.g. "2 live", "Final", "3 pre"
     func timeRemainingLabel(for fieldEntry: DFSFieldEntry) -> String {
         let playersByID = Dictionary(activePlayers.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return timeRemainingLabel(for: fieldEntry, playersByID: playersByID)
+    }
+
+    /// Batch variant: builds the player lookup ONCE. The single-entry
+    /// version above rebuilds an O(pool) dictionary per call — fine for a
+    /// card, lethal when a 2000-row leaderboard called it per row.
+    func timeRemainingLabels(for fieldEntries: [DFSFieldEntry]) -> [UUID: String] {
+        let playersByID = Dictionary(activePlayers.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        var out: [UUID: String] = [:]
+        for fe in fieldEntries { out[fe.id] = timeRemainingLabel(for: fe, playersByID: playersByID) }
+        return out
+    }
+
+    private func timeRemainingLabel(for fieldEntry: DFSFieldEntry, playersByID: [String: DFSPlayer]) -> String {
         var liveCount = 0
         var preCount = 0
         var finalCount = 0
