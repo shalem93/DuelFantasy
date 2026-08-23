@@ -1217,7 +1217,7 @@ nonisolated enum BestBallBotDrafter {
 nonisolated protocol BestBallPlayerProvider {
     /// `cfbPool` narrows the CFB pool ("power" = P4 + Notre Dame); other
     /// sports ignore it.
-    func fetchPlayers(sport: String, cfbPool: String?) async throws -> [BestBallPlayer]
+    @concurrent func fetchPlayers(sport: String, cfbPool: String?) async throws -> [BestBallPlayer]
 }
 
 /// Result from weekly scoring with full stat lines
@@ -1229,16 +1229,16 @@ struct BestBallWeeklyStatsResult {
 }
 
 nonisolated protocol BestBallWeeklyScoringProvider {
-    func fetchWeeklyPoints(sport: String, playerIDs: [String], weekStartDate: Date, weekEndDate: Date) async throws -> [String: Double]
-    func fetchWeeklyPointsWithStats(sport: String, playerIDs: [String], weekStartDate: Date, weekEndDate: Date) async throws -> BestBallWeeklyStatsResult
+    @concurrent func fetchWeeklyPoints(sport: String, playerIDs: [String], weekStartDate: Date, weekEndDate: Date) async throws -> [String: Double]
+    @concurrent func fetchWeeklyPointsWithStats(sport: String, playerIDs: [String], weekStartDate: Date, weekEndDate: Date) async throws -> BestBallWeeklyStatsResult
     /// Bulk fetch: fetches all ESPN data for a week once and returns stats for ALL players found.
     /// Much faster than calling fetchWeeklyPointsWithStats per member since HTTP requests are shared.
     /// `restrictToPlayerIDs` bounds per-player detail fetches (EPL DK stats)
     /// to the players a league actually drafted; nil = no restriction.
-    func fetchWeeklyAllPlayerStats(sport: String, weekStartDate: Date, weekEndDate: Date, restrictToPlayerIDs: Set<String>?) async throws -> BestBallWeeklyStatsResult
+    @concurrent func fetchWeeklyAllPlayerStats(sport: String, weekStartDate: Date, weekEndDate: Date, restrictToPlayerIDs: Set<String>?) async throws -> BestBallWeeklyStatsResult
     /// Lightweight fetch: returns season HR count for each player via ESPN athlete stats endpoint.
     /// Much cheaper than fetching full box scores for every game of the season.
-    func fetchSeasonHRCounts(playerIDs: [String]) async -> [String: Int]
+    @concurrent func fetchSeasonHRCounts(playerIDs: [String]) async -> [String: Int]
 }
 
 // MARK: - ESPN Best Ball Player Provider
@@ -1279,7 +1279,7 @@ nonisolated struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
         self.session = session
     }
 
-    func fetchPlayers(sport: String, cfbPool: String? = nil) async throws -> [BestBallPlayer] {
+    @concurrent func fetchPlayers(sport: String, cfbPool: String? = nil) async throws -> [BestBallPlayer] {
         switch sport {
         case "NBA": return try await fetchSportPlayers(sport: "basketball", league: "nba", sportName: "NBA", teamLimit: 30)
         case "MLB": return try await fetchSportPlayers(sport: "baseball", league: "mlb", sportName: "MLB", teamLimit: 30)
@@ -2261,13 +2261,13 @@ nonisolated struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvi
     }
 
     // Legacy simple version
-    func fetchWeeklyPoints(sport: String, playerIDs: [String], weekStartDate: Date, weekEndDate: Date) async throws -> [String: Double] {
+    @concurrent func fetchWeeklyPoints(sport: String, playerIDs: [String], weekStartDate: Date, weekEndDate: Date) async throws -> [String: Double] {
         let result = try await fetchWeeklyPointsWithStats(sport: sport, playerIDs: playerIDs, weekStartDate: weekStartDate, weekEndDate: weekEndDate)
         return result.playerPoints
     }
 
     // Full version with stat lines and daily breakdown
-    func fetchWeeklyPointsWithStats(sport: String, playerIDs: [String], weekStartDate: Date, weekEndDate: Date) async throws -> BestBallWeeklyStatsResult {
+    @concurrent func fetchWeeklyPointsWithStats(sport: String, playerIDs: [String], weekStartDate: Date, weekEndDate: Date) async throws -> BestBallWeeklyStatsResult {
         guard !playerIDs.isEmpty else {
             return BestBallWeeklyStatsResult(playerPoints: [:], playerStats: [:], dailyBreakdown: [:], dailyStats: [:])
         }
@@ -2396,7 +2396,7 @@ nonisolated struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvi
 
     /// Bulk fetch: fetches all ESPN box scores for a week with concurrent requests,
     /// returning stats for every player found. Call once per week, then filter per member locally.
-    func fetchWeeklyAllPlayerStats(sport: String, weekStartDate: Date, weekEndDate: Date, restrictToPlayerIDs: Set<String>? = nil) async throws -> BestBallWeeklyStatsResult {
+    @concurrent func fetchWeeklyAllPlayerStats(sport: String, weekStartDate: Date, weekEndDate: Date, restrictToPlayerIDs: Set<String>? = nil) async throws -> BestBallWeeklyStatsResult {
         let (sportPath, leaguePath) = espnPaths(for: sport)
         guard !sportPath.isEmpty else {
             return BestBallWeeklyStatsResult(playerPoints: [:], playerStats: [:], dailyBreakdown: [:], dailyStats: [:])
@@ -2550,7 +2550,7 @@ nonisolated struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvi
 
     /// Fetches season HR counts by hitting each player's ESPN athlete stats endpoint.
     /// This is ~1 lightweight call per unique player instead of fetching every box score of the season.
-    func fetchSeasonHRCounts(playerIDs: [String]) async -> [String: Int] {
+    @concurrent func fetchSeasonHRCounts(playerIDs: [String]) async -> [String: Int] {
         let prefix = "mlb-"
         var result: [String: Int] = [:]
 

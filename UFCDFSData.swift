@@ -44,7 +44,7 @@ nonisolated struct ESPNUFCDFSSlateProvider: DFSSlateProvider {
         self.session = session
     }
 
-    func fetchSlate() async throws -> DFSSlate {
+    @concurrent func fetchSlate() async throws -> DFSSlate {
         if let cached = UFCSlateCache.shared.get() {
             return cached
         }
@@ -537,7 +537,7 @@ nonisolated struct ESPNUFCDFSLiveScoringProvider: DFSLiveScoringProvider, Sendab
     /// - Decision Win: +30.0 pts (just the base)
     /// - Reversal: +3.0 pts
     /// - Advance to mount/back: +5.0 pts
-    nonisolated func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
+    @concurrent func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
         var pointsByPlayerID: [String: Double] = [:]
         var statsByPlayerID: [String: DFSPlayerLiveStats] = [:]
         var gameLiveInfo: [String: DFSGameLiveInfo] = [:]

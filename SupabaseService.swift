@@ -3311,7 +3311,7 @@ nonisolated final class SupabaseService {
         return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
     }
 
-    private func request<T: Decodable, Body: Encodable>(
+    @concurrent private func request<T: Decodable, Body: Encodable>(
         url: URL,
         method: String,
         body: Body?,
@@ -3363,7 +3363,7 @@ nonisolated final class SupabaseService {
         return try JSONDecoder.supabaseDecoder.decode(T.self, from: data)
     }
 
-    private func requestData<Body: Encodable>(
+    @concurrent private func requestData<Body: Encodable>(
         url: URL,
         method: String,
         body: Body?,
@@ -5334,7 +5334,7 @@ nonisolated final class SupabaseService {
         try await requestNoResponse(url: url, method: "DELETE", body: Optional<String>.none, bearerToken: accessToken)
     }
 
-    private func requestNoResponse<Body: Encodable>(
+    @concurrent private func requestNoResponse<Body: Encodable>(
         url: URL,
         method: String,
         body: Body?,

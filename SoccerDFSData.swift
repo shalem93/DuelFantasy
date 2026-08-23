@@ -179,7 +179,7 @@ nonisolated struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
         self.session = session
     }
 
-    func fetchSlate() async throws -> DFSSlate {
+    @concurrent func fetchSlate() async throws -> DFSSlate {
         let cacheKey = league.displayName.lowercased()
         if let cached = SoccerSlateCache.shared.get(key: cacheKey) {
             return cached
@@ -952,7 +952,7 @@ nonisolated struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sen
         let teamRosters: [String: Set<String>]
     }
 
-    nonisolated func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
+    @concurrent func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
         let results: [GameFetchResult] = await withTaskGroup(of: GameFetchResult?.self) { group in
             for game in games {
                 group.addTask {

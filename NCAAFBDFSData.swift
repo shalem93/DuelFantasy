@@ -43,7 +43,7 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
         self.session = session
     }
 
-    func fetchSlate() async throws -> DFSSlate {
+    @concurrent func fetchSlate() async throws -> DFSSlate {
         if let cached = NCAAFBSlateCache.shared.get() {
             return cached
         }
@@ -665,7 +665,7 @@ nonisolated struct ESPNNCAAFBDFSLiveScoringProvider: DFSLiveScoringProvider, Sen
     /// - 2PT Conversion: +2.0 pts
     /// - FG Made: +3.0 pts
     /// - PAT Made: +1.0 pt
-    nonisolated func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
+    @concurrent func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
         var pointsByPlayerID: [String: Double] = [:]
         var statsByPlayerID: [String: DFSPlayerLiveStats] = [:]
         var gameLiveInfo: [String: DFSGameLiveInfo] = [:]

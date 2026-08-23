@@ -43,7 +43,7 @@ nonisolated struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
         self.session = session
     }
 
-    func fetchSlate() async throws -> DFSSlate {
+    @concurrent func fetchSlate() async throws -> DFSSlate {
         if let cached = NFLSlateCache.shared.get() {
             return cached
         }
@@ -838,7 +838,7 @@ nonisolated struct ESPNNFLDFSLiveScoringProvider: DFSLiveScoringProvider, Sendab
     /// - Defensive TD: +6.0 pts
     /// - Safety (DEF): +2.0 pts
     /// - Points Allowed 0: +10.0, 1-6: +7.0, 7-13: +4.0, 14-20: +1.0, 21-27: 0, 28-34: -1.0, 35+: -4.0
-    nonisolated func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
+    @concurrent func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
         var pointsByPlayerID: [String: Double] = [:]
         var statsByPlayerID: [String: DFSPlayerLiveStats] = [:]
         var gameLiveInfo: [String: DFSGameLiveInfo] = [:]

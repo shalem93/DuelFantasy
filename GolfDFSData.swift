@@ -231,7 +231,7 @@ nonisolated struct ESPNPGADFSSlateProvider: DFSSlateProvider {
         return salaries
     }
 
-    func fetchSlate() async throws -> DFSSlate {
+    @concurrent func fetchSlate() async throws -> DFSSlate {
         // Fetch PGA Tour scoreboard (current week)
         guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard") else {
             throw NSError(domain: "GolfDFS", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid PGA scoreboard URL"])
@@ -1063,7 +1063,7 @@ nonisolated struct ESPNPGADFSLiveScoringProvider: DFSLiveScoringProvider, Sendab
         self.session = session
     }
 
-    nonisolated func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
+    @concurrent func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
         // For golf, there's only one "game" (the tournament event)
         guard let tournamentGame = games.first else {
             return DFSScoreSnapshot(
@@ -1793,7 +1793,7 @@ extension DFSEngine {
 nonisolated struct ConfiguredGolfDFSSlateProvider: DFSSlateProvider {
     private let liveProvider = ESPNPGADFSSlateProvider()
 
-    func fetchSlate() async throws -> DFSSlate {
+    @concurrent func fetchSlate() async throws -> DFSSlate {
         let live = try await liveProvider.fetchSlate()
         if live.players.isEmpty {
             throw NSError(domain: "GolfDFS", code: 100, userInfo: [NSLocalizedDescriptionKey: "No PGA players available"])

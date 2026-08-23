@@ -78,7 +78,7 @@ protocol MatchProvider {
 }
 
 nonisolated protocol MatchResultProvider {
-    func fetchCompletedWinners(matchIDs: Set<String>) async throws -> [String: String]
+    @concurrent func fetchCompletedWinners(matchIDs: Set<String>) async throws -> [String: String]
 }
 
 enum SportsDataError: Error {
@@ -847,7 +847,7 @@ nonisolated struct ESPNPropBoardProvider {
     private static let nameCacheLock = NSLock()
     nonisolated(unsafe) private static var athleteNameCache: [String: String] = [:]
 
-    func fetchPropMatches(for match: Match) async -> [Match] {
+    @concurrent func fetchPropMatches(for match: Match) async -> [Match] {
         guard let sportKey = Self.sportKeyFromMatchID(match.id),
               let sport = ESPSportDefinition.majorSports.first(where: { $0.oddsSportKey == sportKey }) else { return [] }
         let types = Self.statTypes(forSportKey: sportKey)
@@ -1550,7 +1550,7 @@ nonisolated struct ESPNMatchResultProvider: MatchResultProvider {
         self.session = session
     }
 
-    func fetchCompletedWinners(matchIDs: Set<String>) async throws -> [String: String] {
+    @concurrent func fetchCompletedWinners(matchIDs: Set<String>) async throws -> [String: String] {
         guard !matchIDs.isEmpty else { return [:] }
 
         // Only poll sports that have unresolved picks — skip the rest entirely.

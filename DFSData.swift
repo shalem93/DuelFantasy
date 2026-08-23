@@ -375,18 +375,24 @@ struct DFSScoreSnapshot: Sendable {
     let allGamesFinal: Bool
 }
 
+// @concurrent, not just nonisolated: under Approachable Concurrency
+// (NonisolatedNonsendingByDefault), a nonisolated ASYNC function runs on
+// the CALLER'S actor — so provider work called from @MainActor view
+// models still parsed on the main thread. @concurrent is the explicit
+// "run on the global executor" opt-out; the whole call tree beneath
+// inherits it.
 nonisolated protocol DFSSlateProvider {
-    func fetchSlate() async throws -> DFSSlate
+    @concurrent func fetchSlate() async throws -> DFSSlate
 }
 
 nonisolated protocol DFSLiveScoringProvider: Sendable {
-    nonisolated func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot
+    @concurrent func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot
 }
 
 nonisolated struct ConfiguredDFSSlateProvider: DFSSlateProvider {
     private let liveProvider = ESPNNBADFSSlateProvider()
 
-    func fetchSlate() async throws -> DFSSlate {
+    @concurrent func fetchSlate() async throws -> DFSSlate {
         let live = try await liveProvider.fetchSlate()
         if live.players.isEmpty {
             throw NSError(domain: "DFS", code: 100, userInfo: [NSLocalizedDescriptionKey: "No live DFS players available"])
@@ -398,7 +404,7 @@ nonisolated struct ConfiguredDFSSlateProvider: DFSSlateProvider {
 /// Returns a pre-built slate — used when creating per-tournament ViewModels from shared data.
 nonisolated struct PreloadedDFSSlateProvider: DFSSlateProvider {
     let slate: DFSSlate
-    func fetchSlate() async throws -> DFSSlate { return slate }
+    @concurrent func fetchSlate() async throws -> DFSSlate { return slate }
 }
 
 /// Convert a main-slate salary to single-game (showdown) salary.
@@ -870,7 +876,7 @@ nonisolated struct ESPNNBADFSSlateProvider: DFSSlateProvider {
         self.session = session
     }
 
-    func fetchSlate() async throws -> DFSSlate {
+    @concurrent func fetchSlate() async throws -> DFSSlate {
         // Return cached slate if recent
         if let cached = cache.getSlate() {
             return cached
@@ -2840,7 +2846,7 @@ nonisolated struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
         self.session = session
     }
 
-    func fetchSlate() async throws -> DFSSlate {
+    @concurrent func fetchSlate() async throws -> DFSSlate {
         // Start fetching DraftKings salaries in parallel with ESPN data.
         // Primary source: fetchSalaries (DFF DK → RG DK fallback).
         // Secondary fallback: fetchDKMLBSalaries (DFF DK only, separate showdown validation).
@@ -3840,7 +3846,7 @@ nonisolated struct ESPNMLBDFSLiveScoringProvider: DFSLiveScoringProvider, Sendab
         let isFinal: Bool
     }
 
-    nonisolated func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
+    @concurrent func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
         // Return cached snapshot if recent enough and for the same set of games
         let gameIDs = Set(games.map { $0.id })
         if let cached = LiveScoreCache.shared.get(gameIDs: gameIDs) {
@@ -4257,7 +4263,7 @@ nonisolated struct ESPNNCAAMDFSSlateProvider: DFSSlateProvider {
         self.session = session
     }
 
-    func fetchSlate() async throws -> DFSSlate {
+    @concurrent func fetchSlate() async throws -> DFSSlate {
         // Return cached slate if recent
         if let cached = cache.getSlate(key: "ncaam") {
             return cached
@@ -4697,7 +4703,7 @@ nonisolated struct ESPNNCAAMDFSLiveScoringProvider: DFSLiveScoringProvider, Send
         let isFinal: Bool
     }
 
-    nonisolated func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
+    @concurrent func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
         let gameIDs = Set(games.map { $0.id })
         if let cached = LiveScoreCache.shared.get(gameIDs: gameIDs) {
             return cached
@@ -4935,7 +4941,7 @@ nonisolated struct ESPNNHLDFSSlateProvider: DFSSlateProvider {
         self.session = session
     }
 
-    func fetchSlate() async throws -> DFSSlate {
+    @concurrent func fetchSlate() async throws -> DFSSlate {
         if let cached = cache.getSlate(key: "nhl") {
             return cached
         }
@@ -5945,7 +5951,7 @@ nonisolated struct ESPNNHLDFSLiveScoringProvider: DFSLiveScoringProvider, Sendab
         let isFinal: Bool
     }
 
-    nonisolated func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
+    @concurrent func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
         let gameIDs = Set(games.map { $0.id })
         if let cached = LiveScoreCache.shared.get(gameIDs: gameIDs) {
             return cached
@@ -6191,7 +6197,7 @@ nonisolated struct ESPNNHLDFSLiveScoringProvider: DFSLiveScoringProvider, Sendab
 }
 
 nonisolated struct MockDFSSlateProvider: DFSSlateProvider {
-    func fetchSlate() async throws -> DFSSlate {
+    @concurrent func fetchSlate() async throws -> DFSSlate {
         DFSSlate(
             tournament: DFSTournament(
                 id: "mock-dfs-tod",
@@ -6789,7 +6795,7 @@ nonisolated struct ESPNPlayerGameLogProvider {
 
     /// Fetches the last 15 game logs for a player given their DFS player ID (e.g. "nba-12345" or "ncaam-67890").
     /// Pass `season` to pin a specific season (e.g. 2025); nil = ESPN's most recent season with data.
-    func fetchGameLog(playerID: String, position: String = "", limit: Int = 15, season: Int? = nil) async throws -> [DFSPlayerGameLog] {
+    @concurrent func fetchGameLog(playerID: String, position: String = "", limit: Int = 15, season: Int? = nil) async throws -> [DFSPlayerGameLog] {
         // Two-way player SP entries have IDs like "mlb-12345-sp" — strip suffix for ESPN lookup
         let isTwoWaySP = playerID.hasSuffix("-sp")
         let cleanedID = isTwoWaySP ? String(playerID.dropLast(3)) : playerID
@@ -8665,7 +8671,7 @@ nonisolated struct ESPNDFSLiveScoringProvider: DFSLiveScoringProvider, Sendable 
         let isFinal: Bool
     }
 
-    nonisolated func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
+    @concurrent func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
         // Return cached snapshot if recent enough and for the same set of games
         let gameIDs = Set(games.map { $0.id })
         if let cached = LiveScoreCache.shared.get(gameIDs: gameIDs) {
@@ -8919,7 +8925,7 @@ nonisolated struct ESPNWNBADFSSlateProvider: DFSSlateProvider {
         self.session = session
     }
 
-    func fetchSlate() async throws -> DFSSlate {
+    @concurrent func fetchSlate() async throws -> DFSSlate {
         // Return cached slate if recent
         if let cached = cache.getSlate(key: "wnba") {
             return cached
@@ -9559,7 +9565,7 @@ nonisolated struct ESPNWNBADFSLiveScoringProvider: DFSLiveScoringProvider, Senda
         let isFinal: Bool
     }
 
-    nonisolated func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
+    @concurrent func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
         // Return cached snapshot if recent enough and for the same set of games
         let gameIDs = Set(games.map { $0.id })
         if let cached = LiveScoreCache.shared.get(gameIDs: gameIDs) {

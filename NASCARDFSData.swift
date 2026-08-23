@@ -124,7 +124,7 @@ nonisolated struct ESPNNASCARDFSSlateProvider: DFSSlateProvider {
         self.session = session
     }
 
-    func fetchSlate() async throws -> DFSSlate {
+    @concurrent func fetchSlate() async throws -> DFSSlate {
         if let cached = NASCARSlateCache.shared.get() {
             return cached
         }
@@ -384,7 +384,7 @@ nonisolated struct ESPNNASCARDFSLiveScoringProvider: DFSLiveScoringProvider, Sen
         self.session = session
     }
 
-    nonisolated func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
+    @concurrent func fetchScoreSnapshot(for games: [DFSSlateGame]) async throws -> DFSScoreSnapshot {
         guard let raceGame = games.first else {
             return DFSScoreSnapshot(playerFantasyPoints: [:], playerLiveStats: [:], gameLiveInfo: [:], allGamesFinal: false)
         }
