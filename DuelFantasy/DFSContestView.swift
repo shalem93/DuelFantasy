@@ -354,20 +354,21 @@ struct DFSContestView: View {
                 )
             }
 
-            // Per-sport init pipelines run in PARALLEL (the visible sport's
-            // slate was already loaded above, so its pipeline is cheap and
-            // the other 9 no longer compete with the user-facing paint).
-            async let nba: Void  = initSportPipeline(viewModel)
-            async let nhl: Void  = initSportPipeline(nhlViewModel)
-            async let mlb: Void  = initSportPipeline(mlbViewModel)
-            async let pga: Void  = initSportPipeline(pgaViewModel)
-            async let epl: Void  = initSportPipeline(eplViewModel)
-            async let ucl: Void  = initSportPipeline(uclViewModel)
-            async let wc: Void   = initSportPipeline(wcViewModel)
-            async let ufc: Void  = initSportPipeline(ufcViewModel)
-            async let nfl: Void  = initSportPipeline(nflViewModel)
-            async let cfb: Void  = initSportPipeline(cfbViewModel)
-            _ = await (nba, nhl, mlb, pga, epl, ucl, wc, ufc, nfl, cfb)
+            // SERIAL, not parallel: ten concurrent pipelines (each also
+            // spawning a detached settlement pass) all run their CPU on the
+            // SAME main actor — "parallel" just interleaved every sport's
+            // slate-apply/settle/refresh chunks into one continuous grind,
+            // and each pass's Task.yield() handed the frame to another
+            // pipeline instead of SwiftUI (My Contests froze on open and
+            // scroll). One sport at a time with a breather: identical total
+            // work, real UI frames in between. The visible sport's slate
+            // was already loaded above, so its cards paint first either way.
+            for vm in [viewModel, nhlViewModel, mlbViewModel, pgaViewModel,
+                       eplViewModel, uclViewModel, wcViewModel, ufcViewModel,
+                       nflViewModel, cfbViewModel] {
+                await initSportPipeline(vm)
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
 
             // Load previous in-progress entries for My Contests
             await loadPreviousInProgressEntries()
@@ -3955,12 +3956,12 @@ struct DFSContestView: View {
         await vm.loadSlateIfNeeded()
         await vm.fetchEntriesIfNeeded()
         // Settlement iterates past tournaments doing network calls (can be
-        // 10–30s with many entered tournaments). It writes to history/settled
-        // tables, none of which are needed to paint the active contest card,
-        // so it runs in the background.
-        Task.detached { [vm] in
-            await vm.checkAndSettleUnsettledTournaments()
-        }
+        // 10–30s with many entered tournaments). "Detached" was a lie for a
+        // @MainActor VM — the task hopped straight back to the main actor
+        // and ran CONCURRENTLY with every other sport's settle, which is
+        // the interleaving that froze My Contests. Await it inline so the
+        // serial pipeline keeps settles one-at-a-time.
+        await vm.checkAndSettleUnsettledTournaments()
         await vm.refreshLive()
         // Pre-cache OTHER entered tournaments runs in the background — it can
         // take 30–60s on a slow refresh cycle (2000-bot regeneration per
