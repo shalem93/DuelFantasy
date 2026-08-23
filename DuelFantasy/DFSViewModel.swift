@@ -8933,6 +8933,7 @@ final class DFSViewModel {
         userID: String,
         forceRegenerateBots: Bool = false
     ) async -> [DFSTournamentResultRecord]? {
+        PerfBreadcrumb.set("dfs.settlePast \(tournamentID)")
         // Prevent concurrent settlements of the same tournament
         guard !settlingInProgress.contains(tournamentID) else { return nil }
         settlingInProgress.insert(tournamentID)
@@ -10133,6 +10134,7 @@ final class DFSViewModel {
         token: String,
         userID: String
     ) async {
+        PerfBreadcrumb.set("dfs.settleGolf \(sport)")
         guard !settlingInProgress.contains(tournamentID) else { return }
         settlingInProgress.insert(tournamentID)
         defer { settlingInProgress.remove(tournamentID) }
@@ -10572,6 +10574,10 @@ final class DFSViewModel {
             let remaining = max(0, entryCount - totalGolfRealEntries - savedGolfBots.count)
             if remaining > 0 {
                 for i in 0..<remaining {
+                    // Golf self-heal settles several past contests in one
+                    // refresh; without yields, 2000 bots x N contests was an
+                    // 11-MINUTE main-thread block (watchdog: 656s hang).
+                    if i % 10 == 0 { await Task.yield() }
                     let golfDFSPlayersForBot: [DFSPlayer] = baseGolfPlayers.map { p in
                         // Outcome-BLIND projection: drive bot picks off the golfer's
                         // DRAFT-DAY salary (the market's pre-event expectation), NEVER
@@ -10609,6 +10615,7 @@ final class DFSViewModel {
             // Fallback: generate with scrambled projections (no saved bot field available)
             let golfBotsToGenerate = max(0, entryCount - totalGolfRealEntries)
             for i in 0..<golfBotsToGenerate {
+                if i % 10 == 0 { await Task.yield() }
                 let golfDFSPlayersForBot: [DFSPlayer] = baseGolfPlayers.map { p in
                     // Outcome-BLIND projection: salary-driven, never actualPoints.
                     // See the saved-bot-fill branch above for rationale.
@@ -10926,6 +10933,7 @@ final class DFSViewModel {
         accessToken: String,
         onMergedHistory: ((Data) -> Void)? = nil
     ) async {
+        PerfBreadcrumb.set("dfs.sharedHistorySync")
         // Heals are per-VM and gated by their own UserDefaults version
         // flag — they only do real work once per device. Run in parallel
         // before the shared fetch so any premature settlements are cleared
