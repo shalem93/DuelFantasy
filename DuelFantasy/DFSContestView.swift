@@ -2725,6 +2725,12 @@ struct DFSContestView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 12)
                     .padding(.bottom, 24)
+                    // Pin content width to the scroll viewport: any oversized
+                    // child (wide title, fixedSize text, nested horizontal
+                    // scroller) used to make the WHOLE vertical list pannable
+                    // sideways. With the width clamped, horizontal panning is
+                    // structurally impossible and wide texts truncate instead.
+                    .containerRelativeFrame(.horizontal)
                 }
             }
         }

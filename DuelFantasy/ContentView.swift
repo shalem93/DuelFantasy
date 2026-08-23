@@ -4136,7 +4136,11 @@ struct ContentView: View {
         // 1. Exclude it permanently. The read-time filter in `dfsHistory`
         //    keeps it gone even if the server re-imports or re-settles it —
         //    the root cause of "deleted results keep coming back".
+        //    markAdminDeleted keeps the un-exclude self-heal (which rescues
+        //    wrongly-ghosted contests) from resurrecting this deliberate
+        //    delete while the async server-row deletion is in flight.
         DFSViewModel.excludeTournament(tournamentID)
+        DFSViewModel.markAdminDeleted(tournamentID)
 
         // 2. Drop the rows from the persisted blob now so the UI updates
         //    immediately (changing the blob also triggers the observers).

@@ -1948,6 +1948,22 @@ final class DFSViewModel {
     /// Reverse a `excludeTournament` — used when a contest that was wrongly
     /// ghosted (e.g. the settled flag got clobbered mid-self-heal) turns out to
     /// have good server results after all.
+    /// Tids the ADMIN deliberately deleted (deletePastDFSContest /
+    /// adminRemoveStuckContest). Distinct from auto-ghosted exclusions: the
+    /// un-exclude self-heal may resurrect a wrongly-ghosted contest whose
+    /// server results exist, but must NEVER resurrect a deliberate delete —
+    /// the server-side row deletion is async, so a sync can catch the rows
+    /// mid-flight (the "+1000 delete came back" bug).
+    static var adminDeletedTournamentIDs: Set<String> {
+        let raw = UserDefaults.standard.array(forKey: "dfs_admin_deleted_tids") as? [String] ?? []
+        return Set(raw)
+    }
+    static func markAdminDeleted(_ tournamentID: String) {
+        var set = adminDeletedTournamentIDs
+        set.insert(tournamentID)
+        UserDefaults.standard.set(Array(set), forKey: "dfs_admin_deleted_tids")
+    }
+
     static func unexcludeTournament(_ tournamentID: String) {
         var set = excludedTournamentIDs
         guard set.contains(tournamentID) else { return }
@@ -1996,6 +2012,7 @@ final class DFSViewModel {
         userEntryRecords[tid] = nil
         markTournamentSettled(tid)
         Self.excludeTournament(tid)
+        Self.markAdminDeleted(tid)
         print("[DFS-\(sport)] Admin removed stuck contest \(tid) (excluded + settled + dropped)")
     }
 
@@ -11334,7 +11351,8 @@ final class DFSViewModel {
                 // this ingest. (An Aft NFL contest got ghost-excluded during
                 // its interrupted 2.5h settle and stayed invisible even after
                 // the server settled clean.)
-                if Self.excludedTournamentIDs.contains(tournamentID) {
+                if Self.excludedTournamentIDs.contains(tournamentID),
+                   !Self.adminDeletedTournamentIDs.contains(tournamentID) {
                     Self.unexcludeTournament(tournamentID)
                     print("[DFS-\(sport)] Un-excluded \(tournamentID) — server has settled user results")
                 }
