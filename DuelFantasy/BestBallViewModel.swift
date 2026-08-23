@@ -290,6 +290,9 @@ final class BestBallViewModel {
 
     func loadMyLeagues() async {
         guard let uid = userID, let token = accessToken else { return }
+        // Keep the EPL matchweek table warm — week windows and "Week N of
+        // 38" all read from it (24h-TTL no-op when fresh).
+        Task { await EPLMatchweekProvider.refreshIfStale() }
         do {
             let memberships = try await SupabaseService.shared.fetchUserMemberships(userID: uid, accessToken: token)
             myMemberships = memberships

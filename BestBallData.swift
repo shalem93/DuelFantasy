@@ -2846,6 +2846,64 @@ nonisolated struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvi
 
 // MARK: - Season Helpers
 
+
+/// Official EPL matchweek windows from the public FPL fixtures API —
+/// the authority on gameweek assignment (doubles/postponements included).
+/// Best Ball EPL scores by MATCHWEEK, not Mon-Sun calendar weeks: GW1 runs
+/// Fri Aug 21 - Mon Aug 24, so Chelsea's Monday match counts in Week 1
+/// (calendar weeks put it in "Week 2" and Palmer scored 0 for his owner).
+/// Cached in UserDefaults (24h TTL for reschedules); the season helper
+/// falls back to the legacy Mon-Sun math when no table is cached yet.
+nonisolated enum EPLMatchweekProvider {
+    private static var cacheKey: String {
+        let cal = Calendar(identifier: .gregorian)
+        let y = cal.component(.year, from: Date())
+        let startYear = cal.component(.month, from: Date()) >= 7 ? y : y - 1
+        return "epl_matchweeks_\(startYear)"
+    }
+
+    /// [week: (firstKickoff, lastKickoff)] from the cached table. Sync +
+    /// cheap (38 rows) so BestBallSeasonHelper can call it directly.
+    static func cachedTable() -> [Int: (start: Date, end: Date)]? {
+        guard let raw = UserDefaults.standard.array(forKey: cacheKey) as? [[Double]], !raw.isEmpty else { return nil }
+        var table: [Int: (start: Date, end: Date)] = [:]
+        for row in raw where row.count == 3 {
+            table[Int(row[0])] = (Date(timeIntervalSince1970: row[1]), Date(timeIntervalSince1970: row[2]))
+        }
+        return table.isEmpty ? nil : table
+    }
+
+    @concurrent static func refreshIfStale() async {
+        let stampKey = cacheKey + "_at"
+        let last = UserDefaults.standard.double(forKey: stampKey)
+        if last > 0, Date().timeIntervalSince1970 - last < 24 * 3600,
+           UserDefaults.standard.array(forKey: cacheKey) != nil { return }
+        guard let url = URL(string: "https://fantasy.premierleague.com/api/fixtures/") else { return }
+        var req = URLRequest(url: url)
+        req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+        guard let (data, response) = try? await URLSession.shared.data(for: req),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let fixtures = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+        let iso = ISO8601DateFormatter()
+        var minByWeek: [Int: Date] = [:]
+        var maxByWeek: [Int: Date] = [:]
+        for f in fixtures {
+            guard let week = f["event"] as? Int,
+                  let kickStr = f["kickoff_time"] as? String,
+                  let kick = iso.date(from: kickStr) else { continue }
+            minByWeek[week] = min(minByWeek[week] ?? kick, kick)
+            maxByWeek[week] = max(maxByWeek[week] ?? kick, kick)
+        }
+        guard minByWeek.count >= 30 else { return }  // sanity: a real season table
+        let rows: [[Double]] = minByWeek.keys.sorted().map { w in
+            [Double(w), minByWeek[w]!.timeIntervalSince1970, maxByWeek[w]!.timeIntervalSince1970]
+        }
+        UserDefaults.standard.set(rows, forKey: cacheKey)
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: stampKey)
+        print("[EPL-Matchweeks] Cached \(rows.count) gameweek windows from FPL")
+    }
+}
+
 enum BestBallSeasonHelper {
     static func totalWeeks(for sport: String) -> Int {
         switch sport {
@@ -2853,7 +2911,7 @@ enum BestBallSeasonHelper {
         case "MLB": return 26
         case "NFL": return 18
         case "CFB": return 15   // Week 1 (Labor Day weekend) → conference championships
-        case "EPL": return 41   // Aug 17 2026 → final day Sun May 30 2027, Mon–Sun weeks (international breaks score 0)
+        case "EPL": return 38   // official Premier League matchweeks (windows from EPLMatchweekProvider)
         default: return 20
         }
     }
@@ -2898,6 +2956,17 @@ enum BestBallSeasonHelper {
         let calendar = Calendar(identifier: .gregorian)
 
         let seasonStart = seasonStartDate(for: sport)
+
+        // EPL: official matchweek windows (GW1 = Fri Aug 21 - Mon Aug 24
+        // etc.), padded to whole days so late kickoffs and postponed
+        // rearrangements within the window still count. Falls back to the
+        // legacy Mon-Sun math when the FPL table hasn't been fetched yet.
+        if sport == "EPL", let table = EPLMatchweekProvider.cachedTable(), let window = table[week] {
+            let start = calendar.startOfDay(for: window.start)
+            let endDay = calendar.startOfDay(for: window.end)
+            let end = calendar.date(byAdding: DateComponents(day: 1, second: -1), to: endDay) ?? window.end
+            return (start, end)
+        }
 
         if sport == "MLB" {
             // MLB: Week 1 is a short opening week ending on Sunday.
@@ -3006,6 +3075,15 @@ enum BestBallSeasonHelper {
     static func currentWeekNumber(for sport: String) -> Int {
         let calendar = Calendar(identifier: .gregorian)
         let today = calendar.startOfDay(for: Date())
+
+        // EPL: the current MATCHWEEK — the last gameweek whose window has
+        // started (a Tue-Thu gap between rounds stays on the finished week
+        // until the next one kicks off, so late scoring settles cleanly).
+        if sport == "EPL", let table = EPLMatchweekProvider.cachedTable() {
+            let started = table.filter { calendar.startOfDay(for: $0.value.start) <= today }.keys
+            if let current = started.max() { return min(current, 38) }
+            return 1
+        }
 
         if sport == "MLB" {
             // Week 1 ends on the first Sunday after season start.
