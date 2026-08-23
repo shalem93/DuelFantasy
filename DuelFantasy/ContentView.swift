@@ -898,7 +898,10 @@ struct ContentView: View {
         // DFS settlement — slower loop (every 60s) for slate loading, tournament
         // settlement, history sync, and live refresh.
         .task(id: "dfs-settlement-timer") {
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            // 8s launch grace (was 2s): the settle sweep used to land right
+            // as the user starts scrolling Pick'em, and thirteen sports'
+            // settlement chunks saturated the main actor.
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
             while !Task.isCancelled {
                 // Settle past contests FIRST, before the slow/serial slate loads
                 // below. Those 9 loadSlateIfNeeded calls hit flaky external APIs
@@ -907,21 +910,20 @@ struct ContentView: View {
                 // finished golf contests — it only updated once the DFS tab ran
                 // its own settle pass. checkAndSettle needs no slate, so run it
                 // up front and include EVERY sport (wc/wnba/ncaam were missing).
-                // Run all sports' settlement CONCURRENTLY (My Contests already
-                // does this via parallel initSportPipeline, which is why its RR
-                // is right). Serial here meant the multi-lineup fix for a
-                // mid-list sport like WC rarely finished before the user looked,
-                // so the home DFS-RR pill under-counted (e.g. a 2nd WC lineup
-                // missing → 374 vs the correct 399). Each VM settles only its
-                // own sport's rows; dfsRRDelta reads each sport from its owner
-                // VM, so concurrency is safe for the total.
-                await withTaskGroup(of: Void.self) { group in
-                    for vm in [dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
-                               eplDFSViewModel, uclDFSViewModel, wcDFSViewModel, ufcDFSViewModel,
-                               nflDFSViewModel, cfbDFSViewModel, ncaamDFSViewModel, wnbaDFSViewModel,
-                               nascarDFSViewModel] {
-                        group.addTask { await vm.checkAndSettleUnsettledTournaments() }
-                    }
+                // SERIAL, not concurrent: 13 concurrent settle passes all run
+                // their CPU chunks on the SAME main actor, so "concurrency"
+                // just interleaved thirteen 2000-bot workloads into one
+                // continuous main-thread grind — the yields inside each pass
+                // handed the frame to ANOTHER settle instead of to SwiftUI
+                // (the unusable-at-launch scrolling). Serial with a small gap
+                // gives the UI real frames; total CPU is identical and the
+                // RR pill still snapshots after the full sweep either way.
+                for vm in [dfsViewModel, nhlDFSViewModel, mlbDFSViewModel, pgaDFSViewModel,
+                           eplDFSViewModel, uclDFSViewModel, wcDFSViewModel, ufcDFSViewModel,
+                           nflDFSViewModel, cfbDFSViewModel, ncaamDFSViewModel, wnbaDFSViewModel,
+                           nascarDFSViewModel] {
+                    await vm.checkAndSettleUnsettledTournaments()
+                    try? await Task.sleep(nanoseconds: 250_000_000)
                 }
                 await dfsViewModel.syncHistoryFromServer()
                 logRRBreakdown("HOME/launch-settle-done")

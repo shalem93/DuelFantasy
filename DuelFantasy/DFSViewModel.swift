@@ -9783,7 +9783,13 @@ final class DFSViewModel {
                 print("[DFS] Settlement: \(invalidCount) saved bots have wrong lineup size (\(botLineupSize) expected) — will regenerate")
             }
             print("[DFS] Using \(validSavedBots.count) of \(savedBots.count) saved bot lineups for \(tournamentID) (entryCount=\(entryCount), realEntries=\(totalRealEntries), wrongSize=\(invalidCount))")
+            var savedBotIndex = 0
             for bot in validSavedBots {
+                // Mapping 2000 saved bots (dict builds per bot) was a solid
+                // 3s main-actor block at settlement — yield like the
+                // generation loops so launch stays scrollable.
+                savedBotIndex += 1
+                if savedBotIndex % 25 == 0 { await Task.yield() }
                 // Upgrade DNP placeholders to players who appeared, in the same
                 // slot — all late-swap sports; no-op for single-game/UFC/PGA.
                 let lineupIDs = upgradeBotLineup(bot.name, bot.playerIDs)
