@@ -682,6 +682,11 @@ struct DFSTournamentRecord: Codable {
     /// split RB/WR/TE), so this snapshot is the authoritative source for
     /// position-constrained bot regeneration.
     let playerPositions: [String: String]?
+    /// Game scope for time-window slates (NFL Aft/Main-sans-SNF, CFB
+    /// Night). Persisted at submit so a reconstructed tournament regains
+    /// its window — without it the pool resolves to the wrong games and
+    /// post-lock bot padding finds an empty pool (2-entry "2000" field).
+    let windowGameIDs: [String]?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -694,9 +699,10 @@ struct DFSTournamentRecord: Codable {
         case botField = "bot_field"
         case isSingleGame = "is_single_game"
         case playerPositions = "player_positions"
+        case windowGameIDs = "window_game_ids"
     }
 
-    init(id: String, title: String, league: String, lockTime: Date, isSettled: Bool? = nil, totalEntries: Int? = nil, playerSalaries: [String: Int]? = nil, botField: [BotFieldEntry]? = nil, isSingleGame: Bool? = nil, playerPositions: [String: String]? = nil) {
+    init(id: String, title: String, league: String, lockTime: Date, isSettled: Bool? = nil, totalEntries: Int? = nil, playerSalaries: [String: Int]? = nil, botField: [BotFieldEntry]? = nil, isSingleGame: Bool? = nil, playerPositions: [String: String]? = nil, windowGameIDs: [String]? = nil) {
         self.id = id
         self.title = title
         self.league = league
@@ -707,6 +713,7 @@ struct DFSTournamentRecord: Codable {
         self.botField = botField
         self.isSingleGame = isSingleGame
         self.playerPositions = playerPositions
+        self.windowGameIDs = windowGameIDs
     }
 
     // Custom encode to skip nil fields — prevents upsert from overwriting existing values with null
@@ -722,6 +729,7 @@ struct DFSTournamentRecord: Codable {
         try container.encodeIfPresent(botField, forKey: .botField)
         try container.encodeIfPresent(isSingleGame, forKey: .isSingleGame)
         try container.encodeIfPresent(playerPositions, forKey: .playerPositions)
+        try container.encodeIfPresent(windowGameIDs, forKey: .windowGameIDs)
     }
 }
 

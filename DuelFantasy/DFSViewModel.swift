@@ -704,6 +704,23 @@ final class DFSViewModel {
             let idSet = Set(windowIDs)
             return players.filter { idSet.contains($0.gameID ?? "") }
         }
+        // Reconstructed -aft-/-night- slates that lost their explicit window:
+        // derive it from kickoff times so the pool isn't the (wrong) generic
+        // evening set.
+        if t.id.contains("-aft-") || t.id.contains("-night-") {
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
+            func hourET(_ d: Date) -> Double {
+                let c = cal.dateComponents([.hour, .minute], from: d)
+                return Double(c.hour ?? 0) + Double(c.minute ?? 0) / 60.0
+            }
+            let ids: Set<String> = t.id.contains("-aft-")
+                ? Set(slateGames.filter { hourET($0.startTime) >= 15.0 && hourET($0.startTime) < 18.5 }.map(\.id))
+                : Set(slateGames.filter { hourET($0.startTime) >= 19.0 }.map(\.id))
+            if !ids.isEmpty {
+                return players.filter { ids.contains($0.gameID ?? "") }
+            }
+        }
         if t.tournamentType.isEvening {
             return eveningPlayers
         }
@@ -4378,6 +4395,25 @@ final class DFSViewModel {
         return botEntries.count
     }
 
+
+    /// Restore a reconstructed window tournament's game scope from the
+    /// persisted record. windowGameIDs otherwise exist only in memory, so a
+    /// relaunch/reconstruction lost the window — the pool resolved to the
+    /// wrong games, post-lock bot padding found an empty pool, and an Aft
+    /// "2000" contest rendered with just the user's own entries.
+    private func adoptServerWindow(_ record: DFSTournamentRecord?, tournamentID: String) {
+        guard let windowIDs = record?.windowGameIDs, !windowIDs.isEmpty,
+              let idx = tournaments.firstIndex(where: { $0.id == tournamentID }),
+              tournaments[idx].windowGameIDs == nil else { return }
+        let t = tournaments[idx]
+        tournaments[idx] = DFSTournament(
+            id: t.id, title: t.title, league: t.league, entryCount: t.entryCount,
+            lineupSize: t.lineupSize, salaryCap: t.salaryCap, rosterSlots: t.rosterSlots,
+            isSingleGame: t.isSingleGame, tournamentType: t.tournamentType,
+            gameID: t.gameID, entryFee: t.entryFee, windowGameIDs: windowIDs
+        )
+    }
+
     func refreshLive() async {
         PerfBreadcrumb.set("dfs.refreshLive \(sport)")
         // A late-swap edit sheet is open: this refresh re-parses every box
@@ -4736,6 +4772,7 @@ final class DFSViewModel {
                 let serverTournament = try? await SupabaseService.shared.fetchTournament(
                     tournamentID: tournament.id, accessToken: token
                 )
+                adoptServerWindow(serverTournament, tournamentID: tournament.id)
                 if let sals = serverTournament?.playerSalaries, !sals.isEmpty {
                     tournamentPlayerSalaries[tournament.id] = sals
                 }
@@ -6207,6 +6244,7 @@ final class DFSViewModel {
 
             // Load saved bots from server
             let serverTournament = try? await SupabaseService.shared.fetchTournament(tournamentID: tid, accessToken: token)
+            adoptServerWindow(serverTournament, tournamentID: tid)
             let savedBots = serverTournament?.botField ?? []
             let realCount = field.filter({ $0.isCurrentUser || $0.isRealUser }).count
             let botsNeeded = max(0, tObj.entryCount - realCount)
@@ -6891,14 +6929,15 @@ final class DFSViewModel {
                     lockTime: lockTimeForTournament(tournament),
                     playerSalaries: canonicalToWrite,
                     isSingleGame: tournament.isSingleGame,
-                    playerPositions: positionsToWrite
+                    playerPositions: positionsToWrite,
+                    windowGameIDs: tournament.windowGameIDs
                 )
                 do {
                     try await SupabaseService.shared.upsertTournament(record: record, accessToken: token)
-                } catch where record.playerPositions != nil {
-                    // player_positions column may not exist yet (migration not
-                    // run) — never let the snapshot break submission; retry
-                    // without it.
+                } catch where record.playerPositions != nil || record.windowGameIDs != nil {
+                    // player_positions / window_game_ids columns may not exist
+                    // yet (migrations not run) — never let the snapshots break
+                    // submission; retry without them.
                     let fallback = DFSTournamentRecord(
                         id: record.id, title: record.title, league: record.league,
                         lockTime: record.lockTime, playerSalaries: record.playerSalaries,

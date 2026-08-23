@@ -1616,3 +1616,13 @@ select pg_notify('pgrst', 'reload schema');
 -- ============================================================
 alter table public.dfs_tournaments add column if not exists player_positions jsonb not null default '{}';
 select pg_notify('pgrst', 'reload schema');
+
+
+-- ============================================================
+-- DFS window-slate game scope (Aug 2026): persisted at submit so a
+-- reconstructed Aft/Night tournament regains its game window — without
+-- it the pool resolves to the wrong games and post-lock bot padding
+-- finds an empty pool (a "2000-entry" contest showing only the user).
+-- ============================================================
+alter table public.dfs_tournaments add column if not exists window_game_ids jsonb;
+select pg_notify('pgrst', 'reload schema');
