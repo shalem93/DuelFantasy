@@ -179,30 +179,39 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
             let comps = etCal.dateComponents([.hour, .minute], from: game.startTime)
             return Double(comps.hour ?? 0) + Double(comps.minute ?? 0) / 60.0
         }
-        var windowSlates: [DFSWindowSlate] = []
-        let afternoonGames = includedGames.filter { kickHourET($0) >= 15.0 }
-        if afternoonGames.count >= 2, afternoonGames.count < includedGames.count {
-            windowSlates.append(DFSWindowSlate(token: "aft", title: "Afternoon Only", gameIDs: afternoonGames.map(\.id)))
-        }
-        let nightGames = includedGames.filter { kickHourET($0) >= 19.0 }
-        if nightGames.count >= 2, nightGames.count < afternoonGames.count {
-            windowSlates.append(DFSWindowSlate(token: "night", title: "Night Only", gameIDs: nightGames.map(\.id)))
-        }
 
-        // Per-game DK price coverage: a game absent from DK's slates gets
-        // floor/estimated prices across the board (UNC@TCU showed a $4,000
-        // wall with a lone $6,300 QB) — DK isn't running that game, so we
-        // don't offer its showdown either. Matched players carry
-        // isConfirmedActive=true from the salary-application pass above.
-        var sgExcluded: Set<String> = []
+        // MIRROR DK'S SLATE: a game absent from DK's slates gets floor/
+        // estimated prices across the board (UNC@TCU: a $4,000 wall) — DK
+        // isn't offering that game, so we drop it from the WHOLE slate:
+        // no main-slate inclusion, no showdown, and the slate's lock time
+        // becomes the earliest DK-COVERED kickoff (matching DK's Main).
+        // Matched players carry isConfirmedActive=true from the salary pass.
+        var coveredGames: [DFSSlateGame] = []
         for game in includedGames {
             let gamePlayers = finalPlayers.filter { $0.gameID == game.id }
             guard !gamePlayers.isEmpty else { continue }
             let real = gamePlayers.filter { $0.isConfirmedActive }.count
-            if Double(real) / Double(gamePlayers.count) < 0.5 {
-                sgExcluded.insert(game.id)
-                print("[CFB-DFS] SG gate: \(game.awayTeam)@\(game.homeTeam) has only \(real)/\(gamePlayers.count) real DK prices — no showdown")
+            if Double(real) / Double(gamePlayers.count) >= 0.5 {
+                coveredGames.append(game)
+            } else {
+                print("[CFB-DFS] Slate gate: \(game.awayTeam)@\(game.homeTeam) has only \(real)/\(gamePlayers.count) real DK prices — dropped from slate")
             }
+        }
+        guard !coveredGames.isEmpty else {
+            throw NSError(domain: "CFBDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for today's CFB slate"])
+        }
+        let coveredIDs = Set(coveredGames.map(\.id))
+        let coveredPlayers = sortedPlayers.filter { coveredIDs.contains($0.gameID ?? "") }
+
+        // DK-style windows from the COVERED games only.
+        var windowSlates: [DFSWindowSlate] = []
+        let afternoonGames = coveredGames.filter { kickHourET($0) >= 15.0 }
+        if afternoonGames.count >= 2, afternoonGames.count < coveredGames.count {
+            windowSlates.append(DFSWindowSlate(token: "aft", title: "Afternoon Only", gameIDs: afternoonGames.map(\.id)))
+        }
+        let nightGames = coveredGames.filter { kickHourET($0) >= 19.0 }
+        if nightGames.count >= 2, nightGames.count < afternoonGames.count {
+            windowSlates.append(DFSWindowSlate(token: "night", title: "Night Only", gameIDs: nightGames.map(\.id)))
         }
 
         let (tournaments, sgPlayers) = buildMultiTournamentSlate(
@@ -212,17 +221,16 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
             mainLineupSize: 8,
             // DK college classic layout — SFLEX (superflex) takes QB too.
             mainRosterSlots: ["QB", "RB", "RB", "WR", "WR", "WR", "FLEX", "SFLEX"],
-            isSingleGameSlate: isSingleGame,
-            includedGames: includedGames,
-            mainPlayers: sortedPlayers,
-            sgExcludedGameIDs: sgExcluded,
+            isSingleGameSlate: coveredGames.count == 1,
+            includedGames: coveredGames,
+            mainPlayers: coveredPlayers,
             windowSlates: windowSlates
         )
 
         let slate = DFSSlate(
             tournaments: tournaments,
-            includedGames: includedGames,
-            players: sortedPlayers,
+            includedGames: coveredGames,
+            players: coveredPlayers,
             singleGamePlayers: sgPlayers
         )
         NCAAFBSlateCache.shared.set(slate)

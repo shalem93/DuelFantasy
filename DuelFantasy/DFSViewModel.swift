@@ -11327,6 +11327,17 @@ final class DFSViewModel {
                 }
                 // Mark as settled locally
                 markTournamentSettled(tournamentID)
+                // Self-heal a wrong exclusion: the server holds REAL settled
+                // results for this user, so the contest must be visible in
+                // Past Results. Safe against deliberate admin deletes — those
+                // remove the server result rows first, so they never reach
+                // this ingest. (An Aft NFL contest got ghost-excluded during
+                // its interrupted 2.5h settle and stayed invisible even after
+                // the server settled clean.)
+                if Self.excludedTournamentIDs.contains(tournamentID) {
+                    Self.unexcludeTournament(tournamentID)
+                    print("[DFS-\(sport)] Un-excluded \(tournamentID) — server has settled user results")
+                }
             }
 
             if !newEntries.isEmpty || didUpdate {
