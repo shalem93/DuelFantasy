@@ -1502,7 +1502,13 @@ struct GolfTiersGroupMemberRecord: Codable, Identifiable {
     }
 }
 
-final class SupabaseService {
+// nonisolated: the project defaults every unannotated type to @MainActor,
+// which put ALL REST response decoding — 2000-row tournament standings,
+// 2000-bot field blobs, entry lists — on the main thread. Standings and
+// Active Contests visibly froze while multi-MB JSON decoded on the UI.
+// The only mutable state is tokenRefreshProvider (set once at sign-in,
+// read on 401s) — a benign race under Swift 5 mode.
+nonisolated final class SupabaseService {
     static let shared = SupabaseService()
 
     private let session = URLSession.shared
@@ -5369,7 +5375,7 @@ final class SupabaseService {
 }
 
 private extension JSONEncoder {
-    static var supabaseEncoder: JSONEncoder {
+    nonisolated static var supabaseEncoder: JSONEncoder {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         return encoder
@@ -5377,7 +5383,7 @@ private extension JSONEncoder {
 }
 
 private extension JSONDecoder {
-    static var supabaseDecoder: JSONDecoder {
+    nonisolated static var supabaseDecoder: JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return decoder
