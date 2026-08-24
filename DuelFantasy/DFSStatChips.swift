@@ -77,7 +77,16 @@ enum DFSStatChipBuilder {
             chips.append(DFSStatChip(value: "\(stats.fta)", label: "REC YDS"))
             if stats.threePM > 0 { chips.append(DFSStatChip(value: "\(stats.threePM)", label: "REC TD")) }
         }
-        if stats.turnovers > 0 { chips.append(DFSStatChip(value: "\(stats.turnovers)", label: "TO")) }
+        if stats.turnovers > 0 {
+            // extraStats carries the INT/FUML split; older persisted stats
+            // only have the combined turnovers count — fall back to "TO".
+            let extras = stats.extraStats ?? [:]
+            let ints = extras["INT"] ?? 0
+            let fums = extras["FUML"] ?? 0
+            if ints > 0 { chips.append(DFSStatChip(value: "\(ints)", label: "INT")) }
+            if fums > 0 { chips.append(DFSStatChip(value: "\(fums)", label: "FUM LOST")) }
+            if ints + fums == 0 { chips.append(DFSStatChip(value: "\(stats.turnovers)", label: "TO")) }
+        }
         return chips
     }
 

@@ -967,6 +967,14 @@ nonisolated struct ESPNNCAAFBDFSLiveScoringProvider: DFSLiveScoringProvider, Sen
             // threePM/threePA -> receiving TDs / targets
             // ftm/fta -> field goals made/attempted
             let liveStats = DFSPlayerLiveStats(
+                extraStats: {
+                    // INT/FUML split so the UI can show "1 INT" instead of
+                    // the ambiguous combined "1 TO".
+                    var ex: [String: Int] = [:]
+                    if stats.interceptions > 0 { ex["INT"] = stats.interceptions }
+                    if stats.fumblesLost > 0 { ex["FUML"] = stats.fumblesLost }
+                    return ex.isEmpty ? nil : ex
+                }(),
                 name: stats.name,
                 points: stats.passYards,
                 rebounds: stats.rushYards,

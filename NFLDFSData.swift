@@ -1132,6 +1132,15 @@ nonisolated struct ESPNNFLDFSLiveScoringProvider: DFSLiveScoringProvider, Sendab
             let roundedPts = (pts * 10).rounded() / 10
 
             let liveStats = DFSPlayerLiveStats(
+                extraStats: {
+                    // INT/FUML split so the UI can show "1 INT" instead of
+                    // the ambiguous combined "1 TO" (turnovers field keeps
+                    // the sum for scoring/back-compat).
+                    var ex: [String: Int] = [:]
+                    if stats.ints > 0 { ex["INT"] = Int(stats.ints) }
+                    if stats.fumblesLost > 0 { ex["FUML"] = Int(stats.fumblesLost) }
+                    return ex.isEmpty ? nil : ex
+                }(),
                 name: stats.name,
                 points: Int(stats.passYards),           // passYards (scaled int)
                 rebounds: Int(stats.rushYards),          // rushYards
