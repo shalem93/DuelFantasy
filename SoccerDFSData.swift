@@ -1311,6 +1311,10 @@ nonisolated struct ESPNSoccerDFSLiveScoringProvider: DFSLiveScoringProvider, Sen
                         "TKL": tackles, "INT": interceptions,
                         "CRS": crosses, "SA": shotAssists, "PAS": accuratePasses,
                         "FC": foulsConceded,
+                        // Starting-XI marker so settled standings can show the
+                        // green confirmed check (the live pool's
+                        // isConfirmedActive isn't around post-settlement).
+                        "XI": isStarter ? 1 : 0,
                     ],
                     name: athleteName,
                     points: goals,

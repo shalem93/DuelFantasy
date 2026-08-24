@@ -1224,6 +1224,15 @@ struct DFSPastStandingsView: View {
                         .font(.caption.weight(.medium))
                         .lineLimit(1)
 
+                    // Starting-XI check, mirroring the live leaderboard —
+                    // carried through the score snapshot's extraStats since
+                    // the live pool's isConfirmedActive is gone post-settle.
+                    if stats?.extraStats?["XI"] == 1 {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.green)
+                    }
+
                     if let sal = salaryForPlayer(playerID, in: record) {
                         Text("$\(viewModel.formatSalary(sal))")
                             .font(.system(size: 8, weight: .medium))
