@@ -3246,6 +3246,14 @@ final class DFSViewModel {
             //   keeps the value-tier $3.5K-$5K rotation regulars (8+ FPPG).
             //   Classic 8.0 → same effect on the wider 9-player roster.
             projFloor = isSingleGame ? 7.0 : 8.0
+        } else if effectiveSport == "NFL" || effectiveSport == "CFB" {
+            // Salary IS the signal for football (showdown weighting is
+            // salary-based, preseason fades handle rest-risk). The generic
+            // 1.0 projection floor zeroed out rookies/bubble players —
+            // last-season stat projections are ~0 for them — and shrank a
+            // preseason SG pool to ~lineupSize veterans, making all 2000
+            // bots draft the IDENTICAL lineup (1 unique of 1999 saved).
+            projFloor = -1.0
         } else if effectiveSport == "NBA" || effectiveSport == "NCAAM" {
             // NBA rotation players score 15+ FPPG (and stars 30+). Deep-bench
             // players like Lindy Waters (~$4,700 UTIL) sit around 6-10 FPPG and
@@ -6312,13 +6320,22 @@ final class DFSViewModel {
                 }
                 return Set(players.map(\.id))
             }()
-            let savedBotsAreValid = !savedBots.isEmpty && savedBots.allSatisfy { bot in
-                guard bot.playerIDs.count == tObj.lineupSize else { return false }
-                if !preCacheSlateIDs.isEmpty {
-                    guard bot.playerIDs.allSatisfy({ preCacheSlateIDs.contains($0) }) else { return false }
+            let savedBotsAreValid: Bool = {
+                guard !savedBots.isEmpty else { return false }
+                let shapeOK = savedBots.allSatisfy { bot in
+                    guard bot.playerIDs.count == tObj.lineupSize else { return false }
+                    if !preCacheSlateIDs.isEmpty {
+                        guard bot.playerIDs.allSatisfy({ preCacheSlateIDs.contains($0) }) else { return false }
+                    }
+                    return true
                 }
-                return true
-            }
+                guard shapeOK else { return false }
+                // Degenerate-field check (mirrors the entries-load path):
+                // a collapsed pool once saved 1999 IDENTICAL lineups — a
+                // field with ≤ half unique lineups is not a real field.
+                let unique = Set(savedBots.map { $0.playerIDs.sorted().joined(separator: ",") })
+                return unique.count > savedBots.count / 2
+            }()
             if !savedBots.isEmpty && !savedBotsAreValid {
                 print("[DFS-\(sport)] Pre-cache: \(savedBots.count) saved bots for \(tid) are invalid (wrong size or foreign players) — regenerating from scratch")
             }

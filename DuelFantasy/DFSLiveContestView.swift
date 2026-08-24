@@ -551,17 +551,14 @@ struct DFSLiveContestView: View {
                                 } else if isNHL {
                                     nhlStatLine(stats: stats, position: player.position)
                                 } else if isSoccer {
-                                    Text("\(stats.points) G  \(stats.assists) A  \(stats.rebounds) SOT  \(stats.blocks) SV  \(stats.fgm) FD  \(stats.ftm) YC")
-                                        .font(.caption2.monospacedDigit())
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
+                                    DFSStatChipsRow(chips: DFSStatChipBuilder.soccer(stats))
                                 } else if isUFC {
                                     Text("\(stats.points) SIG  \(stats.rebounds) TD  \(stats.assists) KD  \(stats.steals) SUB  \(stats.turnovers) ABS")
                                         .font(.caption2.monospacedDigit())
                                         .foregroundStyle(.secondary)
                                         .lineLimit(1)
                                 } else if isFootball {
-                                    footballStatLine(stats: stats)
+                                    DFSStatChipsRow(chips: DFSStatChipBuilder.football(stats))
                                 } else {
                                     Text("\(stats.points) PTS  \(stats.rebounds) REB  \(stats.assists) AST  \(stats.blocks) BLK  \(stats.steals) STL  \(stats.turnovers) TO")
                                         .font(.caption2.monospacedDigit())
@@ -1143,63 +1140,6 @@ struct DFSLiveContestView: View {
         viewModel.sport == "NFL" || viewModel.sport == "CFB"
     }
 
-    /// Football stat line from the repurposed live-stat fields (see
-    /// ESPNNFLDFSLiveScoringProvider): points=passYds, rebounds=rushYds,
-    /// assists=REC, steals=passTD, blocks=rushTD, turnovers=INT+FumL,
-    /// fgm/fga=comp/att, threePM=recTD, fta=recYds. DST rows (named
-    /// "XXX Defense"): steals=sacks, blocks=INTs, turnovers=fumbles
-    /// recovered, fgm=defTDs, fta=points allowed.
-    private func footballStatLine(stats: DFSPlayerLiveStats) -> some View {
-        Text(footballStatText(stats: stats))
-            .font(.caption2.monospacedDigit())
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .minimumScaleFactor(0.7)
-    }
-
-    private func footballStatText(stats: DFSPlayerLiveStats) -> String {
-        if stats.name.hasSuffix("Defense") {
-            var parts = ["\(stats.steals) SCK", "\(stats.blocks) INT", "\(stats.turnovers) FR"]
-            if stats.fgm > 0 { parts.append("\(stats.fgm) TD") }
-            parts.append("\(stats.fta) PA")
-            return parts.joined(separator: "  ")
-        }
-        var parts: [String] = []
-        if stats.fga > 0 || stats.points != 0 {
-            parts.append("\(stats.fgm)/\(stats.fga) \(stats.points) PaYd")
-            if stats.steals > 0 { parts.append("\(stats.steals) PaTD") }
-        }
-        if stats.rebounds != 0 || stats.blocks > 0 {
-            parts.append("\(stats.rebounds) RuYd")
-            if stats.blocks > 0 { parts.append("\(stats.blocks) RuTD") }
-        }
-        if stats.assists > 0 || stats.fta != 0 || stats.threePM > 0 {
-            parts.append("\(stats.assists) REC \(stats.fta) ReYd")
-            if stats.threePM > 0 { parts.append("\(stats.threePM) ReTD") }
-        }
-        if stats.turnovers > 0 { parts.append("\(stats.turnovers) TO") }
-        return parts.isEmpty ? "No stats yet" : parts.joined(separator: "  ")
-    }
-
-    /// Ultra-compact football line for the 100pt leaderboard stat column.
-    private func footballCompactStats(stats: DFSPlayerLiveStats) -> String {
-        if stats.name.hasSuffix("Defense") {
-            return "\(stats.steals) SCK \(stats.blocks) INT \(stats.fta) PA"
-        }
-        if stats.fga > 0 || stats.points != 0 {
-            var line = "\(stats.points) PaYd"
-            if stats.steals > 0 { line += " \(stats.steals) TD" }
-            if stats.turnovers > 0 { line += " \(stats.turnovers) TO" }
-            return line
-        }
-        var parts: [String] = []
-        if stats.rebounds != 0 { parts.append("\(stats.rebounds) RuYd") }
-        if stats.assists > 0 || stats.fta != 0 { parts.append("\(stats.assists)-\(stats.fta) Rec") }
-        let tds = stats.blocks + stats.threePM
-        if tds > 0 { parts.append("\(tds) TD") }
-        return parts.isEmpty ? "—" : parts.joined(separator: " ")
-    }
-
     /// NASCAR stat line from the repurposed live-stat fields:
     /// points = position, rebounds = laps led, assists = laps completed,
     /// ftm = start position.
@@ -1209,28 +1149,6 @@ struct DFSLiveContestView: View {
             .font(.caption2.monospacedDigit())
             .foregroundStyle(.secondary)
             .lineLimit(1)
-    }
-
-    /// All nonzero soccer stats: "1 G · 2 SOT · 3 TKL · 35 PAS · 1 YC".
-    /// Field mapping: points=G, assists=A, rebounds=SOT, turnovers=SH,
-    /// blocks=SV, steals=TKL, fgm=FD, ftm=YC, fta=RC; the rest ride in
-    /// extraStats (INT/CRS/SA/PAS/FC).
-    private func soccerCompactStats(stats: DFSPlayerLiveStats) -> String {
-        var parts: [String] = []
-        if stats.points > 0 { parts.append("\(stats.points) G") }
-        if stats.assists > 0 { parts.append("\(stats.assists) A") }
-        if stats.rebounds > 0 { parts.append("\(stats.rebounds) SOT") }
-        if stats.turnovers > 0 { parts.append("\(stats.turnovers) SH") }
-        if stats.blocks > 0 { parts.append("\(stats.blocks) SV") }
-        if stats.steals > 0 { parts.append("\(stats.steals) TKL") }
-        let extras = stats.extraStats ?? [:]
-        for key in ["INT", "CRS", "SA", "PAS", "FC"] {
-            if let v = extras[key], v > 0 { parts.append("\(v) \(key)") }
-        }
-        if stats.fgm > 0 { parts.append("\(stats.fgm) FD") }
-        if stats.ftm > 0 { parts.append("\(stats.ftm) YC") }
-        if stats.fta > 0 { parts.append("\(stats.fta) RC") }
-        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
     }
 
     private func expandedBoxScore(fieldEntry: DFSFieldEntry) -> some View {
@@ -1250,11 +1168,14 @@ struct DFSLiveContestView: View {
                         .frame(width: 24, alignment: .trailing)
                     Text("TOT")
                         .frame(width: 28, alignment: .trailing)
-                } else if isMLB || isNHL || isFootball || isSoccer {
-                    // MLB/NHL/football/soccer use inline stat lines per
-                    // player, so we just show a single STATS + FPTS header
+                } else if isMLB || isNHL {
+                    // MLB/NHL use inline stat lines per player, so we just
+                    // show a single STATS + FPTS header
                     Text("STATS")
                         .frame(width: 100, alignment: .trailing)
+                } else if isFootball || isSoccer {
+                    // Football/soccer render a scrollable chip row under
+                    // each player — no stat column header needed
                 } else if isUFC {
                     Text("SIG")
                         .frame(width: 28, alignment: .trailing)
@@ -1458,22 +1379,8 @@ struct DFSLiveContestView: View {
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                                 .frame(width: 100, alignment: .trailing)
-                        } else if isFootball {
-                            // Football: dominant stat group (pass/rush/rec or DST)
-                            Text(footballCompactStats(stats: stats))
-                                .font(.system(size: 9).monospacedDigit())
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.7)
-                                .frame(width: 100, alignment: .trailing)
-                        } else if isSoccer {
-                            // Soccer: every nonzero DK-scored stat, compact
-                            Text(soccerCompactStats(stats: stats))
-                                .font(.system(size: 9).monospacedDigit())
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                                .minimumScaleFactor(0.7)
-                                .frame(width: 100, alignment: .trailing)
+                        } else if isFootball || isSoccer {
+                            // Chip row rendered below the name row instead
                         } else if isUFC {
                             // UFC: SIG, TD, KD, SUB, CTRL
                             Text("\(stats.points)")
@@ -1519,23 +1426,11 @@ struct DFSLiveContestView: View {
                         Text("-").frame(width: 24, alignment: .trailing)
                         Text("-").frame(width: 24, alignment: .trailing)
                         Text("-").frame(width: 28, alignment: .trailing)
-                    } else if isMLB || isNHL || isFootball {
+                    } else if isMLB || isNHL {
                         Text(gameStartedOrDone ? "—" : "")
                             .frame(width: 100, alignment: .trailing)
-                    } else if isSoccer {
-                        if gameStartedOrDone {
-                            Text("0").frame(width: 22, alignment: .trailing)
-                            Text("0").frame(width: 22, alignment: .trailing)
-                            Text("0").frame(width: 28, alignment: .trailing)
-                            Text("0").frame(width: 22, alignment: .trailing)
-                            Text("0").frame(width: 22, alignment: .trailing)
-                        } else {
-                            Text("-").frame(width: 22, alignment: .trailing)
-                            Text("-").frame(width: 22, alignment: .trailing)
-                            Text("-").frame(width: 28, alignment: .trailing)
-                            Text("-").frame(width: 22, alignment: .trailing)
-                            Text("-").frame(width: 22, alignment: .trailing)
-                        }
+                    } else if isFootball || isSoccer {
+                        // Chip row below handles the stats
                     } else if isUFC {
                         if gameStartedOrDone {
                             Text("0").frame(width: 28, alignment: .trailing)
@@ -1577,6 +1472,20 @@ struct DFSLiveContestView: View {
                 .font(.caption.monospacedDigit())
                 .padding(.horizontal, 12)
                 .padding(.vertical, 4)
+
+                // Football/soccer: full-width scrollable stat-chip row under
+                // the name — replaces the old cramped 100pt stat column.
+                if (isFootball || isSoccer) && !hideOpponentPick && gameStartedOrDone {
+                    DFSStatChipsRow(chips: {
+                        guard let stats = liveStats else { return [] }
+                        return isFootball
+                            ? DFSStatChipBuilder.football(stats)
+                            : DFSStatChipBuilder.soccer(stats)
+                    }())
+                    .padding(.horizontal, 12)
+                    .padding(.leading, 22)
+                    .padding(.bottom, 4)
+                }
             }
 
             // Totals row — only count actual live points, not projections

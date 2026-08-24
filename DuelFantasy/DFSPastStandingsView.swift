@@ -856,14 +856,17 @@ struct DFSPastStandingsView: View {
                                 .foregroundStyle(.orange)
                         }
                     }
-                    // Full stat line: only the components this player actually
-                    // produced, with the pass/rush/rec TD split (4 vs 6 pts).
-                    Text(footballStatLine(stats))
-                        .font(.system(size: 10).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                        .padding(.leading, 22)
+                    // Scrollable stat chips: only the components this player
+                    // actually produced, with the pass/rush/rec TD split.
+                    if let stats {
+                        DFSStatChipsRow(chips: DFSStatChipBuilder.football(stats), emptyText: "No stats")
+                            .padding(.leading, 22)
+                    } else {
+                        Text("Did not play")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 22)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -877,39 +880,6 @@ struct DFSPastStandingsView: View {
         }
 
         lineupTotalsRow(record: record)
-    }
-
-    /// Compact per-player football stat sentence from the repurposed
-    /// DFSPlayerLiveStats fields: points=PaYd, fgm/fga=Cmp/Att,
-    /// steals=PaTD, rebounds=RuYd, blocks=RuTD, assists=Rec,
-    /// fta=ReYd, threePM=ReTD, turnovers=INT+FumL.
-    private func footballStatLine(_ stats: DFSPlayerLiveStats?) -> String {
-        guard let stats else { return "Did not play" }
-        // DST rows (stat name "XXX Defense") repurpose the fields
-        // differently: steals=sacks, blocks=INTs, turnovers=fumbles
-        // recovered, fgm=def TDs, fta=points allowed — without this
-        // branch a defense rendered as "0 Rec · 14 ReYd".
-        if stats.name.hasSuffix("Defense") {
-            var parts = ["\(stats.steals) SCK", "\(stats.blocks) INT", "\(stats.turnovers) FR"]
-            if stats.fgm > 0 { parts.append("\(stats.fgm) TD") }
-            parts.append("\(stats.fta) PA")
-            return parts.joined(separator: " · ")
-        }
-        var parts: [String] = []
-        if stats.fga > 0 || stats.points != 0 {
-            parts.append("\(stats.fgm)/\(stats.fga) · \(stats.points) PaYd")
-            if stats.steals > 0 { parts.append("\(stats.steals) PaTD") }
-        }
-        if stats.rebounds != 0 || stats.blocks > 0 {
-            parts.append("\(stats.rebounds) RuYd")
-            if stats.blocks > 0 { parts.append("\(stats.blocks) RuTD") }
-        }
-        if stats.assists > 0 || stats.fta != 0 || stats.threePM > 0 {
-            parts.append("\(stats.assists) Rec · \(stats.fta) ReYd")
-            if stats.threePM > 0 { parts.append("\(stats.threePM) ReTD") }
-        }
-        if stats.turnovers > 0 { parts.append("\(stats.turnovers) TO") }
-        return parts.isEmpty ? "No stats" : parts.joined(separator: " · ")
     }
 
     // MARK: - Basketball Expanded Lineup
@@ -1212,20 +1182,10 @@ struct DFSPastStandingsView: View {
 
     @ViewBuilder
     private func soccerExpandedLineup(record: DFSTournamentResultRecord) -> some View {
-        // Box score header — soccer stats
+        // Box score header — soccer stats live in a chip row per player
         HStack(spacing: 0) {
             Text("PLAYER")
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Text("G")
-                .frame(width: 22, alignment: .trailing)
-            Text("A")
-                .frame(width: 22, alignment: .trailing)
-            Text("SOT")
-                .frame(width: 28, alignment: .trailing)
-            Text("SV")
-                .frame(width: 22, alignment: .trailing)
-            Text("FD")
-                .frame(width: 22, alignment: .trailing)
             Text("FPTS")
                 .frame(width: 38, alignment: .trailing)
         }
@@ -1278,26 +1238,6 @@ struct DFSPastStandingsView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                if let stats {
-                    // G, A, SOT, SV, FD (mapped from DFSPlayerLiveStats)
-                    Text("\(stats.points)")
-                        .frame(width: 22, alignment: .trailing)
-                    Text("\(stats.assists)")
-                        .frame(width: 22, alignment: .trailing)
-                    Text("\(stats.rebounds)")
-                        .frame(width: 28, alignment: .trailing)
-                    Text("\(stats.blocks)")
-                        .frame(width: 22, alignment: .trailing)
-                    Text("\(stats.fgm)")
-                        .frame(width: 22, alignment: .trailing)
-                } else {
-                    Text("-").frame(width: 22, alignment: .trailing)
-                    Text("-").frame(width: 22, alignment: .trailing)
-                    Text("-").frame(width: 28, alignment: .trailing)
-                    Text("-").frame(width: 22, alignment: .trailing)
-                    Text("-").frame(width: 22, alignment: .trailing)
-                }
-
                 Text(String(format: "%.1f", fpts))
                     .font(.caption.weight(.semibold).monospacedDigit())
                     .foregroundStyle(brandPurple)
@@ -1307,14 +1247,11 @@ struct DFSPastStandingsView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 4)
 
-            // Every remaining DK-scored category (shots, tackles, INT,
-            // crosses, shot assists, passes, fouls conceded, cards) as a
-            // compact sub-line — the columns above only fit the headliners.
-            if let stats, let extraLine = soccerExtraStatLine(stats), !extraLine.isEmpty {
-                Text(extraLine)
-                    .font(.system(size: 9).monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            // Every DK-scored category (goals, assists, SOT, shots, saves,
+            // tackles, INT, crosses, shot assists, passes, fouls, cards) as
+            // a scrollable chip row under the player.
+            if let stats {
+                DFSStatChipsRow(chips: DFSStatChipBuilder.soccer(stats), emptyText: "No stats")
                     .padding(.horizontal, 12)
                     .padding(.leading, 22)
                     .padding(.bottom, 3)
@@ -1322,21 +1259,6 @@ struct DFSPastStandingsView: View {
         }
 
         lineupTotalsRow(record: record)
-    }
-
-    /// "2 SH · 3 TKL · 1 INT · 35 PAS · 1 YC" — all nonzero soccer stats
-    /// that aren't columns in the expanded box.
-    private func soccerExtraStatLine(_ stats: DFSPlayerLiveStats) -> String? {
-        var parts: [String] = []
-        if stats.turnovers > 0 { parts.append("\(stats.turnovers) SH") }
-        if stats.steals > 0 { parts.append("\(stats.steals) TKL") }
-        let extras = stats.extraStats ?? [:]
-        for key in ["INT", "CRS", "SA", "PAS", "FC"] {
-            if let v = extras[key], v > 0 { parts.append("\(v) \(key)") }
-        }
-        if stats.ftm > 0 { parts.append("\(stats.ftm) YC") }
-        if stats.fta > 0 { parts.append("\(stats.fta) RC") }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     // MARK: - NHL Expanded Lineup
