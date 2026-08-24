@@ -4421,6 +4421,10 @@ final class DFSViewModel {
         }
         // 1. Clear the shared server field so other devices regenerate too.
         try? await SupabaseService.shared.saveBotField(tournamentID: tid, botField: [], accessToken: token)
+        // The clear is a silent try? — if it failed, the loader below would
+        // re-adopt the old server bots and re-save them (regen no-op). Force
+        // the next load pass to ignore whatever the server still holds.
+        forceIgnoreServerBotsTIDs.insert(tid)
         // 2. Drop local bots + the cached field so refreshLive can't restore the
         //    old lineups (keep the real user/opponent rows).
         fieldEntries = fieldEntries.filter { $0.isCurrentUser || $0.isRealUser }
@@ -4848,6 +4852,15 @@ final class DFSViewModel {
                     print("[DFS-\(sport)] Applied persisted captain flag (isSingleGame=\(persistedSG)) to \(tournament.id)")
                 }
                 botValidation: if let serverBots = serverTournament?.botField, !serverBots.isEmpty {
+                    // Admin regen in progress: the server field is stale by
+                    // definition (the clear may have silently failed) — skip
+                    // adoption entirely and fall through to fresh generation.
+                    if forceIgnoreServerBotsTIDs.contains(tournament.id) {
+                        forceIgnoreServerBotsTIDs.remove(tournament.id)
+                        print("[DFS-\(sport)] ADMIN regen: ignoring \(serverBots.count) stale server bots for \(tournament.id) — regenerating fresh")
+                        needsResave = true
+                        break botValidation
+                    }
                     // Defense against cross-contamination: when a user
                     // submits a main-slate lineup to a tournament whose
                     // ID was mis-routed (e.g. submitted to the eve-2000
@@ -4992,7 +5005,20 @@ final class DFSViewModel {
                             }
                             return Double(foreign) / Double(min(50, bots.count))
                         }()
-                        if !alreadyRegenerated && crossSportRate > 0.3 {
+                        // Degenerate-field detection (structural, same family as
+                        // cross-sport): a collapsed generation pool once saved
+                        // 1999 IDENTICAL lineups (old 1.0 projection floor +
+                        // preseason ~0 projections left 6 draftable players).
+                        // ≤ half unique is not a real field — 100% ownership on
+                        // every player, every entry tied — so regenerating it
+                        // post-lock is corruption repair, not a quality re-roll.
+                        let uniqueSavedLineups = Set(bots.map { $0.playerIDs.sorted().joined(separator: ",") })
+                        if !alreadyRegenerated && bots.count >= 2 && uniqueSavedLineups.count <= bots.count / 2 {
+                            print("[DFS] Tournament locked but saved bots are degenerate (\(uniqueSavedLineups.count)/\(bots.count) unique) — discarding collapsed bot field (one-shot)")
+                            savedBots = nil
+                            needsResave = true
+                            botFieldRegeneratedThisSession.insert(tournament.id)
+                        } else if !alreadyRegenerated && crossSportRate > 0.3 {
                             print("[DFS] Tournament locked but \(Int(crossSportRate * 100))% of saved bots reference foreign player IDs — discarding cross-sport-contaminated bot field")
                             savedBots = nil
                             needsResave = true
@@ -5549,7 +5575,15 @@ final class DFSViewModel {
                         playerSalaries: psals.isEmpty ? nil : psals
                     )
                 }
-                if !botEntriesToSave.isEmpty {
+                // Never persist a DEGENERATE field: if generation itself
+                // collapsed (≤ half unique lineups), saving would overwrite
+                // the server with garbage that every device then adopts.
+                // Keep it local-only and log the pool so the collapse is
+                // diagnosable from the console.
+                let uniqueGenerated = Set(botEntriesToSave.map { $0.playerIDs.sorted().joined(separator: ",") })
+                if botEntriesToSave.count > 2 && uniqueGenerated.count <= botEntriesToSave.count / 2 {
+                    print("[DFS-\(sport)] NOT saving bot field for \(tid) — generated field is degenerate (\(uniqueGenerated.count)/\(botEntriesToSave.count) unique; pool=\(activePlayers.count) players)")
+                } else if !botEntriesToSave.isEmpty {
                     Task {
                         try? await SupabaseService.shared.saveBotField(
                             tournamentID: tid, botField: botEntriesToSave, accessToken: token
@@ -7246,6 +7280,13 @@ final class DFSViewModel {
     /// propagated back yet) and rebuilds 2000 bots again — looping forever
     /// and stranding the UI on shimmer.
     private var botFieldRegeneratedThisSession: Set<String> = []
+
+    /// TIDs whose server bot field must be IGNORED on the next load pass.
+    /// Set by adminRegenerateBotField before its refreshLive: the server
+    /// clear is a silent `try?` PATCH, and when it fails the locked-field
+    /// loader re-adopts the old bots and re-saves them — turning the admin
+    /// regen button into a no-op. One-shot: consumed on first use.
+    private var forceIgnoreServerBotsTIDs: Set<String> = []
     /// Per-session latch: tids we've already force-re-settled via the PGA
     /// self-heal so we don't wipe + re-settle on every refresh cycle.
     private var pgaSelfHealedThisSession: Set<String> = []
