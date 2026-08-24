@@ -3633,6 +3633,16 @@ final class DFSViewModel {
                 }
             }
         }
+        // MLB showdown: both starting pitchers were landing at 100% ownership —
+        // the generic exclusion pass below exempts SP/RP entirely and pitcher
+        // projections dwarf batters', so every bot rostered both. Real DK
+        // showdown fields fade starters too: drop each pitcher from ~30% of
+        // bots so pitcher ownership tops out around 70%, not 100%.
+        if isSingleGame && effectiveSport == "MLB" && botPool.count > lineupSize + 2 {
+            for p in botPool where p.position == "SP" || p.position == "RP" {
+                if Double.random(in: 0...1) < 0.30 { sgExcludedIDs.insert(p.id) }
+            }
+        }
         if isSingleGame && botPool.count > lineupSize + 2 {
             // MLB single-game: exclude 2-4 starters for maximum diversity with ~18 batters.
             // NHL: stricter — only 60% of bots get an exclusion at all, and

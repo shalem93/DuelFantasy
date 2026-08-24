@@ -231,6 +231,7 @@ struct FantasyHubView: View {
         let hasActiveTennisBracket = tennisBracketViewModel.hasSubmitted && !tennisBracketViewModel.isSettled
         let hasActiveGolfTiers = golfTiersViewModel.hasSubmitted && !golfTiersViewModel.isSettled
         let hasActiveSoccerTiers = soccerTiersViewModel.hasSubmitted && !soccerTiersViewModel.isSettled
+            && !soccerTiersConcluded
 
         if hasActiveBestBall || hasActivePlayoffTiers || hasActiveTennisBracket || hasActiveGolfTiers || hasActiveSoccerTiers {
             VStack(alignment: .leading, spacing: 12) {
@@ -694,7 +695,17 @@ struct FantasyHubView: View {
     /// also kills the launch flash.
     private var showSoccerTiersGameTypeCard: Bool {
         guard let tournament = soccerTiersViewModel.tournament else { return false }
-        return tournament.status != "settled"
+        return tournament.status != "settled" && !soccerTiersConcluded
+    }
+
+    /// The server row for the 2026 Cup was never flipped to "settled" (stuck
+    /// on "live"), which kept the launcher card up with a LIVE badge a month
+    /// after the final. The Cup runs ~5.5 weeks from lock — 45 days past lock
+    /// it is over regardless of what the status column says.
+    private var soccerTiersConcluded: Bool {
+        guard let tournament = soccerTiersViewModel.tournament else { return false }
+        if soccerTiersViewModel.isSettled { return true }
+        return Date() > tournament.lockTime.addingTimeInterval(45 * 86400)
     }
 
     private var golfTiersCardStatus: GameStatus {

@@ -1858,20 +1858,23 @@ struct DFSPastStandingsView: View {
         let totalSalary = playerIDs.reduce(0) { sum, pid in
             sum + (salaryForPlayer(pid, in: record) ?? 0)
         }
-        // Show the REAL salary sum, not a `min(sum, cap)`. The cap was being
-        // used to hide over-cap bot lineups in the UI, which masked a real
-        // bug in the bot field (stale prices, cross-session showdown
-        // conversion drift). When a lineup actually exceeds the cap, color
-        // the total red so the bug is visible.
+        // BOTS: show the REAL salary sum, not `min(sum, cap)` — the clamp was
+        // hiding over-cap bot lineups (stale prices, showdown conversion
+        // drift); red makes the bug visible. USER entries: clamp to the cap
+        // like the collapsed header row does. A user build passed cap
+        // validation at submit, so a post-settlement price drift (NASCAR
+        // re-canonicalization moved a $50,000 build to "$50,300") is display
+        // noise, and header/expanded disagreeing looks broken.
         let capLimit = 50000
-        let isOverCap = totalSalary > capLimit
+        let displaySalary = record.isBot ? totalSalary : min(totalSalary, capLimit)
+        let isOverCap = displaySalary > capLimit
         Divider().padding(.horizontal, 12)
         HStack(spacing: 0) {
             Text("TOTAL")
                 .font(.caption2.weight(.bold))
                 .foregroundStyle(.secondary)
-            if totalSalary > 0 {
-                Text("$\(viewModel.formatSalary(totalSalary))")
+            if displaySalary > 0 {
+                Text("$\(viewModel.formatSalary(displaySalary))")
                     .font(.system(size: 8, weight: .bold))
                     .foregroundStyle(isOverCap ? .red : .secondary)
                     .padding(.leading, 4)
