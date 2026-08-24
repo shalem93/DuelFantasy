@@ -1342,7 +1342,9 @@ struct DFSPlayerDetailView: View {
         let rushYds = gameLogs.reduce(0.0) { $0 + Double($1.steals) } / count
         let recYds = gameLogs.reduce(0.0) { $0 + Double($1.fgm) } / count
         let recs = gameLogs.reduce(0.0) { $0 + Double($1.turnovers) } / count
-        let tds = gameLogs.reduce(0.0) { $0 + Double($1.rebounds + $1.blocks + $1.fga) } / count
+        let passTDs = gameLogs.reduce(0.0) { $0 + Double($1.rebounds) } / count
+        let rushTDs = gameLogs.reduce(0.0) { $0 + Double($1.blocks) } / count
+        let recTDs = gameLogs.reduce(0.0) { $0 + Double($1.fga) } / count
         let fpts = gameLogs.reduce(0.0) { $0 + $1.fantasyPoints } / count
         return VStack(alignment: .leading, spacing: 12) {
             Text("Last \(gameLogs.count) Games Avg")
@@ -1350,13 +1352,16 @@ struct DFSPlayerDetailView: View {
             HStack(spacing: 0) {
                 if isQB {
                     avgStat(label: "PaYD", value: String(format: "%.0f", passYds))
+                    avgStat(label: "PaTD", value: String(format: "%.1f", passTDs))
                     avgStat(label: "RuYD", value: String(format: "%.0f", rushYds))
+                    avgStat(label: "RuTD", value: String(format: "%.1f", rushTDs))
                 } else {
                     avgStat(label: "RuYD", value: String(format: "%.0f", rushYds))
+                    avgStat(label: "RuTD", value: String(format: "%.1f", rushTDs))
                     avgStat(label: "REC", value: String(format: "%.1f", recs))
                     avgStat(label: "ReYD", value: String(format: "%.0f", recYds))
+                    avgStat(label: "ReTD", value: String(format: "%.1f", recTDs))
                 }
-                avgStat(label: "TD", value: String(format: "%.1f", tds))
                 avgStat(label: "FPTS", value: String(format: "%.1f", fpts), highlight: true)
             }
         }
@@ -1390,15 +1395,17 @@ struct DFSPlayerDetailView: View {
                     Text("OPP").frame(width: 52, alignment: .leading)
                     Spacer()
                     if isQB {
-                        Text("PaYD").frame(width: 44, alignment: .trailing)
-                        Text("PaTD").frame(width: 38, alignment: .trailing)
-                        Text("INT").frame(width: 30, alignment: .trailing)
-                        Text("RuYD").frame(width: 40, alignment: .trailing)
+                        Text("PaYD").frame(width: 40, alignment: .trailing)
+                        Text("PaTD").frame(width: 34, alignment: .trailing)
+                        Text("INT").frame(width: 26, alignment: .trailing)
+                        Text("RuYD").frame(width: 36, alignment: .trailing)
+                        Text("RuTD").frame(width: 34, alignment: .trailing)
                     } else {
-                        Text("RuYD").frame(width: 40, alignment: .trailing)
-                        Text("REC").frame(width: 32, alignment: .trailing)
-                        Text("ReYD").frame(width: 40, alignment: .trailing)
-                        Text("TD").frame(width: 26, alignment: .trailing)
+                        Text("RuYD").frame(width: 36, alignment: .trailing)
+                        Text("RuTD").frame(width: 34, alignment: .trailing)
+                        Text("REC").frame(width: 28, alignment: .trailing)
+                        Text("ReYD").frame(width: 36, alignment: .trailing)
+                        Text("ReTD").frame(width: 34, alignment: .trailing)
                     }
                     Text("FPTS").frame(width: 44, alignment: .trailing)
                 }
@@ -1417,15 +1424,17 @@ struct DFSPlayerDetailView: View {
                             .frame(width: 52, alignment: .leading)
                         Spacer()
                         if isQB {
-                            Text("\(log.points)").frame(width: 44, alignment: .trailing)
-                            Text("\(log.rebounds)").frame(width: 38, alignment: .trailing)
-                            Text("\(log.assists)").frame(width: 30, alignment: .trailing)
-                            Text("\(log.steals)").frame(width: 40, alignment: .trailing)
+                            Text("\(log.points)").frame(width: 40, alignment: .trailing)
+                            Text("\(log.rebounds)").frame(width: 34, alignment: .trailing)
+                            Text("\(log.assists)").frame(width: 26, alignment: .trailing)
+                            Text("\(log.steals)").frame(width: 36, alignment: .trailing)
+                            Text("\(log.blocks)").frame(width: 34, alignment: .trailing)
                         } else {
-                            Text("\(log.steals)").frame(width: 40, alignment: .trailing)
-                            Text("\(log.turnovers)").frame(width: 32, alignment: .trailing)
-                            Text("\(log.fgm)").frame(width: 40, alignment: .trailing)
-                            Text("\(log.blocks + log.fga + log.rebounds)").frame(width: 26, alignment: .trailing)
+                            Text("\(log.steals)").frame(width: 36, alignment: .trailing)
+                            Text("\(log.blocks)").frame(width: 34, alignment: .trailing)
+                            Text("\(log.turnovers)").frame(width: 28, alignment: .trailing)
+                            Text("\(log.fgm)").frame(width: 36, alignment: .trailing)
+                            Text("\(log.fga)").frame(width: 34, alignment: .trailing)
                         }
                         Text(String(format: "%.1f", log.fantasyPoints))
                             .font(.caption.weight(.semibold).monospacedDigit())

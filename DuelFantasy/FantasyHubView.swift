@@ -705,7 +705,8 @@ struct FantasyHubView: View {
     private var soccerTiersConcluded: Bool {
         guard let tournament = soccerTiersViewModel.tournament else { return false }
         if soccerTiersViewModel.isSettled { return true }
-        return Date() > tournament.lockTime.addingTimeInterval(45 * 86400)
+        guard let lockTime = tournament.lockTime else { return false }
+        return Date() > lockTime.addingTimeInterval(45 * 86400)
     }
 
     private var golfTiersCardStatus: GameStatus {
