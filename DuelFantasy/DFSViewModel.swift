@@ -1223,8 +1223,36 @@ final class DFSViewModel {
                     // starter (Díaz/Suárez). Without this, the slot would get
                     // filled by an earlier-confirmed game and the late-game
                     // studs would never get exposure (the 0% bug).
-                    let affordable = (candidatesByPos[pos] ?? []).filter {
+                    var affordable = (candidatesByPos[pos] ?? []).filter {
                         $0.gameID == cur.gameID && !selected.contains($0.id) && $0.salary <= budgetLeft - reserve
+                    }
+                    // LAST CALL: the slot's game kicks off within 20 minutes
+                    // and it still holds a non-confirmed player. The same-game
+                    // reservation exists to spread exposure across the slate,
+                    // but entering kickoff with a bench player is strictly
+                    // worse than breaking it — bots must reach lock with
+                    // confirmed starters in every started slot. Relax in
+                    // steps: same game ignoring the reserve, then any
+                    // not-started game with the reserve, then without it.
+                    let kickoff = cur.gameID.flatMap { startByGame[$0] }
+                    let imminent = kickoff.map {
+                        Date(timeIntervalSince1970: $0).timeIntervalSinceNow < 20 * 60
+                    } ?? false
+                    if affordable.isEmpty && imminent {
+                        let samePos = candidatesByPos[pos] ?? []
+                        affordable = samePos.filter {
+                            $0.gameID == cur.gameID && !selected.contains($0.id) && $0.salary <= budgetLeft
+                        }
+                        if affordable.isEmpty {
+                            affordable = samePos.filter {
+                                !selected.contains($0.id) && $0.salary <= budgetLeft - reserve
+                            }
+                        }
+                        if affordable.isEmpty {
+                            affordable = samePos.filter {
+                                !selected.contains($0.id) && $0.salary <= budgetLeft
+                            }
+                        }
                     }
                     guard !affordable.isEmpty else { continue }
                     // Weighted pick within the game's confirmed starters, biased

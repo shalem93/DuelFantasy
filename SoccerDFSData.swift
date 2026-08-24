@@ -275,7 +275,10 @@ nonisolated struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
             let rgSays = rgStarterNames.contains(RotoGrindersSalaryProvider.normalizeName(p.name))
             let nearKickoff: Bool = {
                 guard let gid = p.gameID, let start = gameStarts[gid] else { return false }
-                return start.timeIntervalSinceNow < 100 * 60
+                // 75 min matches ESPN's gate and official team-sheet timing —
+                // real announcements land 30-75 min out; a flag seen earlier
+                // than that is still RG's projection.
+                return start.timeIntervalSinceNow < 75 * 60
             }()
             player.isConfirmedActive = espnSays || (rgSays && nearKickoff)
             let inPredictedXI = espnPredictedIDs.contains(p.id)
