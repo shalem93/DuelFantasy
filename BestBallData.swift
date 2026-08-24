@@ -259,7 +259,9 @@ nonisolated enum CFBByeWeekProvider {
     static func fetchByeWeeks() async -> [String: [Int]] {
         let season = seasonYear
         // v2: v1 tables were computed with the broken date parse and cached.
-        let cacheKey = "cfb_bye_weeks_v2_\(season)"
+        // v3: v2 tables used the old 15-week Mon-Sun windows; weeks are now
+        // 13 Yahoo-style Tue-Mon windows, so cached bye numbers shifted.
+        let cacheKey = "cfb_bye_weeks_v3_\(season)"
         if let data = UserDefaults.standard.data(forKey: cacheKey),
            let cached = try? JSONDecoder().decode([String: [Int]].self, from: data),
            !cached.isEmpty {
@@ -2910,7 +2912,7 @@ enum BestBallSeasonHelper {
         case "NBA": return 24
         case "MLB": return 26
         case "NFL": return 18
-        case "CFB": return 15   // Week 1 (Labor Day weekend) → conference championships
+        case "CFB": return 13   // Yahoo-style: Week 1 (Labor Day weekend) → rivalry week; Week 0 and conference championships excluded
         case "EPL": return 38   // official Premier League matchweeks (windows from EPLMatchweekProvider)
         default: return 20
         }
@@ -2966,6 +2968,19 @@ enum BestBallSeasonHelper {
             let endDay = calendar.startOfDay(for: window.end)
             let end = calendar.date(byAdding: DateComponents(day: 1, second: -1), to: endDay) ?? window.end
             return (start, end)
+        }
+
+        if sport == "CFB" {
+            // Yahoo-style CFB weeks: Tue→Mon windows. Week 0 (the Aug 29
+            // handful of games) falls BEFORE week 1's Tuesday and is
+            // non-scoring preseason — DFS still slates those games, but a
+            // season-long week where most rosters can't play is a bad
+            // fantasy week. Tue→Mon (not Mon→Sun) so the Labor-Day MONDAY
+            // opener counts in week 1; mid-season weeks land Thu-Sat so the
+            // shift changes nothing there.
+            let weekStart = calendar.date(byAdding: .day, value: (week - 1) * 7 + 1, to: seasonStart) ?? seasonStart
+            let weekEnd = calendar.date(byAdding: .day, value: 6, to: weekStart) ?? weekStart
+            return (weekStart, weekEnd)
         }
 
         if sport == "MLB" {

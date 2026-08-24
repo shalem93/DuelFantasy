@@ -1428,6 +1428,18 @@ func pickemFirstHalfScores(summary: [String: Any]) -> (away: Int, home: Int, awa
 /// statKey: "h"/"r"/"hrr" (MLB batting), "k" (MLB pitching),
 /// "pts"/"reb"/"ast"/"pra" (basketball). Returns nil when the athlete
 /// isn't in the box (DNP) — callers treat that as a void/PUSH.
+/// Whether a soccer summary's rosters are populated enough to grade props
+/// from — at least one roster entry carrying per-player stats. Right at
+/// full-time ESPN can briefly serve the summary without them.
+func pickemSoccerRostersReady(summary: [String: Any]) -> Bool {
+    guard let rosters = summary["rosters"] as? [[String: Any]], !rosters.isEmpty else { return false }
+    return rosters.contains { block in
+        ((block["roster"] as? [[String: Any]]) ?? []).contains { entry in
+            !(((entry["stats"] as? [[String: Any]]) ?? []).isEmpty)
+        }
+    }
+}
+
 func pickemPropStat(summary: [String: Any], athleteID: String, statKey: String) -> Double? {
     guard let box = summary["boxscore"] as? [String: Any],
           let teams = box["players"] as? [[String: Any]] else { return nil }
@@ -1774,6 +1786,17 @@ nonisolated struct ESPNMatchResultProvider: MatchResultProvider {
                                     let athleteID = parts[2]
                                     let statKey = parts[3]
                                     guard let value = pickemPropStat(summary: json, athleteID: athleteID, statKey: statKey) else {
+                                        // Soccer per-player stats ride in rosters[] —
+                                        // right at full-time ESPN can serve a summary
+                                        // whose rosters are missing or stat-less.
+                                        // Voiding then is WRONG and permanent (Palmer
+                                        // scored but his goalscorer pick graded +0
+                                        // PUSH). Leave ungraded; the next grading
+                                        // cycle retries with the filled summary.
+                                        let soccerKeys: Set<String> = ["g", "sh", "st", "sa", "gsv"]
+                                        if soccerKeys.contains(statKey), !pickemSoccerRostersReady(summary: json) {
+                                            continue
+                                        }
                                         results[mid] = "PUSH"   // DNP / not in box — void
                                         continue
                                     }

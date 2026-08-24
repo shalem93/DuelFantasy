@@ -292,7 +292,11 @@ final class BestBallViewModel {
         guard let uid = userID, let token = accessToken else { return }
         // Keep the EPL matchweek table warm — week windows and "Week N of
         // 38" all read from it (24h-TTL no-op when fresh).
-        Task { await EPLMatchweekProvider.refreshIfStale() }
+        // AWAITED, not fire-and-forget: every week computation below (matchup
+        // previews, current-week resolution) falls back to legacy Mon-Sun
+        // weeks when the FPL table isn't cached yet — which scored Chelsea's
+        // Monday Aug 24 (GW1) game into "week 2" (legacy week 2 = Aug 24-30).
+        await EPLMatchweekProvider.refreshIfStale()
         do {
             let memberships = try await SupabaseService.shared.fetchUserMemberships(userID: uid, accessToken: token)
             myMemberships = memberships
@@ -1004,6 +1008,7 @@ final class BestBallViewModel {
 
                 // Set selected week to current (capped to real calendar week to avoid showing future weeks)
                 if let league = currentLeague {
+                    if league.sport == "EPL" { await EPLMatchweekProvider.refreshIfStale() }
                     let realWeek = BestBallSeasonHelper.currentWeekNumber(for: league.sport)
                     selectedWeek = min(league.currentWeek, realWeek)
                     loadMatchupsForWeek(week: selectedWeek, league: league)
@@ -1483,6 +1488,9 @@ final class BestBallViewModel {
         guard let league = currentLeague, let state = draftState,
               let token = accessToken else { return }
 
+        // EPL weeks are official matchweeks — never score against the legacy
+        // Mon-Sun fallback (it mis-filed Monday games into the next week).
+        if league.sport == "EPL" { await EPLMatchweekProvider.refreshIfStale() }
         let realWeek = BestBallSeasonHelper.currentWeekNumber(for: league.sport)
         // Score the calendar week (not the stored week) to avoid scoring a future week
         let week = min(league.currentWeek, realWeek)
@@ -1687,6 +1695,7 @@ final class BestBallViewModel {
             return
         }
 
+        if league.sport == "EPL" { await EPLMatchweekProvider.refreshIfStale() }
         let realWeek = BestBallSeasonHelper.currentWeekNumber(for: league.sport)
         let targetWeek = min(realWeek, league.totalWeeks)
 
