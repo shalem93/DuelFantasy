@@ -258,14 +258,29 @@ nonisolated struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
         // bot ownership. ORing the two keeps real starters in the pool while
         // still excluding squad players who are neither projected nor recently
         // starting — i.e. the DNP risk we don't want in bot lineups.
+        // RG's starting_lineup flag is only a real announcement near kickoff —
+        // hours out it's RG's PROJECTED XI. Trusting it early marked projected
+        // starters "confirmed", opened the bot-generation deferral gate, and a
+        // Chelsea showdown field drafted benched players (Fernández/Estêvão/
+        // Welbeck ~30% owned, real XI contradicted RG's projection). ESPN's
+        // signal already has this gate (75 min, fetchStarterIDs); mirror it
+        // for RG and demote early RG starters to the projected tier instead.
+        let gameStarts: [String: Date] = Dictionary(
+            events.compactMap { e in parseESPNDate(e.date).map { (e.id, $0) } },
+            uniquingKeysWith: { a, _ in a }
+        )
         let markedPlayers: [DFSPlayer] = allPlayers.map { p in
             var player = p
             let espnSays = espnConfirmedIDs.contains(p.id)
             let rgSays = rgStarterNames.contains(RotoGrindersSalaryProvider.normalizeName(p.name))
-            player.isConfirmedActive = espnSays || rgSays
+            let nearKickoff: Bool = {
+                guard let gid = p.gameID, let start = gameStarts[gid] else { return false }
+                return start.timeIntervalSinceNow < 100 * 60
+            }()
+            player.isConfirmedActive = espnSays || (rgSays && nearKickoff)
             let inPredictedXI = espnPredictedIDs.contains(p.id)
             let recentStarter = recentlyActiveIDs.contains(p.id)
-            player.playedRecently = inPredictedXI || recentStarter
+            player.playedRecently = inPredictedXI || recentStarter || rgSays
             return player
         }
         let starterCount = markedPlayers.filter { $0.isConfirmedActive }.count

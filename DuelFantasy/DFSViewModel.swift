@@ -3084,6 +3084,25 @@ final class DFSViewModel {
     /// Once the tournament locks we generate regardless, with the best info
     /// available. Bots frozen with bench players (18%-owned Ochoa) are wrong
     /// for the whole contest.
+    /// Soccer showdown bench-stuffing detector: with the XI announced (both
+    /// teams ≈ 22 confirmed players), >40% of saved bots rostering someone
+    /// OUTSIDE the XI means the field was generated off projected/RG lineups
+    /// that the real announcement contradicts. Single-game only — main-slate
+    /// bots legitimately hold unconfirmed placeholders for later games.
+    private func soccerSGBenchStuffed(_ bots: [BotFieldEntry], gameID: String?) -> Bool {
+        // Scope to THIS game's players — other games' announced XIs must not
+        // satisfy the threshold while this game's XI is still projected.
+        let gamePool = gameID.map { gid in players.filter { $0.gameID == gid } } ?? players
+        let confirmedIDs = Set(gamePool.filter { $0.isConfirmedActive }.map(\.id))
+        guard confirmedIDs.count >= 18 else { return false }   // XI not fully out
+        let sample = bots.prefix(50)
+        guard !sample.isEmpty else { return false }
+        let stuffed = sample.filter { bot in
+            bot.playerIDs.contains { !confirmedIDs.contains($0) }
+        }.count
+        return Double(stuffed) / Double(sample.count) > 0.40
+    }
+
     func shouldDeferBotGeneration(for t: DFSTournament) -> Bool {
         guard Date() < lockTimeForTournament(t) else { return false }
 
@@ -5030,6 +5049,21 @@ final class DFSViewModel {
                             botFieldRegeneratedThisSession.insert(tournament.id)
                         } else if !alreadyRegenerated && crossSportRate > 0.3 {
                             print("[DFS] Tournament locked but \(Int(crossSportRate * 100))% of saved bots reference foreign player IDs — discarding cross-sport-contaminated bot field")
+                            savedBots = nil
+                            needsResave = true
+                            botFieldRegeneratedThisSession.insert(tournament.id)
+                        } else if !alreadyRegenerated,
+                                  tournament.isSingleGame,
+                                  sport == "EPL" || sport == "UCL" || sport == "WC",
+                                  Date() < lockTimeForTournament(tournament).addingTimeInterval(60 * 60),
+                                  soccerSGBenchStuffed(bots, gameID: tournament.gameID) {
+                            // Soccer showdown, bench-stuffed (LOCKED variant of
+                            // the pre-lock stale-XI heal): the field was built
+                            // off projected/RG lineups that the announced XI
+                            // contradicts — a generation malfunction (SG bots
+                            // must only roster confirmed starters). Within an
+                            // hour of kickoff, rebuild from the real XI.
+                            print("[DFS-\(sport)] SG locked but bots roster non-XI players — regenerating from announced XI (one-shot)")
                             savedBots = nil
                             needsResave = true
                             botFieldRegeneratedThisSession.insert(tournament.id)
