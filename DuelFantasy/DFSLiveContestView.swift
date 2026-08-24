@@ -540,6 +540,22 @@ struct DFSLiveContestView: View {
                                         .background(brandPurple.opacity(0.6))
                                         .clipShape(Capsule())
                                 }
+                                // Game status inline next to the % pill —
+                                // keeps the row compact instead of a stacked
+                                // status line under the stats.
+                                if let stats = liveStats {
+                                    if isPGA {
+                                        Text("Round \(viewModel.currentRound) • Active")
+                                            .font(.system(size: 9, weight: .medium))
+                                            .foregroundStyle(stats.gameFinal ? .green : .red)
+                                            .lineLimit(1)
+                                    } else {
+                                        Text(stats.gameStatus)
+                                            .font(.system(size: 9, weight: .medium))
+                                            .foregroundStyle(stats.gameFinal ? .green : .red)
+                                            .lineLimit(1)
+                                    }
+                                }
                             }
                             if let stats = liveStats {
                                 if isPGA {
@@ -563,18 +579,6 @@ struct DFSLiveContestView: View {
                                     Text("\(stats.points) PTS  \(stats.rebounds) REB  \(stats.assists) AST  \(stats.blocks) BLK  \(stats.steals) STL  \(stats.turnovers) TO")
                                         .font(.caption2.monospacedDigit())
                                         .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                }
-                                if isPGA {
-                                    // Show round status instead of generic game status
-                                    Text("Round \(viewModel.currentRound) • Active")
-                                        .font(.system(size: 9, weight: .medium))
-                                        .foregroundStyle(stats.gameFinal ? .green : .red)
-                                        .lineLimit(1)
-                                } else {
-                                    Text(stats.gameStatus)
-                                        .font(.system(size: 9, weight: .medium))
-                                        .foregroundStyle(stats.gameFinal ? .green : .red)
                                         .lineLimit(1)
                                 }
                             } else if gameState == "post" {
@@ -1303,9 +1307,47 @@ struct DFSLiveContestView: View {
                                     .background(brandPurple.opacity(0.6))
                                     .clipShape(Capsule())
                             }
+
+                            // Game status inline next to the % pill — a
+                            // separate status line under the name made every
+                            // row a tall, gappy VStack.
+                            if hideOpponentPick {
+                                // handled by the lock note below
+                            } else if isPGA, let stats = liveStats {
+                                // Golf: show MC/WD status or round status
+                                if stats.gameStatus == "MC" || stats.gameStatus == "WD" || stats.gameStatus == "CUT" {
+                                    Text(stats.gameStatus)
+                                        .font(.system(size: 8, weight: .bold))
+                                        .foregroundStyle(.orange)
+                                } else if stats.gameFinal {
+                                    Text("Final")
+                                        .font(.system(size: 8, weight: .medium))
+                                        .foregroundStyle(.green)
+                                } else {
+                                    Text("R\(viewModel.currentRound)")
+                                        .font(.system(size: 8, weight: .medium))
+                                        .foregroundStyle(.red)
+                                }
+                            } else if let stats = liveStats {
+                                Text(stats.gameStatus)
+                                    .font(.system(size: 8, weight: .medium))
+                                    .foregroundStyle(stats.gameFinal ? .green : .red)
+                                    .lineLimit(1)
+                            } else if playerGameState == "post" {
+                                Text("Final")
+                                    .font(.system(size: 8, weight: .medium))
+                                    .foregroundStyle(.green)
+                            } else if playerGameState == "in" {
+                                Text("Live")
+                                    .font(.system(size: 8, weight: .medium))
+                                    .foregroundStyle(.red)
+                            } else {
+                                Text("proj")
+                                    .font(.system(size: 8))
+                                    .foregroundStyle(.tertiary)
+                            }
                         }
 
-                        // Game status line
                         if hideOpponentPick {
                             HStack(spacing: 2) {
                                 Image(systemName: "lock.fill")
@@ -1314,37 +1356,6 @@ struct DFSLiveContestView: View {
                                     .font(.system(size: 8))
                             }
                             .foregroundStyle(.tertiary)
-                        } else if isPGA, let stats = liveStats {
-                            // Golf: show MC/WD status or round status
-                            if stats.gameStatus == "MC" || stats.gameStatus == "WD" || stats.gameStatus == "CUT" {
-                                Text(stats.gameStatus)
-                                    .font(.system(size: 8, weight: .bold))
-                                    .foregroundStyle(.orange)
-                            } else if stats.gameFinal {
-                                Text("Final")
-                                    .font(.system(size: 8, weight: .medium))
-                                    .foregroundStyle(.green)
-                            } else {
-                                Text("R\(viewModel.currentRound)")
-                                    .font(.system(size: 8, weight: .medium))
-                                    .foregroundStyle(.red)
-                            }
-                        } else if let stats = liveStats {
-                            Text(stats.gameStatus)
-                                .font(.system(size: 8, weight: .medium))
-                                .foregroundStyle(stats.gameFinal ? .green : .red)
-                        } else if playerGameState == "post" {
-                            Text("Final")
-                                .font(.system(size: 8, weight: .medium))
-                                .foregroundStyle(.green)
-                        } else if playerGameState == "in" {
-                            Text("Live")
-                                .font(.system(size: 8, weight: .medium))
-                                .foregroundStyle(.red)
-                        } else {
-                            Text("proj")
-                                .font(.system(size: 8))
-                                .foregroundStyle(.tertiary)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
