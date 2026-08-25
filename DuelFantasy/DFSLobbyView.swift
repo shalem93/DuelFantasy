@@ -252,12 +252,15 @@ struct DFSLobbyView: View {
 
     private var mainSlateSection: some View {
         let mainTournaments = viewModel.availableTournaments.filter { $0.tournamentType == .main }
-        // Lock time = first game start; show it like the Evening Slate card
-        // does so users know exactly when entries close.
+        // Lock time comes from the tournament's OWN lock (which honors its
+        // window scope), not the earliest game on the slate — a slate can
+        // carry games Main doesn't cover (a showdown-only CFB game kicking
+        // at noon made an 3pm-locking Main slate read "Locks 12:00 PM").
         let mainSubtitle: String? = {
-            guard let firstStart = viewModel.slateGames.map(\.startTime).min(),
-                  firstStart > Date() else { return nil }
-            return "Locks \(firstStart.formatted(date: .omitted, time: .shortened))"
+            guard let main = mainTournaments.first else { return nil }
+            let lock = viewModel.lockTimeForTournament(main)
+            guard lock > Date(), lock != .distantFuture else { return nil }
+            return "Locks \(lock.formatted(date: .omitted, time: .shortened))"
         }()
         return Group {
             if !mainTournaments.isEmpty {
