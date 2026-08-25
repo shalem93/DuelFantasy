@@ -2934,6 +2934,19 @@ nonisolated final class SupabaseService {
         return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
     }
 
+    /// Delete every stored score for one league week. Used to purge rows
+    /// written against a wrong week window (EPL's legacy Mon-Sun math filed
+    /// a Monday matchweek-1 game under week 2).
+    func deleteWeeklyScores(leagueID: String, week: Int, accessToken: String) async throws {
+        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/bestball_weekly_scores"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "league_id", value: "eq.\(leagueID)"),
+            URLQueryItem(name: "week", value: "eq.\(week)")
+        ]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        try await requestNoResponse(url: url, method: "DELETE", body: Optional<String>.none, bearerToken: accessToken)
+    }
+
     func upsertWeeklyScore(
         leagueID: String, memberID: String, week: Int,
         totalPoints: Double, scoringPlayerIDs: [String], playerPoints: [String: Double],

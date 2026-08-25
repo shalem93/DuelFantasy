@@ -1003,6 +1003,7 @@ final class BestBallViewModel {
 
                 let scoreRecords = try await SupabaseService.shared.fetchWeeklyScores(leagueID: leagueID, accessToken: token)
                 weeklyScores = scoreRecords.map { $0.toModel() }
+                await purgeFutureWeekScores(leagueID: leagueID, token: token)
                 let standingRecords = try await SupabaseService.shared.fetchStandings(leagueID: leagueID, accessToken: token)
                 standings = standingRecords.map { $0.toModel() }
 
@@ -1849,6 +1850,55 @@ final class BestBallViewModel {
     }
 
     // MARK: - Daily Scores
+
+    /// Delete stored scores for any week whose window hasn't STARTED yet.
+    /// Such a row is impossible by definition and only exists because it was
+    /// computed against different week boundaries — EPL's legacy Mon-Sun math
+    /// filed Chelsea's Monday matchweek-1 game under week 2, leaving Palmer's
+    /// GW1 line (and a phantom matchup WIN) sitting in an unplayed week.
+    /// Re-scoring then rewrites the correct week on the next pass.
+    private func purgeFutureWeekScores(leagueID: String, token: String) async {
+        guard let league = currentLeague, !weeklyScores.isEmpty else { return }
+        if league.sport == "EPL" { await EPLMatchweekProvider.refreshIfStale() }
+        let now = Date()
+        let futureWeeks = Set(weeklyScores.map(\.week)).filter { week in
+            guard week >= 1, week <= league.totalWeeks else { return false }
+            let (start, _) = BestBallSeasonHelper.weekDateRange(sport: league.sport, week: week)
+            return start > now
+        }
+        guard !futureWeeks.isEmpty else { return }
+        for week in futureWeeks.sorted() {
+            print("[BestBall] Purging stored scores for \(league.sport) week \(week) — that week hasn't started yet")
+            try? await SupabaseService.shared.deleteWeeklyScores(leagueID: leagueID, week: week, accessToken: token)
+        }
+        weeklyScores.removeAll { futureWeeks.contains($0.week) }
+
+        // Standings were computed WITH those points (and their phantom
+        // matchup W/L) — rebuild from what's left.
+        if !currentMembers.isEmpty {
+            let rebuilt = BestBallScoringEngine.computeStandings(
+                weeklyScores: weeklyScores, members: currentMembers, scoringMode: league.scoringMode
+            )
+            let rows = rebuilt.map { s in
+                (leagueID: leagueID, memberID: s.memberID, totalPoints: s.totalPoints,
+                 weeksScored: s.weeksScored, rank: s.rank, wins: s.wins, losses: s.losses)
+            }
+            try? await SupabaseService.shared.batchUpsertStandings(standings: rows, accessToken: token)
+            standings = rebuilt
+        }
+
+        // The league's stored currentWeek advanced off those bogus scores;
+        // pull it back so scoring resumes at the real matchweek.
+        let realWeek = BestBallSeasonHelper.currentWeekNumber(for: league.sport)
+        if league.currentWeek > realWeek {
+            try? await SupabaseService.shared.updateLeagueWeek(
+                leagueID: leagueID, week: realWeek, accessToken: token
+            )
+            if let record = try? await SupabaseService.shared.fetchLeague(id: leagueID, accessToken: token) {
+                currentLeague = record.toModel()
+            }
+        }
+    }
 
     /// Team → that day's opponent for the roster view's selected date, so
     /// each row can show "@MNC" / "vs ARS" and a plays-today marker.
