@@ -2997,13 +2997,21 @@ enum BestBallSeasonHelper {
             return (weekStart, weekEnd)
         }
 
-        let weekStart = calendar.date(byAdding: .day, value: (week - 1) * 7, to: seasonStart) ?? seasonStart
-        let weekEnd: Date
         if sport == "NFL" {
-            weekEnd = calendar.date(byAdding: .day, value: 4, to: weekStart) ?? weekStart  // Thu→Mon
-        } else {
-            weekEnd = calendar.date(byAdding: .day, value: 6, to: weekStart) ?? weekStart  // Mon→Sun
+            // WED→MON, not Thu→Mon. The season anchor is the Thursday opener,
+            // but the NFL also schedules WEDNESDAY games (2026 opens NE@SEA on
+            // Wed Sep 9) and those fell outside week 1 entirely — no opponent
+            // shown and, worse, no scoring. Shifting the window one day back
+            // still can't overlap the next week, whose Wednesday is six days
+            // after this week's Monday finale.
+            let thursday = calendar.date(byAdding: .day, value: (week - 1) * 7, to: seasonStart) ?? seasonStart
+            let weekStart = calendar.date(byAdding: .day, value: -1, to: thursday) ?? thursday
+            let weekEnd = calendar.date(byAdding: .day, value: 5, to: weekStart) ?? weekStart
+            return (weekStart, weekEnd)
         }
+
+        let weekStart = calendar.date(byAdding: .day, value: (week - 1) * 7, to: seasonStart) ?? seasonStart
+        let weekEnd = calendar.date(byAdding: .day, value: 6, to: weekStart) ?? weekStart  // Mon→Sun
         return (weekStart, weekEnd)
     }
 
