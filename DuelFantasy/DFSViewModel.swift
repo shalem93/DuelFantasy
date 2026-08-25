@@ -4062,11 +4062,14 @@ final class DFSViewModel {
                             if salaryRatio >= 0.8 && salaryRatio <= 1.3 {
                                 w *= 2.0
                             } else if salaryRatio < 0.5 {
-                                // MLB showdown NEEDS cheap bats — an MVP at 1.5x
-                                // (Martinez $17.7K → $26.6K) leaves ~$23K for five
-                                // slots, so min-priced starters are mandatory, not
-                                // punts. The generic 0.3 fought the cap math and
-                                // buried them at 0% ownership.
+                                // MLB showdown needs cheap bats. `targetSalary`
+                                // is budgetLeft/slotsLeft, so after an MVP at
+                                // 1.5x ($11.8K base = $17.7K charged) and a
+                                // second pitcher, the five remaining slots
+                                // target ~$6.4K — which puts a $3.1K starter at
+                                // ratio ~0.48, just over the cliff. The generic
+                                // 0.3 then buried mandatory min-priced starters
+                                // at 0% ownership.
                                 w *= (effectiveSport == "MLB" ? 0.8 : 0.3)
                             }
                         } else if effectiveSport == "NHL" || effectiveSport == "NBA" || effectiveSport == "NCAAM" {
