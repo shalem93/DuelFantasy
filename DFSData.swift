@@ -2049,6 +2049,8 @@ actor RotoGrindersSalaryProvider {
         let name: String?
         let type: String?
         let date: String?
+        /// Slate lock time as "2026-08-29T15:00:00" (ET, no zone suffix).
+        let start: String?
         let salaryCap: Int?
         let slate_path: String?
         let games: [RGSlateGame]?
@@ -2319,6 +2321,88 @@ actor RotoGrindersSalaryProvider {
             print("[LineupHQ-Slate] Classic-from-master \(sport.uppercased()): \(byName.count) salaries from \(classicSlates.count) slates (range $\(byName.values.min() ?? 0)-$\(byName.values.max() ?? 0))")
         }
         return byName
+    }
+
+    /// One DK CLASSIC slate: which games it covers, when it locks, and its
+    /// own salaries. This is DK's authoritative definition of a "slate" —
+    /// far better than deriving windows from kickoff-hour heuristics, and
+    /// the only way to know a game DK simply doesn't offer in classic (Week
+    /// 0's noon UNC@TCU exists ONLY as a showdown, yet the aggregate
+    /// players.json — which merges every slate that day — made it look
+    /// main-slate priced and dragged the Main lock back to noon).
+    struct DKClassicSlate: Sendable {
+        let id: String
+        let name: String
+        /// Slate start (ET). Nil when RG omits/garbles it.
+        let start: Date?
+        /// Team-hashtag pairs with kickoff (UTC), DK's codes ("SJSU"/"USC").
+        /// DK's codes DIVERGE from ESPN's for many schools (NCST vs NCSU,
+        /// JACST vs JVST, SSU vs SAC), so callers should corroborate a
+        /// one-sided code match with the kickoff time — which DK publishes
+        /// in UTC, identical to ESPN's.
+        let games: [(away: String, home: String, start: Date?)]
+        /// Normalized name → this slate's salary.
+        let salaries: [String: Int]
+    }
+
+    /// Every DK classic slate for a sport+date, each with its game list and
+    /// own salaries. Sorted most-games-first (the primary/Main slate leads).
+    func fetchClassicSlates(sport: String, date: Date = Date()) async -> [DKClassicSlate] {
+        let master = await fetchSlateMaster(sport: sport, date: date)
+        guard !master.isEmpty else { return [] }
+
+        let startFmt = DateFormatter()
+        startFmt.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        startFmt.timeZone = TimeZone(identifier: "America/New_York")
+        startFmt.locale = Locale(identifier: "en_US_POSIX")
+
+        let entries = master.filter { $0.value.type == "classic" && $0.value.slate_path != nil }
+        guard !entries.isEmpty else { return [] }
+
+        let slates = await withTaskGroup(of: DKClassicSlate?.self, returning: [DKClassicSlate].self) { group in
+            for (slateID, entry) in entries {
+                guard let path = entry.slate_path else { continue }
+                group.addTask {
+                    let records = await self.fetchSlateDetail(slatePath: path)
+                    var byName: [String: Int] = [:]
+                    for record in records {
+                        guard let first = record.player?.first_name,
+                              let last = record.player?.last_name,
+                              let salary = record.schedule?.salaries?.first?.salary, salary > 0 else { continue }
+                        let key = Self.normalizeName("\(first) \(last)".trimmingCharacters(in: .whitespaces))
+                        if let existing = byName[key], existing >= salary { continue }
+                        byName[key] = salary
+                    }
+                    let gameFmt = DateFormatter()
+                    gameFmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
+                    gameFmt.timeZone = TimeZone(secondsFromGMT: 0)
+                    gameFmt.locale = Locale(identifier: "en_US_POSIX")
+                    let games: [(away: String, home: String, start: Date?)] = (entry.games ?? []).compactMap { g in
+                        guard let a = g.teamAwayHashtag, let h = g.teamHomeHashtag else { return nil }
+                        return (a.uppercased(), h.uppercased(), g.date.flatMap { gameFmt.date(from: $0) })
+                    }
+                    guard !games.isEmpty else { return nil }
+                    return DKClassicSlate(
+                        id: slateID,
+                        name: entry.name ?? "",
+                        start: entry.start.flatMap { startFmt.date(from: $0) },
+                        games: games,
+                        salaries: byName
+                    )
+                }
+            }
+            var out: [DKClassicSlate] = []
+            for await slate in group { if let slate { out.append(slate) } }
+            return out
+        }
+        let sorted = slates.sorted { a, b in
+            if a.games.count != b.games.count { return a.games.count > b.games.count }
+            return (a.start ?? .distantFuture) < (b.start ?? .distantFuture)
+        }
+        for s in sorted {
+            print("[LineupHQ-Slate] Classic \(sport.uppercased()) \(s.id) \"\(s.name)\": \(s.games.count) games, \(s.salaries.count) salaries")
+        }
+        return sorted
     }
 
     /// Golf-only: DK salaries from the week's PRIMARY full-tournament

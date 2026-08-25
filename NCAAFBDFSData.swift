@@ -48,8 +48,19 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
             return cached
         }
 
-        // Start fetching real DraftKings salaries in parallel with ESPN data
+        // Start fetching real DraftKings salaries in parallel with ESPN data.
+        // `rgSalaries` is the day's AGGREGATE (every DK slate merged) — good
+        // for "does DK price this player at all", useless for slate scope.
+        // `dkClassicSlates` is DK's actual classic-slate structure and is what
+        // defines Main + window slates below.
         async let rgSalaries = RotoGrindersSalaryProvider.shared.fetchSalaries(sport: "cfb", maxClassicSalary: 10000)
+        async let dkClassicSlatesTask = RotoGrindersSalaryProvider.shared.fetchClassicSlates(sport: "cfb")
+        // Union of every SHOWDOWN slate's prices. Needed for the depth trim:
+        // RG's aggregate players.json 404s for CFB, so `rgSalaries` resolves
+        // to the classic slates only — a showdown-only game's players (Jordan
+        // Shipp, Jeremy Payne) would look unpriced and get capped out of the
+        // pool by the depth trim even though DK prices them.
+        async let dkShowdownSalariesTask = RotoGrindersSalaryProvider.shared.fetchAllShowdownSalaries(sport: "cfb")
 
         // 1. Fetch NCAAFB scoreboard events
         let events = try await fetchNCAAFBEvents()
@@ -96,7 +107,7 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
                         gameID: gameID,
                         ratings: ratings
                     )
-                    return roster   // already position-capped in fetchNCAAFBRoster
+                    return roster   // full roster; depth-trimmed after DK salary matching
                 }
             }
             var allPlayers: [DFSPlayer] = []
@@ -106,13 +117,28 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
             return allPlayers
         }
 
-        let deduped = deduplicatePlayers(players)
-        guard !deduped.isEmpty else {
+        let rawPool = deduplicatePlayers(players)
+        guard !rawPool.isEmpty else {
             throw NSError(domain: "NCAAFBDFS", code: 2, userInfo: [NSLocalizedDescriptionKey: "No college football players available"])
         }
 
-        // 6. Apply real DraftKings salaries from RotoGrinders where available
+        // 6. Apply real DraftKings salaries from RotoGrinders where available.
+        // Trim to slate depth FIRST, keeping every DK-priced player and
+        // capping only the unpriced tail (see trimToSlateDepth) — the caps
+        // used to run on last-season projections and cut real DK names.
         let realSalaries = await rgSalaries
+        let dkClassicSlates = await dkClassicSlatesTask
+        let dkShowdownSalaries = await dkShowdownSalariesTask
+        let dedupedTrimmed = realSalaries.isEmpty
+            ? rawPool
+            : trimToSlateDepth(rawPool) { player in
+                RotoGrindersSalaryProvider.lookupSalary(espnName: player.name, in: realSalaries) != nil
+                    || RotoGrindersSalaryProvider.lookupSalary(espnName: player.name, in: dkShowdownSalaries) != nil
+            }
+        if dedupedTrimmed.count != rawPool.count {
+            print("[CFB-DFS] Pool trimmed \(rawPool.count) → \(dedupedTrimmed.count) (all DK-priced players kept)")
+        }
+        let deduped = dedupedTrimmed
         let finalPlayers: [DFSPlayer]
         if !realSalaries.isEmpty {
             let matchCount = deduped.filter { RotoGrindersSalaryProvider.lookupSalary(espnName: $0.name, in: realSalaries) != nil }.count
@@ -180,21 +206,70 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
             return Double(comps.hour ?? 0) + Double(comps.minute ?? 0) / 60.0
         }
 
-        // MIRROR DK'S SLATE: a game absent from DK's slates gets floor/
-        // estimated prices across the board (UNC@TCU: a $4,000 wall) — DK
-        // isn't offering that game, so we drop it from the WHOLE slate:
-        // no main-slate inclusion, no showdown, and the slate's lock time
-        // becomes the earliest DK-COVERED kickoff (matching DK's Main).
-        // Matched players carry isConfirmedActive=true from the salary pass.
+        // MIRROR DK'S SLATE STRUCTURE. DK's classic-slate master is the
+        // authority on what Main covers — deriving it from prices was wrong
+        // because the aggregate players.json merges EVERY slate that day, so
+        // a SHOWDOWN-only game (Week 0's noon UNC@TCU) looked fully priced,
+        // stayed in Main, and dragged the Main lock back to noon. DK's own
+        // Aug 29 classic is the 3:00pm 7-game slate; UNC@TCU is showdown-only.
+        // Extra classic slates ("7:00pm (Night)") become our window slates.
+        // DK's team hashtags diverge from ESPN's abbreviations for a lot of
+        // schools (NCST/NCSU, JACST/JVST, SSU/SAC, NMST/NMSU), so requiring
+        // BOTH sides to match dropped 4 of DK's 7 Aug-29 games. DK publishes
+        // each game's kickoff in UTC — identical to ESPN's — so one matching
+        // side plus an identical kickoff is a safe identification (a team
+        // plays once a day, and two same-time games never share a code).
+        func dkMatches(_ game: DFSSlateGame, _ pair: (away: String, home: String, start: Date?)) -> Bool {
+            func codesMatch(_ a: String, _ b: String) -> Bool {
+                let x = a.uppercased(), y = b.uppercased()
+                return x == y || x.hasPrefix(y) || y.hasPrefix(x)
+            }
+            let bothMatch = (codesMatch(game.awayTeam, pair.away) && codesMatch(game.homeTeam, pair.home))
+                || (codesMatch(game.awayTeam, pair.home) && codesMatch(game.homeTeam, pair.away))
+            if bothMatch { return true }
+            let oneMatch = codesMatch(game.awayTeam, pair.away) || codesMatch(game.homeTeam, pair.home)
+                || codesMatch(game.awayTeam, pair.home) || codesMatch(game.homeTeam, pair.away)
+            guard oneMatch, let dkStart = pair.start else { return false }
+            return abs(dkStart.timeIntervalSince(game.startTime)) < 300
+        }
+        func gamesIn(_ slate: RotoGrindersSalaryProvider.DKClassicSlate) -> [DFSSlateGame] {
+            includedGames.filter { g in slate.games.contains { dkMatches(g, $0) } }
+        }
+
         var coveredGames: [DFSSlateGame] = []
-        for game in includedGames {
-            let gamePlayers = finalPlayers.filter { $0.gameID == game.id }
-            guard !gamePlayers.isEmpty else { continue }
-            let real = gamePlayers.filter { $0.isConfirmedActive }.count
-            if Double(real) / Double(gamePlayers.count) >= 0.5 {
-                coveredGames.append(game)
-            } else {
-                print("[CFB-DFS] Slate gate: \(game.awayTeam)@\(game.homeTeam) has only \(real)/\(gamePlayers.count) real DK prices — dropped from slate")
+        var dkWindowSlates: [DFSWindowSlate] = []
+        if let primary = dkClassicSlates.first(where: { !gamesIn($0).isEmpty }) {
+            coveredGames = gamesIn(primary)
+            print("[CFB-DFS] Main slate mirrors DK classic \"\(primary.name)\": \(coveredGames.count)/\(includedGames.count) games")
+            // Every OTHER classic slate that is a proper subset becomes a
+            // window slate, titled from its ET start like DK labels them.
+            for slate in dkClassicSlates where slate.id != primary.id {
+                let games = gamesIn(slate)
+                guard games.count >= 2, games.count < coveredGames.count else { continue }
+                guard Set(games.map(\.id)).isSubset(of: Set(coveredGames.map(\.id))) else { continue }
+                let startHour = slate.start.map { d -> Double in
+                    let c = etCal.dateComponents([.hour, .minute], from: d)
+                    return Double(c.hour ?? 0) + Double(c.minute ?? 0) / 60.0
+                } ?? (games.map(kickHourET).min() ?? 0)
+                let token = startHour >= 18.0 ? "night" : "aft"
+                let title = startHour >= 18.0 ? "Night Only" : "Afternoon Only"
+                guard !dkWindowSlates.contains(where: { $0.token == token }) else { continue }
+                dkWindowSlates.append(DFSWindowSlate(token: token, title: title, gameIDs: games.map(\.id)))
+                print("[CFB-DFS] Window slate \"\(title)\" mirrors DK classic \"\(slate.name)\": \(games.count) games")
+            }
+        } else {
+            // No DK classic master (early week, outage) — fall back to the
+            // price-coverage heuristic: a game with mostly estimated prices
+            // isn't one DK is offering.
+            for game in includedGames {
+                let gamePlayers = finalPlayers.filter { $0.gameID == game.id }
+                guard !gamePlayers.isEmpty else { continue }
+                let real = gamePlayers.filter { $0.isConfirmedActive }.count
+                if Double(real) / Double(gamePlayers.count) >= 0.5 {
+                    coveredGames.append(game)
+                } else {
+                    print("[CFB-DFS] Slate gate: \(game.awayTeam)@\(game.homeTeam) has only \(real)/\(gamePlayers.count) real DK prices — dropped from slate")
+                }
             }
         }
         guard !coveredGames.isEmpty else {
@@ -231,19 +306,29 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
         }
         let showdownOnlyIDs = Set(showdownOnlyGames.map(\.id))
 
-        let coveredPlayers = sortedPlayers.filter {
-            coveredIDs.contains($0.gameID ?? "") || showdownOnlyIDs.contains($0.gameID ?? "")
+        // Rescued showdown-only games contribute ONLY players DK actually
+        // prices for that game — an unmatched player would fall back to a
+        // synthetic salary, which is the estimated-price wall this whole
+        // gate exists to prevent.
+        let coveredPlayers = sortedPlayers.filter { player in
+            let gid = player.gameID ?? ""
+            if coveredIDs.contains(gid) { return true }
+            guard showdownOnlyIDs.contains(gid), let sd = perGameShowdown[gid] else { return false }
+            return RotoGrindersSalaryProvider.lookupSalary(espnName: player.name, in: sd) != nil
         }
 
-        // DK-style windows from the COVERED games only.
-        var windowSlates: [DFSWindowSlate] = []
-        let afternoonGames = coveredGames.filter { kickHourET($0) >= 15.0 }
-        if afternoonGames.count >= 2, afternoonGames.count < coveredGames.count {
-            windowSlates.append(DFSWindowSlate(token: "aft", title: "Afternoon Only", gameIDs: afternoonGames.map(\.id)))
-        }
-        let nightGames = coveredGames.filter { kickHourET($0) >= 19.0 }
-        if nightGames.count >= 2, nightGames.count < afternoonGames.count {
-            windowSlates.append(DFSWindowSlate(token: "night", title: "Night Only", gameIDs: nightGames.map(\.id)))
+        // Windows: DK's own extra classic slates when we have them,
+        // otherwise the ET-hour heuristic over the covered games.
+        var windowSlates: [DFSWindowSlate] = dkWindowSlates
+        if windowSlates.isEmpty {
+            let afternoonGames = coveredGames.filter { kickHourET($0) >= 15.0 }
+            if afternoonGames.count >= 2, afternoonGames.count < coveredGames.count {
+                windowSlates.append(DFSWindowSlate(token: "aft", title: "Afternoon Only", gameIDs: afternoonGames.map(\.id)))
+            }
+            let nightGames = coveredGames.filter { kickHourET($0) >= 19.0 }
+            if nightGames.count >= 2, nightGames.count < afternoonGames.count {
+                windowSlates.append(DFSWindowSlate(token: "night", title: "Night Only", gameIDs: nightGames.map(\.id)))
+            }
         }
 
         let (tournaments, sgPlayers) = buildMultiTournamentSlate(
@@ -441,21 +526,42 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
             }
         }
 
-        // Trim per POSITION, not by a flat projection cut — a flat top-10
-        // keeps QBs/RBs/WRs and cuts every TE, leaving FLEX/SFLEX pools
-        // thin. Caps roughly match a DK college slate's per-team depth.
-        players.sort { $0.projectedPoints > $1.projectedPoints }
-        let capsByPosition = ["QB": 2, "RB": 4, "WR": 5, "TE": 2]
-        var counts: [String: Int] = [:]
-        var topPlayers: [DFSPlayer] = []
-        for player in players {
-            let cap = capsByPosition[player.position] ?? 0
-            if (counts[player.position] ?? 0) < cap {
-                topPlayers.append(player)
-                counts[player.position, default: 0] += 1
+        // Returns the FULL valid-position roster. Trimming happens in
+        // fetchSlate AFTER DK salaries are matched, so a DK-priced player
+        // can never be capped out — the old per-position caps here ran on
+        // LAST season's projections, which zero out transfers/first-time
+        // starters in Week 0 and cut real DK names (Jordan Shipp $7.6K,
+        // Jeremy Payne $9.2K went missing from a showdown pool).
+        return players
+    }
+
+    /// Per-position, per-team depth caps for players DK does NOT price —
+    /// keeps the pool near a DK slate's depth without dropping real names.
+    private static let cfbRosterCaps = ["QB": 2, "RB": 4, "WR": 5, "TE": 2]
+
+    /// Keep every DK-priced player; fill the rest up to the per-team,
+    /// per-position caps by projection.
+    private func trimToSlateDepth(_ players: [DFSPlayer], dkPriced: (DFSPlayer) -> Bool) -> [DFSPlayer] {
+        var byTeam: [String: [DFSPlayer]] = [:]
+        for p in players { byTeam[p.team, default: []].append(p) }
+        var out: [DFSPlayer] = []
+        for (_, roster) in byTeam {
+            let sorted = roster.sorted { $0.projectedPoints > $1.projectedPoints }
+            var counts: [String: Int] = [:]
+            for player in sorted {
+                if dkPriced(player) {
+                    out.append(player)
+                    counts[player.position, default: 0] += 1
+                    continue
+                }
+                let cap = Self.cfbRosterCaps[player.position] ?? 0
+                if (counts[player.position] ?? 0) < cap {
+                    out.append(player)
+                    counts[player.position, default: 0] += 1
+                }
             }
         }
-        return topPlayers
+        return out
     }
 
     // MARK: - Fetch NCAAFB Ratings
