@@ -1919,12 +1919,23 @@ final class BestBallViewModel {
         guard let sportPath else { return }
         let df = DateFormatter()
         df.dateFormat = "yyyyMMdd"
-        let dateStr = df.string(from: selectedDate)
-        let key = "\(league.sport)|\(dateStr)"
+        // Football is one slate a week and has no day strip, so scope the
+        // fixtures to the WHOLE WEEK — keying off selectedDate alone only
+        // ever fetched the week's first day (a Tuesday for CFB, the Thursday
+        // opener for NFL), leaving everyone but the Thursday game blank.
+        let isWeekly = league.sport == "NFL" || league.sport == "CFB"
+        let dateParam: String
+        if isWeekly {
+            let (start, end) = BestBallSeasonHelper.weekDateRange(sport: league.sport, week: selectedWeek)
+            dateParam = "\(df.string(from: start))-\(df.string(from: end))"
+        } else {
+            dateParam = df.string(from: selectedDate)
+        }
+        let key = "\(league.sport)|\(dateParam)"
         guard dayFixturesKey != key else { return }
         // CFB scoreboard defaults to Top 25 — groups=80 covers all of FBS.
-        let extra = league.sport == "CFB" ? "&groups=80&limit=400" : ""
-        guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/\(sportPath)/scoreboard?dates=\(dateStr)\(extra)") else { return }
+        let extra = league.sport == "CFB" ? "&groups=80&limit=400" : "&limit=100"
+        guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/\(sportPath)/scoreboard?dates=\(dateParam)\(extra)") else { return }
         var req = URLRequest(url: url)
         req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
         guard let (data, _) = try? await URLSession.shared.data(for: req),

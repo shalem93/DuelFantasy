@@ -209,6 +209,9 @@ struct BestBallRosterView: View {
                     await viewModel.refreshDingersLive(leagueID: league.id)
                 } else {
                     await viewModel.loadDailyScores(leagueID: league.id, week: viewModel.selectedWeek)
+                    // Football has no date strip (whose onAppear triggers
+                    // this for the daily sports), so load fixtures here.
+                    await viewModel.loadDayFixtures()
                 }
             }
         }
@@ -392,7 +395,9 @@ struct BestBallRosterView: View {
                 } else {
                     Text("Week \(viewModel.selectedWeek)")
                         .font(.subheadline.weight(.semibold))
-                    Text(formattedSelectedDate)
+                    // Football has no day strip, so a single date read as
+                    // "this week is Tuesday" — show the week's span instead.
+                    Text(sport == "NFL" || sport == "CFB" ? formattedWeekRange : formattedSelectedDate)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -769,6 +774,15 @@ struct BestBallRosterView: View {
         let formatter = DateFormatter()
         formatter.dateFormat = "EEE, MMM d"
         return formatter.string(from: viewModel.selectedDate)
+    }
+
+    /// "Sep 8 – Sep 14" for the selected week (football, which plays one
+    /// slate a week and shows no day strip).
+    private var formattedWeekRange: String {
+        let (start, end) = BestBallSeasonHelper.weekDateRange(sport: sport, week: viewModel.selectedWeek)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return "\(formatter.string(from: start)) – \(formatter.string(from: end))"
     }
 
     private func dayAbbrev(_ date: Date) -> String {
