@@ -4349,8 +4349,22 @@ nonisolated struct ESPNMLBDFSLiveScoringProvider: DFSLiveScoringProvider, Sendab
                             + Double(hr) * 12.0 + Double(rbi) * 3.0 + Double(r) * 3.0
                             + Double(bb) * 3.0 + Double(sb) * 6.0 + Double(hbp) * 3.0
 
+                        // Announced-lineup markers, straight from the box score:
+                        // `batOrder` (1-9) and `starter`. Settlement rebuilds
+                        // its bot pool from stored stats and had no way to tell
+                        // a starting batter from a bench bat, so a min-priced
+                        // starter (Colton Cowser, $3,100, 2-for-3 with a homer)
+                        // could sit at 0% owned across 2000 bots.
+                        let batOrder = (athlete["batOrder"] as? Int)
+                            ?? (athlete["batOrder"] as? String).flatMap { Int($0) } ?? 0
+                        let isStarter = (athlete["starter"] as? Bool) ?? false
+                        var mlbExtras: [String: Int] = [:]
+                        if batOrder > 0 { mlbExtras["BO"] = batOrder }
+                        if isStarter { mlbExtras["XI"] = 1 }
+
                         // Reuse DFSPlayerLiveStats — map MLB stats into available fields
                         let stats = DFSPlayerLiveStats(
+                            extraStats: mlbExtras.isEmpty ? nil : mlbExtras,
                             name: athleteName,
                             points: h, rebounds: hr, assists: rbi,
                             steals: r, blocks: bb, turnovers: sb,

@@ -1605,6 +1605,18 @@ struct DFSPastStandingsView: View {
                     .font(.caption.weight(.medium))
                     .lineLimit(1)
 
+                // Announced batting order — the MLB equivalent of soccer's
+                // confirmed-XI check ("#4" = batted cleanup).
+                if let order = stats?.extraStats?["BO"], order > 0 {
+                    Text("#\(order)")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Color.green.opacity(0.75))
+                        .clipShape(Capsule())
+                }
+
                 if let sal = salaryForPlayer(playerID, in: record) {
                     Text("$\(viewModel.formatSalary(sal))")
                         .font(.system(size: 8, weight: .medium))

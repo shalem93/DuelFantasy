@@ -4062,7 +4062,12 @@ final class DFSViewModel {
                             if salaryRatio >= 0.8 && salaryRatio <= 1.3 {
                                 w *= 2.0
                             } else if salaryRatio < 0.5 {
-                                w *= 0.3
+                                // MLB showdown NEEDS cheap bats — an MVP at 1.5x
+                                // (Martinez $17.7K → $26.6K) leaves ~$23K for five
+                                // slots, so min-priced starters are mandatory, not
+                                // punts. The generic 0.3 fought the cap math and
+                                // buried them at 0% ownership.
+                                w *= (effectiveSport == "MLB" ? 0.8 : 0.3)
                             }
                         } else if effectiveSport == "NHL" || effectiveSport == "NBA" || effectiveSport == "NCAAM" {
                             // NHL/NBA: aggressively steer toward target salary
@@ -9812,6 +9817,20 @@ final class DFSViewModel {
                 baseBotPlayers = xiOnly
             }
         }
+        // MLB: same idea — bots may only roster the announced batting order
+        // (plus pitchers). Without this the reconstructed pool can't tell a
+        // starting bat from a bench bat, and cheap starters landed at 0%.
+        if sportPrefix == "mlb" {
+            let lineupOnly = baseBotPlayers.filter { p in
+                if p.position.uppercased() == "SP" || p.position.uppercased() == "P" { return true }
+                guard let ex = snapshot.playerLiveStats[p.id]?.extraStats else { return false }
+                return ex["XI"] == 1 || (ex["BO"] ?? 0) > 0
+            }
+            if lineupOnly.count >= botLineupSize * 2 {
+                print("[DFS] MLB settlement bot pool restricted to \(lineupOnly.count)/\(baseBotPlayers.count) announced-lineup players")
+                baseBotPlayers = lineupOnly
+            }
+        }
         let avgPoints = allPlayers.isEmpty ? 20.0 : allPlayers.reduce(0.0) { $0 + $1.points } / Double(allPlayers.count)
 
         // Define roster slots for position-constrained sports so bots draft valid lineups
@@ -10044,7 +10063,8 @@ final class DFSViewModel {
                         let simulatedProjection = max(baseProj + noise, 1.0)
                         var player = DFSPlayer(
                             id: p.id, name: p.name, team: "", position: p.position,
-                            salary: p.salary, projectedPoints: simulatedProjection
+                            salary: p.salary, projectedPoints: simulatedProjection,
+                            battingOrder: snapshot.playerLiveStats[p.id]?.extraStats?["BO"]
                         )
                         player.isConfirmedActive = p.hasRealSalary
                         return player
@@ -10103,7 +10123,8 @@ final class DFSViewModel {
                     let simulatedProjection = max(baseProj + noise, 1.0)
                     var player = DFSPlayer(
                         id: p.id, name: p.name, team: "", position: p.position,
-                        salary: p.salary, projectedPoints: simulatedProjection
+                        salary: p.salary, projectedPoints: simulatedProjection,
+                        battingOrder: snapshot.playerLiveStats[p.id]?.extraStats?["BO"]
                     )
                     player.isConfirmedActive = p.hasRealSalary
                     return player
