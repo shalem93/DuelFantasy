@@ -9789,10 +9789,24 @@ final class DFSViewModel {
         if forceRegenerateBots {
             print("[DFS] Force-regenerating bots for \(tournamentID) — ignoring \(serverTournament?.botField?.count ?? 0) saved bots")
         }
-        let baseBotPlayers: [(id: String, name: String, salary: Int, actualPoints: Double, position: String, hasRealSalary: Bool)] = allPlayers.map { p in
+        var baseBotPlayers: [(id: String, name: String, salary: Int, actualPoints: Double, position: String, hasRealSalary: Bool)] = allPlayers.map { p in
             let hasReal = (tournamentSalaries[p.id] ?? 0) > 0 || (userStoredSalaries[p.id] ?? 0) > 0
             let sal = salaryByID[p.id] ?? salaryFloor
             return (id: p.id, name: p.name, salary: sal, actualPoints: p.points, position: p.position, hasRealSalary: hasReal)
+        }
+        // Soccer settlement regen: bots may ONLY roster the announced XI.
+        // The reconstructed pool has no team/confirmed-XI flags, so the
+        // salary-weighted regen happily drafted benched players (Welbeck/
+        // Neto at 25%+ after a re-grade). The score snapshot's XI marker
+        // (extraStats, set from ESPN's starter flag) identifies starters —
+        // require it unless the filter would collapse the pool (snapshots
+        // without XI data).
+        if ["epl", "ucl", "wc"].contains(sportPrefix) {
+            let xiOnly = baseBotPlayers.filter { snapshot.playerLiveStats[$0.id]?.extraStats?["XI"] == 1 }
+            if xiOnly.count >= botLineupSize * 2 {
+                print("[DFS] Settlement bot pool restricted to \(xiOnly.count)/\(baseBotPlayers.count) XI starters")
+                baseBotPlayers = xiOnly
+            }
         }
         let avgPoints = allPlayers.isEmpty ? 20.0 : allPlayers.reduce(0.0) { $0 + $1.points } / Double(allPlayers.count)
 

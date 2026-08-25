@@ -1850,6 +1850,55 @@ final class BestBallViewModel {
 
     // MARK: - Daily Scores
 
+    /// Team → that day's opponent for the roster view's selected date, so
+    /// each row can show "@MNC" / "vs ARS" and a plays-today marker.
+    struct BBDayFixture { let opp: String; let home: Bool }
+    var dayFixtures: [String: BBDayFixture] = [:]
+    @ObservationIgnored private var dayFixturesKey: String?
+
+    func loadDayFixtures() async {
+        guard let league = currentLeague else { return }
+        let sportPath: String?
+        switch league.sport {
+        case "EPL": sportPath = "soccer/eng.1"
+        case "NFL": sportPath = "football/nfl"
+        case "CFB": sportPath = "football/college-football"
+        case "MLB": sportPath = "baseball/mlb"
+        default: sportPath = nil
+        }
+        guard let sportPath else { return }
+        let df = DateFormatter()
+        df.dateFormat = "yyyyMMdd"
+        let dateStr = df.string(from: selectedDate)
+        let key = "\(league.sport)|\(dateStr)"
+        guard dayFixturesKey != key else { return }
+        // CFB scoreboard defaults to Top 25 — groups=80 covers all of FBS.
+        let extra = league.sport == "CFB" ? "&groups=80&limit=400" : ""
+        guard let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/\(sportPath)/scoreboard?dates=\(dateStr)\(extra)") else { return }
+        var req = URLRequest(url: url)
+        req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+        guard let (data, _) = try? await URLSession.shared.data(for: req),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let events = json["events"] as? [[String: Any]] else { return }
+        var map: [String: BBDayFixture] = [:]
+        for event in events {
+            guard let comp = (event["competitions"] as? [[String: Any]])?.first,
+                  let competitors = comp["competitors"] as? [[String: Any]] else { continue }
+            var homeAb: String?
+            var awayAb: String?
+            for c in competitors {
+                let ab = (c["team"] as? [String: Any])?["abbreviation"] as? String
+                if (c["homeAway"] as? String) == "home" { homeAb = ab } else { awayAb = ab }
+            }
+            if let h = homeAb, let a = awayAb {
+                map[h] = BBDayFixture(opp: a, home: true)
+                map[a] = BBDayFixture(opp: h, home: false)
+            }
+        }
+        dayFixturesKey = key
+        dayFixtures = map
+    }
+
     func loadDailyScores(leagueID: String, week: Int) async {
         guard let token = accessToken else { return }
         do {

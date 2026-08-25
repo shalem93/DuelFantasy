@@ -264,6 +264,7 @@ struct BestBallRosterView: View {
         viewModel.selectedDate = weekStart
         Task {
             await viewModel.loadDailyScores(leagueID: league.id, week: viewModel.selectedWeek)
+            await viewModel.loadDayFixtures()
         }
     }
 
@@ -282,6 +283,7 @@ struct BestBallRosterView: View {
 
                         Button {
                             viewModel.selectedDate = date
+                            Task { await viewModel.loadDayFixtures() }
                         } label: {
                             VStack(spacing: 3) {
                                 Text(dayAbbrev(date))
@@ -321,6 +323,7 @@ struct BestBallRosterView: View {
                 if let today = dates.first(where: { Calendar.current.isDateInToday($0) }) {
                     proxy.scrollTo(today.timeIntervalSince1970, anchor: .center)
                 }
+                Task { await viewModel.loadDayFixtures() }
             }
         }
     }
@@ -664,9 +667,20 @@ struct BestBallRosterView: View {
                     .foregroundStyle(isScoring ? .primary : .secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.65)
-                Text(pick.playerTeam)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
+                HStack(spacing: 3) {
+                    Text(pick.playerTeam)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                    // Opponent + plays-on-selected-day marker ("EVE @MNC ●")
+                    if let fx = viewModel.dayFixtures[pick.playerTeam] {
+                        Text(fx.home ? "vs \(fx.opp)" : "@\(fx.opp)")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Circle()
+                            .fill(.green)
+                            .frame(width: 5, height: 5)
+                    }
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.leading, 4)
