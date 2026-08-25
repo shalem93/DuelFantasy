@@ -714,9 +714,13 @@ final class DFSViewModel {
                 let c = cal.dateComponents([.hour, .minute], from: d)
                 return Double(c.hour ?? 0) + Double(c.minute ?? 0) / 60.0
             }
+            // Night threshold is sport-specific: football's late window is
+            // 7pm ET, MLB's DK late slate starts with the ~9:38pm West Coast
+            // first pitches (matching the 20.5 cutoff the slate builder uses).
+            let nightHour: Double = sport == "MLB" ? 20.5 : 19.0
             let ids: Set<String> = t.id.contains("-aft-")
                 ? Set(slateGames.filter { hourET($0.startTime) >= 15.0 && hourET($0.startTime) < 18.5 }.map(\.id))
-                : Set(slateGames.filter { hourET($0.startTime) >= 19.0 }.map(\.id))
+                : Set(slateGames.filter { hourET($0.startTime) >= nightHour }.map(\.id))
             if !ids.isEmpty {
                 return players.filter { ids.contains($0.gameID ?? "") }
             }

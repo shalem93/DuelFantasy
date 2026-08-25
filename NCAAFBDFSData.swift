@@ -201,7 +201,39 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
             throw NSError(domain: "CFBDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for today's CFB slate"])
         }
         let coveredIDs = Set(coveredGames.map(\.id))
-        let coveredPlayers = sortedPlayers.filter { coveredIDs.contains($0.gameID ?? "") }
+
+        // SHOWDOWN-ONLY RESCUE: a game DK leaves off the Main slate can
+        // still carry its own DK showdown (UNC@TCU: absent from Main, full
+        // 146-player showdown priced). Offer just its single-game contests,
+        // priced from the real showdown feed — the game stays out of the
+        // main pool, windows, and the main lock.
+        var showdownOnlyGames: [DFSSlateGame] = []
+        var perGameShowdown: [String: [String: Int]] = [:]
+        for game in includedGames where !coveredIDs.contains(game.id) {
+            let gamePlayers = sortedPlayers.filter { $0.gameID == game.id }
+            guard !gamePlayers.isEmpty else { continue }
+            let sdSalaries = await RotoGrindersSalaryProvider.shared.fetchShowdownSalariesForGame(
+                sport: "cfb", awayHashtag: game.awayTeam, homeHashtag: game.homeTeam,
+                startTime: game.startTime
+            )
+            guard !sdSalaries.isEmpty else { continue }
+            let matched = gamePlayers.filter {
+                RotoGrindersSalaryProvider.lookupSalary(espnName: $0.name, in: sdSalaries) != nil
+            }.count
+            let rate = Double(matched) / Double(gamePlayers.count)
+            guard rate >= 0.3 else {
+                print("[CFB-DFS] Showdown rescue: \(game.awayTeam)@\(game.homeTeam) feed matched only \(matched)/\(gamePlayers.count) — skipping")
+                continue
+            }
+            print("[CFB-DFS] Showdown-only slate for \(game.awayTeam)@\(game.homeTeam): \(sdSalaries.count) DK prices (matched \(matched)/\(gamePlayers.count))")
+            showdownOnlyGames.append(game)
+            perGameShowdown[game.id] = sdSalaries
+        }
+        let showdownOnlyIDs = Set(showdownOnlyGames.map(\.id))
+
+        let coveredPlayers = sortedPlayers.filter {
+            coveredIDs.contains($0.gameID ?? "") || showdownOnlyIDs.contains($0.gameID ?? "")
+        }
 
         // DK-style windows from the COVERED games only.
         var windowSlates: [DFSWindowSlate] = []
@@ -222,14 +254,18 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
             // DK college classic layout — SFLEX (superflex) takes QB too.
             mainRosterSlots: ["QB", "RB", "RB", "WR", "WR", "WR", "FLEX", "SFLEX"],
             isSingleGameSlate: coveredGames.count == 1,
-            includedGames: coveredGames,
+            includedGames: coveredGames + showdownOnlyGames,
             mainPlayers: coveredPlayers,
+            perGameShowdownSalaries: perGameShowdown.isEmpty ? nil : perGameShowdown,
+            // With rescued showdown-only games in the slate, scope the MAIN
+            // tournaments (pool + lock) to the DK-covered games explicitly.
+            mainWindowGameIDs: showdownOnlyGames.isEmpty ? nil : coveredGames.map(\.id),
             windowSlates: windowSlates
         )
 
         let slate = DFSSlate(
             tournaments: tournaments,
-            includedGames: coveredGames,
+            includedGames: coveredGames + showdownOnlyGames,
             players: coveredPlayers,
             singleGamePlayers: sgPlayers
         )

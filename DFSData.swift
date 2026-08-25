@@ -3532,6 +3532,26 @@ nonisolated struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
             }
         }()
 
+        // DK-style late window: DK posts an evening/night MLB slate
+        // alongside the main one (its "9:38pm" style slate covers the games
+        // starting after the afternoon/early-evening block). Build one from
+        // the first-pitch times when enough games start late and the window
+        // is a real subset of the day.
+        var mlbETCal = Calendar(identifier: .gregorian)
+        mlbETCal.timeZone = TimeZone(identifier: "America/New_York")!
+        func firstPitchHourET(_ game: DFSSlateGame) -> Double {
+            let c = mlbETCal.dateComponents([.hour, .minute], from: game.startTime)
+            return Double(c.hour ?? 0) + Double(c.minute ?? 0) / 60.0
+        }
+        var mlbWindowSlates: [DFSWindowSlate] = []
+        let lateGames = includedGames.filter { firstPitchHourET($0) >= 20.5 }
+        if lateGames.count >= 2, lateGames.count < includedGames.count {
+            mlbWindowSlates.append(DFSWindowSlate(
+                token: "night", title: "Night Only", gameIDs: lateGames.map(\.id)
+            ))
+            print("[MLB-DFS] Night Only slate: \(lateGames.count) games from \(includedGames.count)")
+        }
+
         // A 1-game MLB day (All-Star break, weather wipeouts) gets ONLY the
         // showdown contest, same as every other sport — a 10-player classic
         // slate drawn from two teams is redundant with the single game.
@@ -3544,7 +3564,8 @@ nonisolated struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
             isSingleGameSlate: includedGames.count == 1,
             includedGames: includedGames,
             mainPlayers: sortedPlayersFiltered,
-            perGameShowdownSalaries: mlbPerGameShowdownSalaries.isEmpty ? nil : mlbPerGameShowdownSalaries
+            perGameShowdownSalaries: mlbPerGameShowdownSalaries.isEmpty ? nil : mlbPerGameShowdownSalaries,
+            windowSlates: mlbWindowSlates
         )
 
         let slate = DFSSlate(
