@@ -667,20 +667,18 @@ struct BestBallRosterView: View {
                     .foregroundStyle(isScoring ? .primary : .secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.65)
-                HStack(spacing: 3) {
-                    Text(pick.playerTeam)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                    // Opponent + plays-on-selected-day marker ("EVE @MNC ●")
-                    if let fx = viewModel.dayFixtures[pick.playerTeam] {
-                        Text(fx.home ? "vs \(fx.opp)" : "@\(fx.opp)")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(.secondary)
-                        Circle()
-                            .fill(.green)
-                            .frame(width: 5, height: 5)
-                    }
-                }
+                // Team + that day's opponent as ONE string ("EVE vs CRY") so
+                // it shrinks as a unit instead of wrapping the opponent onto
+                // a second line. Its mere presence means they play that day,
+                // so no extra marker is needed.
+                Text({
+                    guard let fx = viewModel.dayFixtures[pick.playerTeam] else { return pick.playerTeam }
+                    return "\(pick.playerTeam) \(fx.home ? "vs" : "@") \(fx.opp)"
+                }())
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.leading, 4)
