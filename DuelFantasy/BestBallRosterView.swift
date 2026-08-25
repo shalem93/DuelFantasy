@@ -676,14 +676,18 @@ struct BestBallRosterView: View {
                 // it shrinks as a unit instead of wrapping the opponent onto
                 // a second line. Its mere presence means they play that day,
                 // so no extra marker is needed.
-                Text({
-                    guard let fx = viewModel.dayFixtures[pick.playerTeam] else { return pick.playerTeam }
-                    return "\(pick.playerTeam) \(fx.home ? "vs" : "@") \(fx.opp)"
-                }())
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
+                // The player's OWN team reads darker/semibold so it stays the
+                // scannable part; the matchup half stays light.
+                (
+                    Text(pick.playerTeam)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    + Text(viewModel.dayFixtures[pick.playerTeam].map { " \($0.home ? "vs" : "@") \($0.opp)" } ?? "")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                )
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.leading, 4)
