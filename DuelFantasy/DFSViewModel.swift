@@ -1182,12 +1182,17 @@ final class DFSViewModel {
                 var openSlots: [Int] = []
                 var lockedSalary = 0
                 var selected = Set<String>()
+                let isSoccerShowdown = tournament.isSingleGame
                 for slot in ids.indices {
                     let cur = byID[ids[slot]]
                     if let cur, !gameHasStarted(cur.gameID), !cur.isConfirmedActive {
                         openSlots.append(slot)
                     } else {
-                        if let cur { lockedSalary += cur.salary }
+                        if let cur {
+                            // MVP slot is charged at 1.5x on showdowns.
+                            lockedSalary += (isSoccerShowdown && slot == 0)
+                                ? Int(Double(cur.salary) * 1.5) : cur.salary
+                        }
                         selected.insert(ids[slot])
                     }
                 }
@@ -1289,7 +1294,16 @@ final class DFSViewModel {
             // not-started, unconfirmed slot with the best affordable confirmed
             // starter of the same position. Unchanged behavior.
             var selected = Set(ids)
-            var usedSalary = ids.reduce(0) { $0 + (byID[$1]?.salary ?? 0) }
+            // Slot 0 of a showdown is charged at 1.5x. Summing RAW salaries
+            // made a lineup look under cap when it wasn't, so the swap could
+            // push a bot over — a $50,900 MLB showdown lineup shipped that way.
+            let isShowdown = tournament.isSingleGame
+            func chargedCost(_ slot: Int, _ salary: Int) -> Int {
+                (isShowdown && slot == 0) ? Int(Double(salary) * 1.5) : salary
+            }
+            var usedSalary = ids.enumerated().reduce(0) { sum, pair in
+                sum + chargedCost(pair.offset, byID[pair.element]?.salary ?? 0)
+            }
             var rowChanged = false
 
             for slot in ids.indices {
@@ -1297,11 +1311,13 @@ final class DFSViewModel {
                 if gameHasStarted(cur.gameID) { continue }      // pinned — live or finished
                 if cur.isConfirmedActive { continue }            // already a confirmed starter
                 // Find the best affordable confirmed replacement of the same position.
+                let curCost = chargedCost(slot, cur.salary)
                 guard let repl = candidatesByPos[cur.position]?.first(where: { c in
-                    !selected.contains(c.id) && (usedSalary - cur.salary + c.salary) <= cap
+                    !selected.contains(c.id)
+                        && (usedSalary - curCost + chargedCost(slot, c.salary)) <= cap
                 }) else { continue }
                 selected.remove(cur.id); selected.insert(repl.id)
-                usedSalary += repl.salary - cur.salary
+                usedSalary += chargedCost(slot, repl.salary) - curCost
                 ids[slot] = repl.id
                 rowChanged = true
             }
@@ -3469,7 +3485,14 @@ final class DFSViewModel {
             } else {
 
             let confirmedStarters = basePool.filter { $0.battingOrder != nil || $0.position == "SP" }
-            if effectiveSport == "MLB" && !confirmedStarters.isEmpty {
+            // "Batting orders are available" must mean actual BATTERS carry an
+            // order — not just that the slate has pitchers. `|| position ==
+            // "SP"` made this true with zero lineups posted, and the weighting
+            // below then gave the two SPs a 10x boost while every batter took
+            // 0.02x: a 500x swing that pinned both pitchers near 100% owned on
+            // showdowns. Require a real batting order on several batters.
+            let batsWithOrder = basePool.filter { $0.battingOrder != nil }.count
+            if effectiveSport == "MLB" && batsWithOrder >= 4 {
                 mlbHasBattingOrders = true
             }
             if confirmedStarters.count >= lineupSize + 5 && coversAllSlots(confirmedStarters) {
@@ -4092,10 +4115,15 @@ final class DFSViewModel {
                     // MLB: heavily prefer confirmed starters (in batting order) over bench players.
                     // Players not in the lineup will likely score 0 FPTS.
                     if effectiveSport == "MLB" && mlbHasBattingOrders {
-                        if p.battingOrder != nil || p.position == "SP" {
-                            w *= 10.0
+                        let inLineup = p.battingOrder != nil || p.position == "SP"
+                        // Showdown pools are ~20 players for 6 slots, so the
+                        // 10x/0.02x split (500x) collapsed the field onto the
+                        // same handful. A firm-but-survivable 4x/0.15x still
+                        // buries true bench bats without pinning anyone at 97%.
+                        if isSingleGame {
+                            w *= inLineup ? 4.0 : 0.15
                         } else {
-                            w *= 0.02
+                            w *= inLineup ? 10.0 : 0.02
                         }
                     }
                     // NHL: boost confirmed starting goalies so bots roster them
