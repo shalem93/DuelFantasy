@@ -540,6 +540,7 @@ struct DFSLiveContestView: View {
                                         .background(brandPurple.opacity(0.6))
                                         .clipShape(Capsule())
                                 }
+                                battingOrderBadge(player.id)
                                 // CHIP sports only (football/soccer): status
                                 // inline next to the % pill — their stats are
                                 // a chip row, so a stacked status line made
@@ -1035,6 +1036,7 @@ struct DFSLiveContestView: View {
                             .background(brandPurple.opacity(0.6))
                             .clipShape(Capsule())
                     }
+                    battingOrderBadge(player.id)
                 }
                 HStack(spacing: 4) {
                     Text(player.team)
@@ -1148,6 +1150,22 @@ struct DFSLiveContestView: View {
 
     private var isFootball: Bool {
         viewModel.sport == "NFL" || viewModel.sport == "CFB"
+    }
+
+    /// Announced batting-order slot ("#4") for MLB, from the box score's
+    /// batOrder. Sits next to the ownership pill so you can tell a cleanup
+    /// bat from a bench bat at a glance.
+    @ViewBuilder
+    private func battingOrderBadge(_ playerID: String) -> some View {
+        if isMLB, let order = viewModel.livePlayerStats[playerID]?.extraStats?["BO"], order > 0 {
+            Text("#\(order)")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 3)
+                .padding(.vertical, 1)
+                .background(Color.green.opacity(0.75))
+                .clipShape(Capsule())
+        }
     }
 
     /// NASCAR stat line from the repurposed live-stat fields:
@@ -1313,6 +1331,7 @@ struct DFSLiveContestView: View {
                                     .background(brandPurple.opacity(0.6))
                                     .clipShape(Capsule())
                             }
+                            battingOrderBadge(playerID)
 
                             // CHIP sports only (football/soccer): game status
                             // inline next to the % pill — their stats live on
