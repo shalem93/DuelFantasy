@@ -385,6 +385,11 @@ struct DFSPastStandingsView: View {
         let sgTournament = isSingleGameTournament
         for record in records {
             let names = record.lineupPlayerNames
+            // One lineup can only "own" a player once. A pool carrying the
+            // same person under two IDs (a two-way "-sp" sibling, a dk-slug
+            // alias) let a bot roster both, and the name-key rollup then
+            // counted that lineup twice — Banfield read 110% owned.
+            var countedThisLineup = Set<String>()
             for (index, pid) in record.lineupPlayerIDs.enumerated() {
                 let key: String
                 if index < names.count, !names[index].isEmpty {
@@ -392,7 +397,9 @@ struct DFSPastStandingsView: View {
                 } else {
                     key = pid
                 }
-                counts[key, default: 0] += 1
+                if countedThisLineup.insert(key).inserted {
+                    counts[key, default: 0] += 1
+                }
                 if nameKeyByID[pid] == nil { nameKeyByID[pid] = key }
                 if displayNameByKey[key] == nil, index < names.count, !names[index].isEmpty {
                     displayNameByKey[key] = names[index]

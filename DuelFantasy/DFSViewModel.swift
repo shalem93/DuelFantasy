@@ -3180,6 +3180,27 @@ final class DFSViewModel {
             return false
         }
 
+        // MLB SHOWDOWN: wait for the announced batting order the same way
+        // soccer waits for the XI. Generating before lineups post means the
+        // field is drafted blind and freezes with bench bats in it (a DNP
+        // catcher is a sixth of a 6-slot lineup). MLB posts lineups ~2-3h
+        // out, so this rarely defers for long, and the guard below releases
+        // it at lock regardless so a field always exists.
+        if sport == "MLB", t.isSingleGame {
+            let pool: [DFSPlayer] = {
+                if let gid = t.gameID, let sg = singleGamePlayers[gid], !sg.isEmpty { return sg }
+                if let gid = t.gameID { return players.filter { $0.gameID == gid } }
+                return players
+            }()
+            guard !pool.isEmpty else { return true }   // pool not ready yet
+            let withOrder = pool.filter { $0.battingOrder != nil }.count
+            if withOrder < 8 {
+                print("[DFS-MLB] Bot generation deferred for \(t.id): only \(withOrder) batting orders posted")
+                return true
+            }
+            return false
+        }
+
         if sport == "EPL" || sport == "UCL" || sport == "WC" {
             // The gating game: a single-game tournament's own game, or the
             // earliest game for main/evening slates (its kickoff IS the lock).
@@ -3495,7 +3516,15 @@ final class DFSViewModel {
             if effectiveSport == "MLB" && batsWithOrder >= 4 {
                 mlbHasBattingOrders = true
             }
-            if confirmedStarters.count >= lineupSize + 5 && coversAllSlots(confirmedStarters) {
+            if effectiveSport == "MLB" && isSingleGame && mlbHasBattingOrders
+                && confirmedStarters.count >= lineupSize && coversAllSlots(confirmedStarters) {
+                // MLB SHOWDOWN with lineups posted: draft ONLY the announced
+                // batting order plus the starters, exactly like soccer's
+                // confirmed-XI rule. Weighting alone still let bench catchers
+                // through (Banfield, Knizner — both 0-for-0 DNPs), and on a
+                // 6-slot showdown one DNP is a sixth of the lineup.
+                strictBotPool = confirmedStarters
+            } else if confirmedStarters.count >= lineupSize + 5 && coversAllSlots(confirmedStarters) {
                 // Batting orders available and cover all positions — use confirmed starters only
                 strictBotPool = confirmedStarters
             } else if effectiveSport == "MLB" && mlbHasBattingOrders && coversAllSlots(confirmedStarters) {
@@ -4211,7 +4240,13 @@ final class DFSViewModel {
                 let pickCost = (isSingleGame && slotIndex == 0) ? Int(Double(pick.salary) * 1.5) : pick.salary
                 budgetLeft -= pickCost
                 usedIDs.insert(pick.id)
-                pool.removeAll { $0.id == pick.id }
+                // Remove every ID for this PERSON, not just the drafted one.
+                // A pool can carry the same player twice (a two-way "-sp"
+                // sibling, a dk-slug alias resolved late), and id-only dedupe
+                // let one bot roster him in two slots — a wasted slot and
+                // ownership that summed past 100%.
+                let pickKey = dfsOwnershipNameKey(pick.name)
+                pool.removeAll { $0.id == pick.id || dfsOwnershipNameKey($0.name) == pickKey }
             }
 
             // Reconstruct selected array in original slot order
