@@ -7631,22 +7631,36 @@ final class DFSViewModel {
         } else {
             games = await fetchSlateGamesForDate(dateString, espnSport: espnSport)
         }
-        guard !games.isEmpty else { return }
-
         // Single-game contests embed their ESPN event ID in the tid
         // ("mlb-20260728-sg-401901849-2000"). On doubleheader days the
         // date fetch returns BOTH games and the snapshot dict (keyed by
         // athlete ID) lets the later game overwrite the earlier one — a
         // player's stat line showed the nightcap's 0-for while his FPTS
         // were settled from game 1. Restrict stats to the contest's game.
-        var gamesForStats = games
-        if tournamentId.contains("-sg-") {
+        let sgEventID: String? = {
+            guard tournamentId.contains("-sg-") else { return nil }
             let afterSG = tournamentId.components(separatedBy: "-sg-").dropFirst().first ?? ""
-            let eventID = afterSG.components(separatedBy: "-").first ?? ""
-            if !eventID.isEmpty, games.contains(where: { $0.id == eventID }) {
+            let id = afterSG.components(separatedBy: "-").first ?? ""
+            return id.isEmpty ? nil : id
+        }()
+        var gamesForStats = games
+        if let eventID = sgEventID {
+            if games.contains(where: { $0.id == eventID }) {
                 gamesForStats = games.filter { $0.id == eventID }
+            } else {
+                // The date fetch missed this game — a late start rolls into the
+                // next UTC day, and the tid's date bucket doesn't always agree
+                // with ESPN's. The event ID is all a scoring provider needs
+                // (they fetch summary?event=<id>), so go straight at it rather
+                // than rendering a box score of dashes.
+                print("[DFS-\(sport)] Box scores: \(eventID) not in the \(dateString) fetch — querying the event directly")
+                gamesForStats = [DFSSlateGame(
+                    id: eventID, awayTeam: "", homeTeam: "",
+                    startTime: Date(), state: "post"
+                )]
             }
         }
+        guard !gamesForStats.isEmpty else { return }
 
         // Use the correct sport-specific scoring provider. `self.scoringProvider`
         // is whichever sport's VM is calling this — when NBA VM calls
