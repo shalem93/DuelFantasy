@@ -66,6 +66,10 @@ struct DFSLiveContestView: View {
         guard let tid = viewModel.activeTournamentID else { return false }
         if let expected = expectedTournamentID, expected != tid { return false }
         if let expectedLN = expectedLineupNumber, expectedLN != viewModel.activeLineupNumber { return false }
+        // The active tournament can be right while the FIELD still belongs to
+        // the contest we came from (main slate → single game). Shimmer until
+        // refreshLive replaces it rather than showing a foreign leaderboard.
+        guard viewModel.fieldMatchesActiveTournament else { return false }
         return viewModel.isTournamentReady(tid)
     }
 

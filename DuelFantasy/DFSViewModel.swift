@@ -7394,6 +7394,17 @@ final class DFSViewModel {
     /// key they're filed under (wrong lineup size or wrong game/slate IDs).
     /// Returns true when the cache is empty (no bots = nothing to validate)
     /// or when at least 50% of bots match the tournament's expected shape.
+    /// Whether the field currently in memory actually belongs to the active
+    /// tournament. Views gate on this so a stale field from the PREVIOUS
+    /// contest can never render: navigating main slate → single game showed
+    /// the main slate's bots for ~10s until refreshLive validated and
+    /// regenerated them. Empty is "fine" — the count threshold in
+    /// `isTournamentReady` already holds the shimmer in that case.
+    var fieldMatchesActiveTournament: Bool {
+        guard let tid = activeTournamentID, !fieldEntries.isEmpty else { return true }
+        return botsMatchTournament(fieldEntries, tournamentID: tid)
+    }
+
     private func botsMatchTournament(_ bots: [DFSFieldEntry], tournamentID: String) -> Bool {
         guard let tObj = tournaments.first(where: { $0.id == tournamentID }) else { return true }
         // Size sanity check for small contests. H2H/3-Man/5-Man/10-Man
@@ -7418,6 +7429,11 @@ final class DFSViewModel {
             }
             return Set(players.map(\.id))
         }()
+        // A single-game field can ONLY be verified against that game's pool.
+        // With the pool unavailable, size alone can't tell one 6-player
+        // showdown from another day's — treat it as not-matching so the
+        // caller shimmers/regenerates instead of showing a foreign field.
+        if validIDs.isEmpty && tObj.isSingleGame { return false }
         let runPoolCheck = !validIDs.isEmpty
         let validCount = botsOnly.filter { bot in
             guard bot.playerIDs.count == tObj.lineupSize else { return false }
