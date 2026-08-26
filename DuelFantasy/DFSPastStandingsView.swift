@@ -731,6 +731,8 @@ struct DFSPastStandingsView: View {
                             Text("$\(viewModel.formatSalary(totalSal))")
                                 .font(.caption2.weight(.medium).monospacedDigit())
                                 .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .fixedSize()
                                 .frame(width: 52, alignment: .trailing)
                         } else {
                             Text("-")
@@ -855,6 +857,8 @@ struct DFSPastStandingsView: View {
                             Text("$\(viewModel.formatSalary(sal))")
                                 .font(.system(size: 8, weight: .medium))
                                 .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .fixedSize()
                         }
 
                         if let pct = ownershipByPlayerID[playerID] {
@@ -948,6 +952,8 @@ struct DFSPastStandingsView: View {
                         Text("$\(viewModel.formatSalary(sal))")
                             .font(.system(size: 8, weight: .medium))
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize()
                     }
 
                     if let pct = ownershipByPlayerID[playerID] {
@@ -1043,6 +1049,8 @@ struct DFSPastStandingsView: View {
                         Text("$\(viewModel.formatSalary(sal))")
                             .font(.system(size: 8, weight: .medium))
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize()
                     }
 
                     if let pct = ownershipByPlayerID[playerID] {
@@ -1142,6 +1150,8 @@ struct DFSPastStandingsView: View {
                         Text("$\(viewModel.formatSalary(sal))")
                             .font(.system(size: 8, weight: .medium))
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize()
                     }
                     if let pct = ownershipByPlayerID[playerID] {
                         Text("\(pct)%")
@@ -1244,6 +1254,8 @@ struct DFSPastStandingsView: View {
                         Text("$\(viewModel.formatSalary(sal))")
                             .font(.system(size: 8, weight: .medium))
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize()
                     }
 
                     if let pct = ownershipByPlayerID[playerID] {
@@ -1367,6 +1379,8 @@ struct DFSPastStandingsView: View {
                         Text("$\(viewModel.formatSalary(sal))")
                             .font(.system(size: 8, weight: .medium))
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize()
                     }
 
                     if let pct = ownershipByPlayerID[playerID] {
@@ -1447,6 +1461,8 @@ struct DFSPastStandingsView: View {
                             Text("$\(viewModel.formatSalary(sal))")
                                 .font(.system(size: 8, weight: .medium))
                                 .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .fixedSize()
                         }
 
                         if let pct = ownershipByPlayerID[playerID] {
@@ -1628,6 +1644,8 @@ struct DFSPastStandingsView: View {
                     Text("$\(viewModel.formatSalary(sal))")
                         .font(.system(size: 8, weight: .medium))
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize()
                 }
 
                 if let pct = ownershipByPlayerID[playerID] {
@@ -1697,6 +1715,8 @@ struct DFSPastStandingsView: View {
                     Text("$\(viewModel.formatSalary(sal))")
                         .font(.system(size: 8, weight: .medium))
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize()
                 }
 
                 if let pct = ownershipByPlayerID[playerID] {
@@ -1805,6 +1825,8 @@ struct DFSPastStandingsView: View {
                                 Text("$\(viewModel.formatSalary(sal))")
                                     .font(.system(size: 8, weight: .medium))
                                     .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .fixedSize()
                             }
                             // Show position bonus points if applicable
                             if let s = stats, s.ftm > 0, s.ftm < 51 {
@@ -1905,6 +1927,8 @@ struct DFSPastStandingsView: View {
                 Text("$\(viewModel.formatSalary(displaySalary))")
                     .font(.system(size: 8, weight: .bold))
                     .foregroundStyle(isOverCap ? .red : .secondary)
+                    .lineLimit(1)
+                    .fixedSize()
                     .padding(.leading, 4)
             }
             Spacer()
