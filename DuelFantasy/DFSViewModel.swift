@@ -1778,6 +1778,20 @@ final class DFSViewModel {
 
     /// Returns the lock time for a specific tournament.
     func lockTimeForTournament(_ t: DFSTournament) -> Date {
+        // A tid from an EARLIER slate day is over, full stop. Without this,
+        // a stale entry (yesterday's showdown that never got marked settled
+        // locally) found no matching game in today's slateGames, fell all
+        // the way through to the global `lockTime`, and inherited TODAY's
+        // earliest kickoff — surfacing in My Contests as a phantom
+        // "UPCOMING ... LOCKS AT 1:10 PM" contest with a Withdraw button.
+        if let slateDay = Self.embeddedSlateDay(from: t.id) {
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
+            let today = cal.dateComponents([.year, .month, .day], from: Date())
+            if let todayDate = cal.date(from: today), slateDay < todayDate {
+                return .distantPast
+            }
+        }
         if t.tournamentType == .singleGame, let gid = t.gameID,
            let game = slateGames.first(where: { $0.id == gid }) {
             return game.startTime
@@ -2429,6 +2443,23 @@ final class DFSViewModel {
     /// Fetch the user's entries from Supabase independently of slate loading.
     /// Extracts the sport-date prefix (e.g. "mlb-20260507") from a tournament ID.
     /// This is used to filter entries for the current sport + date.
+    /// The slate day baked into a tournament ID ("mlb-20260825-sg-…" →
+    /// Aug 25, ET midnight). Nil for ID shapes without a date (PGA/NASCAR
+    /// carry an event id instead).
+    static func embeddedSlateDay(from tournamentID: String) -> Date? {
+        let parts = tournamentID.split(separator: "-")
+        guard parts.count >= 2 else { return nil }
+        let token = String(parts[1])
+        guard token.count == 8, token.allSatisfy(\.isNumber),
+              let y = Int(token.prefix(4)),
+              let m = Int(token.dropFirst(4).prefix(2)),
+              let d = Int(token.suffix(2)),
+              (1...12).contains(m), (1...31).contains(d) else { return nil }
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
+        return cal.date(from: DateComponents(year: y, month: m, day: d))
+    }
+
     private func sportDatePrefix(from tournamentID: String) -> String {
         let prefixLen = tournamentID.hasPrefix("ncaam-") ? 6 : (sport.count + 1) // "nba-" = 4, "mlb-" = 4, "nhl-" = 4, "ncaam-" = 6
         let afterPrefix = tournamentID.dropFirst(prefixLen)
@@ -2459,10 +2490,19 @@ final class DFSViewModel {
                 // sports whose slate happens to be available.
                 let sportPrefix = "\(sport.lowercased())-"
                 let recentCutoff = Date().addingTimeInterval(-2 * 24 * 3600)
+                // Prior-day contests are over even when they never got marked
+                // settled locally — surfacing them here is what let yesterday's
+                // showdown reappear as an "upcoming" contest today.
+                var etCal = Calendar(identifier: .gregorian)
+                etCal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
+                let todayET = etCal.date(from: etCal.dateComponents([.year, .month, .day], from: Date()))
                 matched = allUserEntries.filter {
-                    $0.tournamentID.hasPrefix(sportPrefix)
-                    && ($0.submittedAt ?? .distantPast) > recentCutoff
-                    && !settledTournaments.contains($0.tournamentID)
+                    guard $0.tournamentID.hasPrefix(sportPrefix),
+                          ($0.submittedAt ?? .distantPast) > recentCutoff,
+                          !settledTournaments.contains($0.tournamentID) else { return false }
+                    if let day = Self.embeddedSlateDay(from: $0.tournamentID),
+                       let todayET, day < todayET { return false }
+                    return true
                 }
             }
             if !matched.isEmpty {
