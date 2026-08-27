@@ -2437,6 +2437,21 @@ final class DFSViewModel {
         // guard mirrors this.)
         if tournament == nil || (players.isEmpty && singleGamePlayers.isEmpty) {
             await loadSlate(force: false)
+            return
+        }
+        // Yesterday's slate still in memory. Both conditions above are
+        // satisfied by stale state — a leftover tournament plus a leftover
+        // pool — so the sport silently kept showing (or failing to show)
+        // the previous day's slate after midnight. Reload for real.
+        if let tid = tournaments.first?.id,
+           let day = Self.embeddedSlateDay(from: tid) {
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
+            let todayET = cal.date(from: cal.dateComponents([.year, .month, .day], from: Date()))
+            if let todayET, day < todayET {
+                print("[DFS-\(sport)] Slate in memory is from \(tid) — reloading for today")
+                await loadSlate(force: true)
+            }
         }
     }
 
