@@ -506,6 +506,15 @@ struct DFSContestView: View {
         .onChange(of: selectedSport) { _, newSport in
             Task {
                 await refreshAuthAndSync()
+                // Load the slate FIRST. This handler only refreshed, and
+                // refreshLive is a no-op without a slate — so a sport the
+                // serial init pipeline hadn't reached yet showed nothing
+                // until its turn came (or the 2s watchdog fired). Opening My
+                // Contests starts that pipeline across ten sports, which is
+                // why "My Contests, then tap MLB" looked broken while going
+                // straight to MLB (it sorts to the front of the pipeline as
+                // the visible sport) worked. No-op once the slate is loaded.
+                await selectedSportViewModel.loadSlateIfNeeded()
                 switch newSport {
                 case .nba: await viewModel.refreshLive()
                 case .nhl: await nhlViewModel.refreshLive()
