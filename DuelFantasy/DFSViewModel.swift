@@ -3799,8 +3799,13 @@ final class DFSViewModel {
         // showdown fields fade starters too: drop each pitcher from ~30% of
         // bots so pitcher ownership tops out around 70%, not 100%.
         if isSingleGame && effectiveSport == "MLB" && botPool.count > lineupSize + 2 {
+            // 45%, up from 30%: at 30% a pitcher could still reach ~90-100%
+            // ownership because his projection dwarfs every batter's, so the
+            // bots that COULD draft him nearly all did. Fading each starter
+            // from ~45% of fields caps him near 55% and forces real lineup
+            // diversity, which is what a DK showdown field actually looks like.
             for p in botPool where p.position == "SP" || p.position == "RP" {
-                if Double.random(in: 0...1) < 0.30 { sgExcludedIDs.insert(p.id) }
+                if Double.random(in: 0...1) < 0.45 { sgExcludedIDs.insert(p.id) }
             }
         }
         if isSingleGame && botPool.count > lineupSize + 2 {
@@ -4201,13 +4206,19 @@ final class DFSViewModel {
                     // MLB: heavily prefer confirmed starters (in batting order) over bench players.
                     // Players not in the lineup will likely score 0 FPTS.
                     if effectiveSport == "MLB" && mlbHasBattingOrders {
-                        let inLineup = p.battingOrder != nil || p.position == "SP"
+                        let isStartingPitcher = p.position == "SP"
+                        let inLineup = p.battingOrder != nil || isStartingPitcher
                         // Showdown pools are ~20 players for 6 slots, so the
                         // 10x/0.02x split (500x) collapsed the field onto the
                         // same handful. A firm-but-survivable 4x/0.15x still
                         // buries true bench bats without pinning anyone at 97%.
                         if isSingleGame {
-                            w *= inLineup ? 4.0 : 0.15
+                            // Pitchers already dominate on projection alone
+                            // (30+ FPTS vs a batter's ~8). Giving them the
+                            // announced-lineup boost on top double-counted the
+                            // same fact and pinned both starters at 100%.
+                            // Neutral for them; batters still get the boost.
+                            w *= isStartingPitcher ? 1.0 : (inLineup ? 4.0 : 0.15)
                         } else {
                             w *= inLineup ? 10.0 : 0.02
                         }
