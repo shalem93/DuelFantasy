@@ -7589,7 +7589,20 @@ final class DFSViewModel {
     /// Fetches ESPN box score data for a past tournament date, caching the result.
     /// Also resolves any remaining "nba-" player IDs via the ESPN athlete endpoint.
     func loadPastTournamentBoxScores(tournamentId: String) async {
-        guard pastTournamentStatsLoaded != tournamentId else { return }
+        // Re-attempt when the previous pass produced nothing usable. The flag
+        // alone latched a single failed fetch for the whole session: standings
+        // loading calls this early (to repair zero-point players), and if that
+        // attempt came back empty, the view's own call returned immediately and
+        // the box score stayed blank until app restart.
+        if pastTournamentStatsLoaded == tournamentId {
+            let lineupIDs = Set(pastTournamentResultRecords.prefix(25).flatMap(\.lineupPlayerIDs))
+            let hasRealStats = lineupIDs.contains { pid in
+                guard let row = pastTournamentPlayerStats[pid] else { return false }
+                return !Self.isNameOnlyStatRow(row)
+            }
+            if hasRealStats || lineupIDs.isEmpty { return }
+            print("[DFS-\(sport)] Box scores for \(tournamentId) resolved no stat rows — retrying")
+        }
 
         // Determine the sport and date from the tournament ID prefix
         let sportPrefix: String
@@ -7775,8 +7788,17 @@ final class DFSViewModel {
         }
 
         if let snapshot = try? await providerForStats.fetchScoreSnapshot(for: gamesForStats) {
-            pastTournamentPlayerStats = snapshot.playerLiveStats
-            pastTournamentStatsLoaded = tournamentId
+            // Merge rather than replace, and only latch on a NON-empty result
+            // (matching the PGA/NASCAR paths) so an empty fetch doesn't mark
+            // the contest done and block every later attempt.
+            for (pid, row) in snapshot.playerLiveStats {
+                pastTournamentPlayerStats[pid] = row
+            }
+            if snapshot.playerLiveStats.isEmpty {
+                print("[DFS-\(sport)] Box scores: empty snapshot for \(tournamentId) (games: \(gamesForStats.map(\.id).joined(separator: ",")))")
+            } else {
+                pastTournamentStatsLoaded = tournamentId
+            }
             // Box scores are keyed by ESPN athlete ID, but single-game/showdown
             // lineups reference stub IDs (e.g. wnba-<dkDraftableId>) that don't
             // match — so the stat columns rendered "-" even though FPTS resolved
