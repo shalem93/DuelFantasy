@@ -1784,13 +1784,9 @@ final class DFSViewModel {
         // the way through to the global `lockTime`, and inherited TODAY's
         // earliest kickoff — surfacing in My Contests as a phantom
         // "UPCOMING ... LOCKS AT 1:10 PM" contest with a Withdraw button.
-        if let slateDay = Self.embeddedSlateDay(from: t.id) {
-            var cal = Calendar(identifier: .gregorian)
-            cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
-            let today = cal.dateComponents([.year, .month, .day], from: Date())
-            if let todayDate = cal.date(from: today), slateDay < todayDate {
-                return .distantPast
-            }
+        if let slateDay = Self.embeddedSlateDay(from: t.id),
+           slateDay < Self.currentSlateDayET() {
+            return .distantPast
         }
         if t.tournamentType == .singleGame, let gid = t.gameID,
            let game = slateGames.first(where: { $0.id == gid }) {
@@ -2444,20 +2440,28 @@ final class DFSViewModel {
         // pool — so the sport silently kept showing (or failing to show)
         // the previous day's slate after midnight. Reload for real.
         if let tid = tournaments.first?.id,
-           let day = Self.embeddedSlateDay(from: tid) {
-            var cal = Calendar(identifier: .gregorian)
-            cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
-            let todayET = cal.date(from: cal.dateComponents([.year, .month, .day], from: Date()))
-            if let todayET, day < todayET {
-                print("[DFS-\(sport)] Slate in memory is from \(tid) — reloading for today")
-                await loadSlate(force: true)
-            }
+           let day = Self.embeddedSlateDay(from: tid),
+           day < Self.currentSlateDayET() {
+            print("[DFS-\(sport)] Slate in memory is from \(tid) — reloading for today")
+            await loadSlate(force: true)
         }
     }
 
     /// Fetch the user's entries from Supabase independently of slate loading.
     /// Extracts the sport-date prefix (e.g. "mlb-20260507") from a tournament ID.
     /// This is used to filter entries for the current sport + date.
+    /// The CURRENT slate day (ET), using the same 4am rollover the slate
+    /// date keys use — a 1am game files under the previous day's slate.
+    /// Comparing against the plain calendar day instead made every sport
+    /// look a day stale between midnight and 4am ET, which force-reloaded
+    /// slates in a loop and made them disappear.
+    static func currentSlateDayET() -> Date {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
+        let shifted = Date().addingTimeInterval(-4 * 3600)
+        return cal.startOfDay(for: shifted)
+    }
+
     /// The slate day baked into a tournament ID ("mlb-20260825-sg-…" →
     /// Aug 25, ET midnight). Nil for ID shapes without a date (PGA/NASCAR
     /// carry an event id instead).
@@ -2508,15 +2512,13 @@ final class DFSViewModel {
                 // Prior-day contests are over even when they never got marked
                 // settled locally — surfacing them here is what let yesterday's
                 // showdown reappear as an "upcoming" contest today.
-                var etCal = Calendar(identifier: .gregorian)
-                etCal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
-                let todayET = etCal.date(from: etCal.dateComponents([.year, .month, .day], from: Date()))
+                let currentSlateDay = Self.currentSlateDayET()
                 matched = allUserEntries.filter {
                     guard $0.tournamentID.hasPrefix(sportPrefix),
                           ($0.submittedAt ?? .distantPast) > recentCutoff,
                           !settledTournaments.contains($0.tournamentID) else { return false }
                     if let day = Self.embeddedSlateDay(from: $0.tournamentID),
-                       let todayET, day < todayET { return false }
+                       day < currentSlateDay { return false }
                     return true
                 }
             }
