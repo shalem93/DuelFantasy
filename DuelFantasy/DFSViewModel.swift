@@ -7473,6 +7473,27 @@ final class DFSViewModel {
     var pastTournamentPlayerStats: [String: DFSPlayerLiveStats] = [:]
     var pastTournamentSlateSalaries: [String: Int] = [:]  // tournament-level salary map for fallback
     private var pastTournamentStatsLoaded: String? = nil  // tournament ID for which stats were loaded
+
+    /// Event IDs whose summary fetch just failed, shared across every sport
+    /// VM. ESPN rate-limits: each of the 13 VMs runs the same past-contest
+    /// sweep, so one stale contest becomes 13 identical summary requests, and
+    /// a burst of those gets EVERY subsequent request refused — including the
+    /// live slate's. Re-requesting a known-failing event only deepens the
+    /// hole, so back off for a while.
+    @ObservationIgnored nonisolated(unsafe) private static var failedEventFetches: [String: Date] = [:]
+    private static let failedEventCooldown: TimeInterval = 10 * 60
+
+    static func markEventFetchFailed(_ eventID: String) {
+        failedEventFetches[eventID] = Date()
+    }
+    static func isEventFetchCoolingDown(_ eventID: String) -> Bool {
+        guard let at = failedEventFetches[eventID] else { return false }
+        if Date().timeIntervalSince(at) > failedEventCooldown {
+            failedEventFetches.removeValue(forKey: eventID)
+            return false
+        }
+        return true
+    }
     private var settlingInProgress: Set<String> = []  // tournament IDs currently being settled (prevents races)
     /// Contests already re-settled once this session by the quality-check
     /// self-heal. A second failed check accepts the data instead of
@@ -7594,6 +7615,14 @@ final class DFSViewModel {
         // loading calls this early (to repair zero-point players), and if that
         // attempt came back empty, the view's own call returned immediately and
         // the box score stayed blank until app restart.
+        // Stats from a DIFFERENT contest must not linger: aliasPastStatsByName
+        // matches by NAME across the whole field, so another game's rows get
+        // grafted onto this contest's players (thousands of bogus aliases,
+        // batters showing another game's 0-for-3). Merging was only ever meant
+        // to preserve rows within the SAME contest.
+        if pastTournamentStatsLoaded != tournamentId, pastTournamentStatsLoaded != nil {
+            pastTournamentPlayerStats.removeAll()
+        }
         if pastTournamentStatsLoaded == tournamentId {
             let lineupIDs = Set(pastTournamentResultRecords.prefix(25).flatMap(\.lineupPlayerIDs))
             let hasRealStats = lineupIDs.contains { pid in
@@ -7758,6 +7787,7 @@ final class DFSViewModel {
                 // with ESPN's. The event ID is all a scoring provider needs
                 // (they fetch summary?event=<id>), so go straight at it rather
                 // than rendering a box score of dashes.
+                if Self.isEventFetchCoolingDown(eventID) { return }
                 print("[DFS-\(sport)] Box scores: \(eventID) not in the \(dateString) fetch — querying the event directly")
                 gamesForStats = [DFSSlateGame(
                     id: eventID, awayTeam: "", homeTeam: "",
@@ -7795,6 +7825,7 @@ final class DFSViewModel {
                 pastTournamentPlayerStats[pid] = row
             }
             if snapshot.playerLiveStats.isEmpty {
+                for g in gamesForStats { Self.markEventFetchFailed(g.id) }
                 print("[DFS-\(sport)] Box scores: empty snapshot for \(tournamentId) (games: \(gamesForStats.map(\.id).joined(separator: ",")))")
             } else {
                 pastTournamentStatsLoaded = tournamentId
