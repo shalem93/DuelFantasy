@@ -1873,7 +1873,16 @@ final class DFSViewModel {
     /// on a Monday while the upcoming RBC slate hasn't loaded yet.
     var lockedTournaments: [DFSTournament] {
         let now = Date()
-        return tournaments.filter { now >= lockTimeForTournament($0) && !isTournamentSettledOrSibling($0.id) }
+        let currentDay = Self.currentSlateDayET()
+        return tournaments.filter { t in
+            guard now >= lockTimeForTournament(t), !isTournamentSettledOrSibling(t.id) else { return false }
+            // A contest from an EARLIER slate day is finished, not live. It
+            // reports as locked (correctly), but listing it under "LIVE Active
+            // Contests" made yesterday's KC @ TOR look like tonight's 7:07pm
+            // game sitting at 0.0 FPTS. Those belong to the settle sweep.
+            if let day = Self.embeddedSlateDay(from: t.id), day < currentDay { return false }
+            return true
+        }
     }
 
     /// Whether the slate is partially locked (some games started, some haven't).
