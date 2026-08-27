@@ -820,7 +820,10 @@ struct DFSPastStandingsView: View {
             let name = resolvePlayerName(storedName: storedName, playerID: playerID)
             let isMVP = isSingleGame && index == 0
             let fpts = perPlayerPts[playerID] ?? 0
-            let stats = viewModel.pastTournamentPlayerStats[playerID]
+            let rawStats = viewModel.pastTournamentPlayerStats[playerID]
+            // A name-only placeholder carries filler zeros, not a real
+            // box-score line — render it as missing data (dashes).
+            let stats = DFSViewModel.isNameOnlyStatRow(rawStats) ? nil : rawStats
             // Classic lineups are stored in roster-slot order, so label each
             // row by its SLOT (QB/RB/.../FLEX/DST), not the player's own
             // position — pre-fix bot lineups may hold a mismatched player,
@@ -929,7 +932,10 @@ struct DFSPastStandingsView: View {
             let name = resolvePlayerName(storedName: storedName, playerID: playerID)
             let isMVP = isSingleGame && index == 0
             let fpts = perPlayerPts[playerID] ?? 0  // already includes 1.5x MVP multiplier from settlement
-            let stats = viewModel.pastTournamentPlayerStats[playerID]
+            let rawStats = viewModel.pastTournamentPlayerStats[playerID]
+            // A name-only placeholder carries filler zeros, not a real
+            // box-score line — render it as missing data (dashes).
+            let stats = DFSViewModel.isNameOnlyStatRow(rawStats) ? nil : rawStats
             let bbPos = slotPosition(for: playerID)
             let slotLabel = isMVP ? "MVP" : (isSingleGame ? "FLEX" : (bbPos.isEmpty ? "\(index + 1)" : bbPos))
             let isWideSlot = isMVP || slotLabel == "FLEX" || slotLabel.count > 2
@@ -1030,7 +1036,10 @@ struct DFSPastStandingsView: View {
             let storedName = index < playerNames.count ? playerNames[index] : playerID
             let name = resolvePlayerName(storedName: storedName, playerID: playerID)
             let fpts = perPlayerPts[playerID] ?? 0
-            let stats = viewModel.pastTournamentPlayerStats[playerID]
+            let rawStats = viewModel.pastTournamentPlayerStats[playerID]
+            // A name-only placeholder carries filler zeros, not a real
+            // box-score line — render it as missing data (dashes).
+            let stats = DFSViewModel.isNameOnlyStatRow(rawStats) ? nil : rawStats
 
             HStack(spacing: 0) {
                 HStack(spacing: 4) {
@@ -1133,7 +1142,10 @@ struct DFSPastStandingsView: View {
             let storedName = index < playerNames.count ? playerNames[index] : playerID
             let name = resolvePlayerName(storedName: storedName, playerID: playerID)
             let fpts = perPlayerPts[playerID] ?? 0
-            let stats = viewModel.pastTournamentPlayerStats[playerID]
+            let rawStats = viewModel.pastTournamentPlayerStats[playerID]
+            // A name-only placeholder carries filler zeros, not a real
+            // box-score line — render it as missing data (dashes).
+            let stats = DFSViewModel.isNameOnlyStatRow(rawStats) ? nil : rawStats
 
             HStack(spacing: 0) {
                 HStack(spacing: 4) {
@@ -1221,7 +1233,10 @@ struct DFSPastStandingsView: View {
             let name = resolvePlayerName(storedName: storedName, playerID: playerID)
             let isMVP = isSingleGame && index == 0
             let fpts = perPlayerPts[playerID] ?? 0
-            let stats = viewModel.pastTournamentPlayerStats[playerID]
+            let rawStats = viewModel.pastTournamentPlayerStats[playerID]
+            // A name-only placeholder carries filler zeros, not a real
+            // box-score line — render it as missing data (dashes).
+            let stats = DFSViewModel.isNameOnlyStatRow(rawStats) ? nil : rawStats
             let slotLabel = isMVP ? "MVP" : (isSingleGame ? "FLEX" : (stats?.minutes.contains("GK") == true ? "GK" : ""))
             let isWideSlot = isMVP || slotLabel == "FLEX" || slotLabel == "GK"
 
@@ -1357,7 +1372,10 @@ struct DFSPastStandingsView: View {
             let name = resolvePlayerName(storedName: storedName, playerID: playerID)
             let fpts = perPlayerPts[playerID] ?? 0  // already includes 1.5x MVP multiplier from settlement
             let isMVP = isSingleGame && index == 0
-            let stats = viewModel.pastTournamentPlayerStats[playerID]
+            let rawStats = viewModel.pastTournamentPlayerStats[playerID]
+            // A name-only placeholder carries filler zeros, not a real
+            // box-score line — render it as missing data (dashes).
+            let stats = DFSViewModel.isNameOnlyStatRow(rawStats) ? nil : rawStats
             let slot = isMVP ? "MVP" : (skaterIdx < skaterSlots.count ? skaterSlots[skaterIdx] : "FLEX")
             let isWideSlotExp = isMVP || slot.count > 2
 
@@ -1441,7 +1459,10 @@ struct DFSPastStandingsView: View {
                 let storedName = index < playerNames.count ? playerNames[index] : playerID
                 let name = resolvePlayerName(storedName: storedName, playerID: playerID)
                 let fpts = perPlayerPts[playerID] ?? 0
-                let stats = viewModel.pastTournamentPlayerStats[playerID]
+                let rawStats = viewModel.pastTournamentPlayerStats[playerID]
+                // A name-only placeholder carries filler zeros, not a real
+                // box-score line — render it as missing data (dashes).
+                let stats = DFSViewModel.isNameOnlyStatRow(rawStats) ? nil : rawStats
                 let isGoalieMVP = isSingleGame && index == 0
 
                 HStack(spacing: 0) {
@@ -1563,7 +1584,10 @@ struct DFSPastStandingsView: View {
                 let storedName = index < playerNames.count ? playerNames[index] : playerID
                 let name = resolvePlayerName(storedName: storedName, playerID: playerID)
                 let fpts = perPlayerPts[playerID] ?? 0
-                let stats = viewModel.pastTournamentPlayerStats[playerID]
+                let rawStats = viewModel.pastTournamentPlayerStats[playerID]
+                // A name-only placeholder carries filler zeros, not a real
+                // box-score line — render it as missing data (dashes).
+                let stats = DFSViewModel.isNameOnlyStatRow(rawStats) ? nil : rawStats
 
                 mlbBatterRow(index: index, name: name, playerID: playerID, stats: stats, fpts: fpts, record: record)
             }
@@ -1596,7 +1620,10 @@ struct DFSPastStandingsView: View {
                 let storedName = index < playerNames.count ? playerNames[index] : playerID
                 let name = resolvePlayerName(storedName: storedName, playerID: playerID)
                 let fpts = perPlayerPts[playerID] ?? 0
-                let stats = viewModel.pastTournamentPlayerStats[playerID]
+                let rawStats = viewModel.pastTournamentPlayerStats[playerID]
+                // A name-only placeholder carries filler zeros, not a real
+                // box-score line — render it as missing data (dashes).
+                let stats = DFSViewModel.isNameOnlyStatRow(rawStats) ? nil : rawStats
 
                 mlbPitcherRow(index: index, name: name, playerID: playerID, stats: stats, fpts: fpts, record: record)
             }
@@ -1788,7 +1815,10 @@ struct DFSPastStandingsView: View {
             let storedName = index < playerNames.count ? playerNames[index] : playerID
             let name = resolvePlayerName(storedName: storedName, playerID: playerID)
             let fpts = perPlayerPts[playerID] ?? 0
-            let stats = viewModel.pastTournamentPlayerStats[playerID]
+            let rawStats = viewModel.pastTournamentPlayerStats[playerID]
+            // A name-only placeholder carries filler zeros, not a real
+            // box-score line — render it as missing data (dashes).
+            let stats = DFSViewModel.isNameOnlyStatRow(rawStats) ? nil : rawStats
 
             HStack(spacing: 0) {
                 HStack(spacing: 4) {

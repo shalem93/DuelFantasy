@@ -7809,7 +7809,9 @@ final class DFSViewModel {
         for record in pastTournamentResultRecords {
             let ids = record.lineupPlayerIDs
             let names = record.lineupPlayerNames
-            for (i, pid) in ids.enumerated() where pastTournamentPlayerStats[pid] == nil {
+            for (i, pid) in ids.enumerated()
+                where pastTournamentPlayerStats[pid] == nil
+                    || pastTournamentPlayerStats[pid]?.extraStats?["NAMEONLY"] == 1 {
                 let nm = i < names.count ? names[i] : ""
                 guard !nm.isEmpty, let s = byName[Self.statNameKey(nm)] else { continue }
                 pastTournamentPlayerStats[pid] = s
@@ -7817,6 +7819,12 @@ final class DFSViewModel {
             }
         }
         if aliased > 0 { print("[DFS] aliased \(aliased) box-score stat line(s) by name (stub→ESPN ID mismatch)") }
+    }
+
+    /// Whether a stat row is a name-only placeholder (see
+    /// resolveUnresolvedPlayerNames) rather than a real box-score line.
+    static func isNameOnlyStatRow(_ s: DFSPlayerLiveStats?) -> Bool {
+        s?.extraStats?["NAMEONLY"] == 1
     }
 
     /// Fetch individual athlete names from ESPN for unresolved player IDs.
@@ -7895,6 +7903,11 @@ final class DFSViewModel {
                     // Mark goalies with minutes="G" so the view can detect them
                     let minutesMarker = (posAbbr?.uppercased() == "G") ? "G" : ""
                     pastTournamentPlayerStats[pid] = DFSPlayerLiveStats(
+                        // NAMEONLY: this row exists only to carry a resolved
+                        // display name — every stat is a filler zero. Marked so
+                        // the box score renders dashes instead of a fake 0-for-0
+                        // line, and so real stats can still alias over it.
+                        extraStats: ["NAMEONLY": 1],
                         name: name, points: 0, rebounds: 0, assists: 0,
                         steals: 0, blocks: 0, turnovers: 0, minutes: minutesMarker,
                         fgm: 0, fga: 0, threePM: 0, threePA: 0, ftm: 0, fta: 0,
@@ -7987,6 +8000,11 @@ final class DFSViewModel {
                 for (pid, name, posAbbr) in matches {
                     let minutesMarker = (posAbbr.uppercased() == "G") ? "G" : ""
                     pastTournamentPlayerStats[pid] = DFSPlayerLiveStats(
+                        // NAMEONLY: this row exists only to carry a resolved
+                        // display name — every stat is a filler zero. Marked so
+                        // the box score renders dashes instead of a fake 0-for-0
+                        // line, and so real stats can still alias over it.
+                        extraStats: ["NAMEONLY": 1],
                         name: name, points: 0, rebounds: 0, assists: 0,
                         steals: 0, blocks: 0, turnovers: 0, minutes: minutesMarker,
                         fgm: 0, fga: 0, threePM: 0, threePA: 0, ftm: 0, fta: 0,
