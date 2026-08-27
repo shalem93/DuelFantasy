@@ -3977,10 +3977,23 @@ nonisolated struct ESPNMLBDFSLiveScoringProvider: DFSLiveScoringProvider, Sendab
                         return nil
                     }
 
-                    guard let (data, response) = try? await self.session.data(from: url),
+                    // Log WHY it failed. "Failed to fetch" alone can't tell a
+                    // rate limit (429/403) from a timeout or a bad payload,
+                    // which is exactly what you need to know when every
+                    // request starts failing at once.
+                    var failureReason = "unknown"
+                    var fetched: (Data, URLResponse)?
+                    do { fetched = try await self.session.data(from: url) }
+                    catch { failureReason = "transport: \(error.localizedDescription)" }
+                    if let http = fetched?.1 as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                        failureReason = "HTTP \(http.statusCode)"
+                    } else if fetched != nil, failureReason == "unknown" {
+                        failureReason = "unparseable payload"
+                    }
+                    guard let (data, response) = fetched,
                           let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
                           let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                        print("[MLB-Score] Failed to fetch summary for event \(game.id)")
+                        print("[MLB-Score] Failed to fetch summary for event \(game.id) — \(failureReason)")
                         return nil
                     }
 

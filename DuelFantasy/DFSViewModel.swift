@@ -7483,6 +7483,21 @@ final class DFSViewModel {
     @ObservationIgnored nonisolated(unsafe) private static var failedEventFetches: [String: Date] = [:]
     private static let failedEventCooldown: TimeInterval = 10 * 60
 
+    /// Box scores for SETTLED contests, shared across every sport VM and keyed
+    /// by tournament ID. A finished game's box score is immutable, so the
+    /// past-contest sweep — which all 13 VMs run — should cost one ESPN fetch
+    /// per contest per session instead of 13 (and a fresh one every cycle).
+    @ObservationIgnored nonisolated(unsafe) private static var pastBoxScoreCache: [String: [String: DFSPlayerLiveStats]] = [:]
+
+    static func cachedPastBoxScore(_ tournamentID: String) -> [String: DFSPlayerLiveStats]? {
+        pastBoxScoreCache[tournamentID]
+    }
+    static func cachePastBoxScore(_ tournamentID: String, _ rows: [String: DFSPlayerLiveStats]) {
+        guard !rows.isEmpty else { return }
+        if pastBoxScoreCache.count > 60 { pastBoxScoreCache.removeAll() }
+        pastBoxScoreCache[tournamentID] = rows
+    }
+
     static func markEventFetchFailed(_ eventID: String) {
         failedEventFetches[eventID] = Date()
     }
@@ -7622,6 +7637,12 @@ final class DFSViewModel {
         // to preserve rows within the SAME contest.
         if pastTournamentStatsLoaded != tournamentId, pastTournamentStatsLoaded != nil {
             pastTournamentPlayerStats.removeAll()
+        }
+        if let cached = Self.cachedPastBoxScore(tournamentId) {
+            for (pid, row) in cached { pastTournamentPlayerStats[pid] = row }
+            pastTournamentStatsLoaded = tournamentId
+            aliasPastStatsByName()
+            return
         }
         if pastTournamentStatsLoaded == tournamentId {
             let lineupIDs = Set(pastTournamentResultRecords.prefix(25).flatMap(\.lineupPlayerIDs))
@@ -7829,6 +7850,7 @@ final class DFSViewModel {
                 print("[DFS-\(sport)] Box scores: empty snapshot for \(tournamentId) (games: \(gamesForStats.map(\.id).joined(separator: ",")))")
             } else {
                 pastTournamentStatsLoaded = tournamentId
+                Self.cachePastBoxScore(tournamentId, snapshot.playerLiveStats)
             }
             // Box scores are keyed by ESPN athlete ID, but single-game/showdown
             // lineups reference stub IDs (e.g. wnba-<dkDraftableId>) that don't
