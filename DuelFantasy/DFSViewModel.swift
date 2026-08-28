@@ -5804,6 +5804,39 @@ final class DFSViewModel {
                 // the server with garbage that every device then adopts.
                 // Keep it local-only and log the pool so the collapse is
                 // diagnosable from the console.
+                // SINGLE-GAME: every bot player must belong to THIS game, and
+                // the field must spend like a real field. A HOU @ NYY showdown
+                // shipped 1,900 bots rostering Mets/Brewers players at $2,000
+                // main-slate prices ($13,000 of a $50,000 cap) — a wrong-pool
+                // field that, once saved and settled, can't be repaired from
+                // the live path at all. Refuse to persist it.
+                if tournament.isSingleGame, let gid = tournament.gameID, !botEntriesToSave.isEmpty {
+                    let gamePool: Set<String> = {
+                        if let sg = singleGamePlayers[gid], !sg.isEmpty { return Set(sg.map(\.id)) }
+                        return Set(players.filter { $0.gameID == gid }.map(\.id))
+                    }()
+                    if !gamePool.isEmpty {
+                        let foreign = botEntriesToSave.prefix(50).filter { bot in
+                            !bot.playerIDs.allSatisfy { gamePool.contains($0) }
+                        }.count
+                        if foreign > 0 {
+                            print("[DFS-\(sport)] NOT saving bot field for \(tid) — \(foreign)/50 sampled bots contain players from another game")
+                            return
+                        }
+                    }
+                    let sample = botEntriesToSave.prefix(50)
+                    let underspent = sample.filter { bot in
+                        let total = bot.playerIDs.enumerated().reduce(0) { sum, pair in
+                            let sal = bot.playerSalaries?[pair.element] ?? salaryLookup[pair.element] ?? 0
+                            return sum + (pair.offset == 0 ? Int(Double(sal) * 1.5) : sal)
+                        }
+                        return total < Int(Double(tournament.salaryCap) * 0.5)
+                    }.count
+                    if !sample.isEmpty, Double(underspent) / Double(sample.count) > 0.5 {
+                        print("[DFS-\(sport)] NOT saving bot field for \(tid) — \(underspent)/\(sample.count) sampled bots spend <50% of cap (wrong/floor-priced pool)")
+                        return
+                    }
+                }
                 let uniqueGenerated = Set(botEntriesToSave.map { $0.playerIDs.sorted().joined(separator: ",") })
                 if botEntriesToSave.count > 2 && uniqueGenerated.count <= botEntriesToSave.count / 2 {
                     print("[DFS-\(sport)] NOT saving bot field for \(tid) — generated field is degenerate (\(uniqueGenerated.count)/\(botEntriesToSave.count) unique; pool=\(activePlayers.count) players)")
