@@ -3288,6 +3288,16 @@ final class DFSViewModel {
                 ? t.gameID
                 : slateGames.min(by: { $0.startTime < $1.startTime })?.id
             guard let gid = gatingGameID else { return true } // slate not ready
+            // Official XIs drop ~60-75 minutes before kickoff. If the gating
+            // game is further out than that, ANY confirmed flags in the pool
+            // are stale or false (yesterday's finished slate still in memory
+            // marked 154 "confirmed" starters at 6:51pm for games kicking
+            // the NEXT MORNING — which released this gate and ground out a
+            // 2000-bot field mid-scroll). Time gates what flags cannot.
+            if let g = slateGames.first(where: { $0.id == gid }),
+               g.startTime.timeIntervalSinceNow > 75 * 60 {
+                return true
+            }
             let gamePlayers = players.filter { $0.gameID == gid }
             guard !gamePlayers.isEmpty else { return true }
             let gameTeams = Set(gamePlayers.map(\.team)).subtracting([""])
@@ -5366,8 +5376,17 @@ final class DFSViewModel {
                                 let isSoccerLeague = sport == "EPL" || sport == "UCL" || sport == "WC"
                                 let confirmedIDs = Set(players.filter { $0.isConfirmedActive }.map(\.id))
                                 let confirmedAvailable = confirmedIDs.count >= 18
+                                // XIs only exist inside the ~75-minute
+                                // pre-kickoff window. Outside it, "confirmed"
+                                // players are a stale pool's finished games —
+                                // exactly what tricked this heal into
+                                // discarding tomorrow's field and regenerating
+                                // 2000 bots during a lobby scroll.
+                                let now = Date()
+                                let nextKickoff = slateGames.map(\.startTime).filter { $0 > now.addingTimeInterval(-30 * 60) }.min()
+                                let xiWindowOpen = nextKickoff.map { $0.timeIntervalSince(now) < 75 * 60 } ?? false
                                 let alreadyRegenerated = botFieldRegeneratedThisSession.contains(tournament.id)
-                                if isSoccerLeague && confirmedAvailable && !alreadyRegenerated {
+                                if isSoccerLeague && xiWindowOpen && confirmedAvailable && !alreadyRegenerated {
                                     var nonConfirmedCount = 0
                                     for bot in bots.prefix(50) {
                                         let nonConf = bot.playerIDs.filter { !confirmedIDs.contains($0) }.count
