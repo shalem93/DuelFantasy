@@ -9,6 +9,7 @@ struct BestBallLeagueDetailView: View {
     @State private var selectedMatchup: BestBallMatchup? = nil
     @State private var settingsLeague: BestBallLeague? = nil  // non-nil triggers sheet
     @State private var showJoinCodePrompt: Bool = false
+    @State private var showRankingsSheet: Bool = false
     @State private var joinCodeInput: String = ""
 
     enum LeagueTab: String, CaseIterable {
@@ -418,6 +419,31 @@ struct BestBallLeagueDetailView: View {
                         .background((remaining <= 120 ? Color.orange : brandPurple).opacity(0.10))
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
+                }
+
+                // Player rankings preview — lets everyone waiting in the
+                // lobby study the same board the draft will use.
+                Button {
+                    Haptics.light()
+                    showRankingsSheet = true
+                } label: {
+                    HStack {
+                        Image(systemName: "list.number")
+                        Text("View Player Rankings")
+                            .font(.subheadline.weight(.semibold))
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(14)
+                    .background(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .shadow(color: .black.opacity(0.05), radius: 6, y: 3)
+                }
+                .buttonStyle(.plain)
+                .sheet(isPresented: $showRankingsSheet) {
+                    BestBallRankingsSheet(viewModel: viewModel)
                 }
 
                 // Action buttons
@@ -1169,6 +1195,93 @@ private struct CommishSettingsSheet: View {
             .background(.white)
             .clipShape(RoundedRectangle(cornerRadius: 14))
             .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
+        }
+    }
+}
+
+
+// MARK: - Pre-Draft Player Rankings Sheet
+
+/// Top-200 draft board preview for people waiting in the lobby — same
+/// provider and same ordering as the draft room's Available list.
+private struct BestBallRankingsSheet: View {
+    @Bindable var viewModel: BestBallViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var searchText = ""
+
+    private var ranked: [BestBallPlayer] {
+        let sport = viewModel.currentLeague?.sport ?? ""
+        var pool = viewModel.availablePlayers
+        if sport == "NFL" {
+            // Draft board convention: market ADP first, projections fallback.
+            let use2QB = (viewModel.currentLeague?.nflSflexStarters ?? 0) > 0
+            pool.sort { a, b in
+                let aADP = (use2QB ? a.adp2QB : a.adpPPR) ?? 999
+                let bADP = (use2QB ? b.adp2QB : b.adpPPR) ?? 999
+                if aADP != bADP { return aADP < bADP }
+                return a.projectedPoints > b.projectedPoints
+            }
+        } else {
+            pool.sort { $0.projectedPoints > $1.projectedPoints }
+        }
+        let top = Array(pool.prefix(200))
+        guard !searchText.isEmpty else { return top }
+        let q = searchText.lowercased()
+        return top.filter { $0.name.lowercased().contains(q) || $0.team.lowercased().contains(q) }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if viewModel.availablePlayers.isEmpty {
+                    ProgressView("Loading rankings…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List {
+                        ForEach(Array(ranked.enumerated()), id: \.element.id) { index, player in
+                            HStack(spacing: 10) {
+                                Text("\(index + 1)")
+                                    .font(.caption.weight(.bold).monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 30, alignment: .trailing)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(player.name)
+                                        .font(.subheadline.weight(.medium))
+                                        .lineLimit(1)
+                                    Text("\(player.team) · \(player.position)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text(String(format: "%.0f", player.projectedPoints * bbGamesPerSeason(player.sport)))
+                                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                                    .foregroundStyle(Color(red: 0.48, green: 0.23, blue: 0.93))
+                            }
+                        }
+                    }
+                    .listStyle(.plain)
+                    .searchable(text: $searchText, prompt: "Search players or teams")
+                }
+            }
+            .navigationTitle("Player Rankings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .task { await viewModel.loadPlayerRankingsIfNeeded() }
+        }
+    }
+
+    private func bbGamesPerSeason(_ sport: String) -> Double {
+        switch sport {
+        case "NFL": return 17
+        case "CFB": return 12
+        case "NBA": return 82
+        case "MLB": return 162
+        case "EPL": return 38
+        default: return 17
         }
     }
 }

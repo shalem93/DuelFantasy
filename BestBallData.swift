@@ -1556,14 +1556,30 @@ nonisolated struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
         // used to short-circuit the fallback.
         var fetchedCategories: [[String: Any]]?
         var fetchedSeason: Int?
+        // Pick the season with the DENSER leaders board, not merely the first
+        // non-empty one. A week into a new CFB season the current-year board
+        // already "exists" (46 thin entries from the handful of teams that
+        // played) — first-non-empty locked onto it, so ~90% of the pool
+        // (including consensus #1 Jeremiah Smith, who hadn't played yet) fell
+        // through to the compressed team-rating fallback, ties at the ceiling
+        // ("121, 121, 121…") outranked real last-season producers (Cam Cook
+        // at 23), and the AVG lookup pointed at current-season stats that 404
+        // for everyone — the all-dashes column. Last season's full board is
+        // the meaningful ranking until the new year has real volume.
+        var best: (cats: [[String: Any]], season: Int, count: Int)?
         for season in [primarySeason, fallbackSeason] {
-            if let data = await fetchLeadersData(sport: sport, league: league, season: season),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let cats = json["categories"] as? [[String: Any]], !cats.isEmpty {
-                fetchedCategories = cats
-                fetchedSeason = season
-                break
+            guard let data = await fetchLeadersData(sport: sport, league: league, season: season),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let cats = json["categories"] as? [[String: Any]], !cats.isEmpty else { continue }
+            let leaderCount = cats.reduce(0) { $0 + (($1["leaders"] as? [[String: Any]])?.count ?? 0) }
+            if leaderCount > (best?.count ?? 0) {
+                best = (cats, season, leaderCount)
             }
+        }
+        if let best {
+            fetchedCategories = best.cats
+            fetchedSeason = best.season
+            print("[BestBall] \(sportName) leaders: using season \(best.season) (\(best.count) leaders)")
         }
 
         guard let categories = fetchedCategories else { return }
@@ -2059,9 +2075,15 @@ nonisolated struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
             // Non-leaders: low-end regulars and bench bats
             // Leader batters bottom out ~31, so cap fallback below that
             floor = 2.0; ceiling = 30.0
-        case "NFL", "CFB":
+        case "NFL":
             // Non-leaders: low-tier starters / backups
             floor = 2.0; ceiling = 10.0
+        case "CFB":
+            // CFB's leaders board is 100-deep per category, so anyone NOT on
+            // it is a true unknown. The old 10.0 ceiling put unknowns at ~120
+            // season points, above many real producers; 6.0 keeps them under
+            // the proven tier while the jitter still breaks ties.
+            floor = 2.0; ceiling = 6.0
         case "EPL":
             // No per-team ratings endpoint exists for soccer, so ratings
             // are all 0 and non-leaders land at the floor — below the

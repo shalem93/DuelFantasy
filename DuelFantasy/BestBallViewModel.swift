@@ -1900,6 +1900,22 @@ final class BestBallViewModel {
         }
     }
 
+    /// Load the draft player pool for the RANKINGS PREVIEW shown in the
+    /// pre-draft lobby — same provider, same ordering as the draft board
+    /// (ADP-aware for NFL), so what people study while waiting is exactly
+    /// what they'll draft from. No-op once loaded for this league's pool.
+    func loadPlayerRankingsIfNeeded() async {
+        guard let league = currentLeague else { return }
+        let poolKey = "\(league.sport)|\(league.cfbPool ?? "all")"
+        if !availablePlayers.isEmpty && availablePlayersKey == poolKey { return }
+        var players = (try? await playerProvider.fetchPlayers(sport: league.sport, cfbPool: league.cfbPool)) ?? []
+        if league.isDingersOnly {
+            players = players.filter { !BestBallLineupConfig.isPitcher($0.position) }
+        }
+        availablePlayers = players
+        availablePlayersKey = poolKey
+    }
+
     /// Team → that day's opponent for the roster view's selected date, so
     /// each row can show "@MNC" / "vs ARS" and a plays-today marker.
     struct BBDayFixture { let opp: String; let home: Bool }
