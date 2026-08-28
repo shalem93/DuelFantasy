@@ -2464,28 +2464,42 @@ final class DFSViewModel {
     /// Comparing against the plain calendar day instead made every sport
     /// look a day stale between midnight and 4am ET, which force-reloaded
     /// slates in a loop and made them disappear.
-    static func currentSlateDayET() -> Date {
+    /// Shared ET calendar — Calendar/TimeZone construction is not free, and
+    /// these helpers sit inside lockTimeForTournament, which the lobby calls
+    /// per tournament per render (EPL: ~45 tournaments). Building calendars
+    /// per call froze lobby scrolling after an entry.
+    nonisolated(unsafe) private static let etCalendar: Calendar = {
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
-        let shifted = Date().addingTimeInterval(-4 * 3600)
-        return cal.startOfDay(for: shifted)
+        return cal
+    }()
+
+    static func currentSlateDayET() -> Date {
+        etCalendar.startOfDay(for: Date().addingTimeInterval(-4 * 3600))
     }
 
     /// The slate day baked into a tournament ID ("mlb-20260825-sg-…" →
     /// Aug 25, ET midnight). Nil for ID shapes without a date (PGA/NASCAR
     /// carry an event id instead).
+    /// Memoized — tids are stable strings and this runs in per-render loops.
+    nonisolated(unsafe) private static var slateDayCache: [String: Date?] = [:]
     static func embeddedSlateDay(from tournamentID: String) -> Date? {
+        if let cached = slateDayCache[tournamentID] { return cached }
+        let result: Date?
         let parts = tournamentID.split(separator: "-")
-        guard parts.count >= 2 else { return nil }
-        let token = String(parts[1])
-        guard token.count == 8, token.allSatisfy(\.isNumber),
-              let y = Int(token.prefix(4)),
-              let m = Int(token.dropFirst(4).prefix(2)),
-              let d = Int(token.suffix(2)),
-              (1...12).contains(m), (1...31).contains(d) else { return nil }
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
-        return cal.date(from: DateComponents(year: y, month: m, day: d))
+        if parts.count >= 2 {
+            let token = String(parts[1])
+            if token.count == 8, token.allSatisfy(\.isNumber),
+               let y = Int(token.prefix(4)),
+               let m = Int(token.dropFirst(4).prefix(2)),
+               let d = Int(token.suffix(2)),
+               (1...12).contains(m), (1...31).contains(d) {
+                result = etCalendar.date(from: DateComponents(year: y, month: m, day: d))
+            } else { result = nil }
+        } else { result = nil }
+        if slateDayCache.count > 500 { slateDayCache.removeAll() }
+        slateDayCache[tournamentID] = result
+        return result
     }
 
     private func sportDatePrefix(from tournamentID: String) -> String {
