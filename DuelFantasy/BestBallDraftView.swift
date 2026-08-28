@@ -696,11 +696,34 @@ struct BestBallDraftView: View {
                     .padding(.vertical, 5)
                     .background(Color.yellow.opacity(0.12))
                     .clipShape(Capsule())
+                    // Long-press a pill and drop it on another to re-prioritize
+                    // the queue (auto-pick takes from the front).
+                    .draggable(player.id)
+                    .dropDestination(for: String.self) { items, _ in
+                        guard let dragged = items.first, dragged != player.id else { return false }
+                        moveQueuedPlayer(dragged, before: player.id)
+                        return true
+                    }
                 }
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 6)
         }
+    }
+
+    /// Reorder the VM-held queue: place `draggedID` at `targetID`'s slot.
+    /// Operates on the RAW queue (which can hold already-picked ids that the
+    /// strip hides) by anchoring on the target's position in it.
+    private func moveQueuedPlayer(_ draggedID: String, before targetID: String) {
+        var queue = viewModel.draftQueue
+        guard let from = queue.firstIndex(of: draggedID),
+              queue.contains(targetID) else { return }
+        queue.remove(at: from)
+        guard let to = queue.firstIndex(of: targetID) else { return }
+        // Dragging left→right lands AFTER the target; right→left lands before.
+        queue.insert(draggedID, at: from <= to ? to + 1 : to)
+        viewModel.draftQueue = queue
+        Haptics.light()
     }
 
     private func teamsInPool() -> [String] {
