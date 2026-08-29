@@ -478,7 +478,10 @@ struct TennisBracketLobbyView: View {
             if let s = p.seed { return "Seed \(s)" }
             return "Unseeded"
         }
-        return "\(p.country) · #\(p.rank)"
+        // Qualifiers outside the rankings top-150 carry rank 0 / no country
+        // (the Nothing Major draw JSON has neither) — render what exists.
+        if p.rank <= 0 { return p.country.isEmpty ? "" : p.country }
+        return p.country.isEmpty ? "#\(p.rank)" : "\(p.country) · #\(p.rank)"
     }
 
     private func playerRow(player: TennisBracketPlayer, slot: String, isSelected: Bool) -> some View {
