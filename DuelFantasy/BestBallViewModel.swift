@@ -353,8 +353,15 @@ final class BestBallViewModel {
             for league in activeH2H {
                 guard let myMembership = memberships.first(where: { $0.leagueId == league.id }) else { continue }
                 let realWeek = BestBallSeasonHelper.currentWeekNumber(for: league.sport)
-                let week = min(league.currentWeek, realWeek)
-                guard week > 0, week <= league.schedule.count else { continue }
+                // Show the CALENDAR week's matchup, not the stored one.
+                // `league.currentWeek` only advances when last week's scoring
+                // runs (someone opening the league), so the hub card sat on
+                // "Wk 1" with week-1 scores after GW2 had already kicked off.
+                // The calendar week is what "this week's matchup" means —
+                // clamped to the schedule so late-season off-by-ones can't
+                // walk past the last week.
+                let week = min(realWeek, league.schedule.count)
+                guard week > 0 else { continue }
 
                 // Find my matchup pair from the schedule
                 let weekPairs = league.schedule[week - 1]

@@ -426,7 +426,9 @@ struct FantasyHubView: View {
                     .foregroundStyle(brandPurple)
                     .clipShape(Capsule())
                 if league.status == "active" {
-                    Text("Wk \(league.currentWeek)/\(league.totalWeeks)")
+                    // Calendar week (from the preview), not the stored
+                    // currentWeek — which lags until last week gets scored.
+                    Text("Wk \(preview?.week ?? league.currentWeek)/\(league.totalWeeks)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 } else {
