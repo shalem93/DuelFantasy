@@ -610,7 +610,7 @@ enum BestBallLineupConfig {
         case "MLB" where isPitcher: return ["IP", "K", "ER", "W", "SV"]
         case "MLB": return ["H", "AB", "HR", "RBI", "R", "BB", "K", "SB"]
         case "NFL", "CFB": return ["PYDS", "PTD", "INT", "RYDS", "RTD", "REC", "RECYDS", "RECTD"]
-        case "EPL": return ["G", "A", "SOT", "SH", "SV", "TKL", "INT", "YC", "RC", "CRS", "PAS", "FD", "FC"]
+        case "EPL": return ["G", "A", "SOT", "SH", "SV", "GA", "CS", "W", "TKL", "INT", "YC", "RC", "CRS", "PAS", "FD", "FC"]
         default: return []
         }
     }
@@ -2816,6 +2816,12 @@ nonisolated struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvi
                 "TKL": Double(tacklesWon), "INT": Double(interceptions),
                 "CRS": Double(crosses), "PAS": Double(accuratePasses),
                 "FD": Double(foulsDrawn), "FC": Double(foulsConceded),
+                // GK/DEF scoring inputs — these were always SCORED (Pickford's
+                // 9.3 = 8 saves − 2 conceded + 3 fouls drawn + passes) but not
+                // surfaced as columns, so goalies looked half-tracked.
+                "GA": Double(goalsAgainst),
+                "CS": (raw.cleanSheet && gameFinal) ? 1 : 0,
+                "W": (raw.teamWon && gameFinal) ? 1 : 0,
             ]
             entries.append((raw.fullID, fpts, lookup))
         }
