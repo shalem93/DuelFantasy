@@ -368,7 +368,7 @@ final class TennisBracketViewModel {
         case .australianOpen: (month, day) = (1, 14)   // Mid January
         case .frenchOpen:     (month, day) = (5, 24)   // Late May (2026: R1 starts Sun May 24)
         case .wimbledon:      (month, day) = (6, 30)   // Late June
-        case .usOpen:         (month, day) = (8, 25)   // Late August
+        case .usOpen:         (month, day) = (8, 30)   // 2026: R1 starts Sun Aug 30
         }
 
         var components = DateComponents()
@@ -993,6 +993,33 @@ final class TennisBracketViewModel {
 
     private func checkStatusTransition() async {
         guard var t = tournament, !t.isSettled else { return }
+
+        // locked → open REOPEN heal: a too-early lockTime estimate (the US
+        // Open was seeded Aug 25 when R1 is Aug 30) flips the row to locked
+        // days before a ball is hit, and nothing ever un-locked it — the
+        // bracket card sat LOCKED with zero results while entries should
+        // still be open. If no match has finished and the CURRENT estimate
+        // says the slam hasn't started, reopen with the corrected lock.
+        if t.status == "locked", results.isEmpty,
+           let corrected = Self.estimatedLockTime(grandSlam: t.grandSlam, year: Int(t.season) ?? Calendar.current.component(.year, from: Date())),
+           corrected > Date() {
+            let reopened = TennisBracketTournament(
+                id: t.id, title: t.title, grandSlam: t.grandSlam, drawType: t.drawType,
+                season: t.season, status: "open", lockTime: corrected,
+                entryCount: t.entryCount, isSettled: false, createdAt: t.createdAt
+            )
+            tournament = reopened
+            t = reopened
+            if let token = accessToken {
+                let record = TennisBracketTournamentRecord(
+                    id: t.id, title: t.title, grandSlam: t.grandSlam.rawValue,
+                    drawType: t.drawType.rawValue, season: t.season,
+                    status: "open", lockTime: corrected
+                )
+                try? await SupabaseService.shared.upsertTennisBracketTournament(record: record, accessToken: token)
+                print("[TennisBracket] Reopened \(t.id) — locked by a stale estimate, R1 hasn't started (new lock \(corrected))")
+            }
+        }
 
         // open → locked: past lock time, or results already exist (slam is underway).
         // The results check handles cases where the stored lockTime estimate was off — once
