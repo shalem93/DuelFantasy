@@ -1018,7 +1018,11 @@ final class BestBallViewModel {
                 if let league = currentLeague {
                     if league.sport == "EPL" { await EPLMatchweekProvider.refreshIfStale() }
                     let realWeek = BestBallSeasonHelper.currentWeekNumber(for: league.sport)
-                    selectedWeek = min(league.currentWeek, realWeek)
+                    // Land on the CALENDAR week, like the hub card. The
+                    // stored currentWeek is a scoring cursor that lags until
+                    // last week gets graded — clamping to it opened the
+                    // league on "Week 1" after gameweek 2 had kicked off.
+                    selectedWeek = min(realWeek, league.totalWeeks)
                     loadMatchupsForWeek(week: selectedWeek, league: league)
 
                     // Also load daily scores for the current week
