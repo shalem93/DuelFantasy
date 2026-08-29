@@ -7716,18 +7716,25 @@ final class DFSViewModel {
         // loading calls this early (to repair zero-point players), and if that
         // attempt came back empty, the view's own call returned immediately and
         // the box score stayed blank until app restart.
+        // Whether this call backs the standings VIEW (vs a background sweep
+        // loading some other contest's scores for repair math). Only the
+        // presenting call may touch the shared render dict — a sweep that
+        // cleared/overwrote it blanked the visible box score to dashes.
+        let isPresenting = presentedStandingsTID == nil || presentedStandingsTID == tournamentId
         // Stats from a DIFFERENT contest must not linger: aliasPastStatsByName
         // matches by NAME across the whole field, so another game's rows get
         // grafted onto this contest's players (thousands of bogus aliases,
         // batters showing another game's 0-for-3). Merging was only ever meant
         // to preserve rows within the SAME contest.
-        if pastTournamentStatsLoaded != tournamentId, pastTournamentStatsLoaded != nil {
+        if isPresenting, pastTournamentStatsLoaded != tournamentId, pastTournamentStatsLoaded != nil {
             pastTournamentPlayerStats.removeAll()
         }
         if let cached = Self.cachedPastBoxScore(tournamentId) {
-            for (pid, row) in cached { pastTournamentPlayerStats[pid] = row }
-            pastTournamentStatsLoaded = tournamentId
-            aliasPastStatsByName()
+            if isPresenting {
+                for (pid, row) in cached { pastTournamentPlayerStats[pid] = row }
+                pastTournamentStatsLoaded = tournamentId
+                aliasPastStatsByName()
+            }
             return
         }
         if pastTournamentStatsLoaded == tournamentId {
@@ -7928,14 +7935,16 @@ final class DFSViewModel {
             // Merge rather than replace, and only latch on a NON-empty result
             // (matching the PGA/NASCAR paths) so an empty fetch doesn't mark
             // the contest done and block every later attempt.
-            for (pid, row) in snapshot.playerLiveStats {
-                pastTournamentPlayerStats[pid] = row
+            if isPresenting {
+                for (pid, row) in snapshot.playerLiveStats {
+                    pastTournamentPlayerStats[pid] = row
+                }
             }
             if snapshot.playerLiveStats.isEmpty {
                 for g in gamesForStats { Self.markEventFetchFailed(g.id) }
                 print("[DFS-\(sport)] Box scores: empty snapshot for \(tournamentId) (games: \(gamesForStats.map(\.id).joined(separator: ",")))")
             } else {
-                pastTournamentStatsLoaded = tournamentId
+                if isPresenting { pastTournamentStatsLoaded = tournamentId }
                 Self.cachePastBoxScore(tournamentId, snapshot.playerLiveStats)
             }
             // Box scores are keyed by ESPN athlete ID, but single-game/showdown
@@ -7943,6 +7952,7 @@ final class DFSViewModel {
             // match — so the stat columns rendered "-" even though FPTS resolved
             // from stored results. Alias the stats onto each lineup player ID by
             // NAME so the PTS/REB/AST line shows regardless of the ID scheme.
+            guard isPresenting else { return }
             aliasPastStatsByName()
 
             // Resolve any player IDs that are still unresolved (not in box scores)
@@ -8179,7 +8189,15 @@ final class DFSViewModel {
         }  // end team batch loop
     }
 
+    /// The tid whose box scores the standings VIEW is currently rendering.
+    /// Background sweeps (settle repair, private-contest scoring) call
+    /// loadPastTournamentBoxScores for OTHER tids on this same VM — they must
+    /// not touch the shared stats dict while a view is reading it, or the
+    /// visible box score blanks to dashes mid-display.
+    private var presentedStandingsTID: String?
+
     func loadPastTournamentStandings(tournamentId: String) async {
+        presentedStandingsTID = tournamentId
         guard let token = accessToken, let userID else { return }
 
         // Check cache first — settled tournaments don't change, use long TTL
@@ -13057,10 +13075,15 @@ final class DFSViewModel {
             return
         }
         await loadPastTournamentBoxScores(tournamentId: contest.parentTournamentID)
+        // Background loads fill the per-tid cache without touching the shared
+        // render dict (which belongs to whatever standings view is open) —
+        // read the cache here, falling back to the dict when we ARE the
+        // presenting context.
+        let statRows = Self.cachedPastBoxScore(contest.parentTournamentID) ?? pastTournamentPlayerStats
         let isSG = contest.parentTournamentID.contains("-sg-")
         var total = 0.0
         for (idx, pid) in entry.lineupPlayerIDs.enumerated() {
-            let pts = pastTournamentPlayerStats[pid]?.fantasyPoints ?? 0
+            let pts = statRows[pid]?.fantasyPoints ?? 0
             total += (isSG && idx == 0) ? pts * 1.5 : pts
         }
         privateContestFinalScores[contest.id] = total
