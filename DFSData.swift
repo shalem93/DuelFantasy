@@ -8105,6 +8105,10 @@ nonisolated struct ESPNPlayerGameLogProvider {
                         "TKL": tackles, "INT": interceptions,
                         "CRS": crosses, "SA": shotAssists, "PAS": accuratePasses,
                         "FD": foulsDrawn, "FC": foulsConceded,
+                        // GK/DEF scoring inputs so the game-log line can show
+                        // WHY a keeper's number moved (−2/GA, +5 CS, +5 win).
+                        "GA": goalsAgainst,
+                        "W": teamWon ? 1 : 0,
                     ],
                     id: eventID,
                     date: dateStr,

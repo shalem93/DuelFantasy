@@ -293,10 +293,18 @@ struct BestBallPlayerDetailSheet: View {
             if g.turnovers > 0 { parts.append("\(g.turnovers) SH") }
             if g.blocks > 0 { parts.append("\(g.blocks) SV") }
             let extras = g.extraStats ?? [:]
+            let isKeeper = player.position == "GK" || g.blocks > 0
+            // Goalkeepers: goals against right after saves, so the line reads
+            // like a keeper's box score ("4 SV · 1 GA · CS · W"). The win
+            // bonus only pays keepers on DK, so only their rows show W.
+            if isKeeper {
+                parts.append("\(extras["GA"] ?? 0) GA")
+            }
             for key in ["TKL", "INT", "CRS", "SA", "PAS", "FD", "FC"] {
                 if let v = extras[key], v > 0 { parts.append("\(v) \(key)") }
             }
             if g.ftm > 0 { parts.append("CS") }
+            if isKeeper, extras["W"] == 1 { parts.append("W") }
             if g.fgm > 0 { parts.append("\(g.fgm) YC") }
             if g.fga > 0 { parts.append("\(g.fga) RC") }
             return parts.isEmpty ? "No stats" : parts.joined(separator: " · ")
