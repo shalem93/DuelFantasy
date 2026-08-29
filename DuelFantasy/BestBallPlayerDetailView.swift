@@ -303,7 +303,9 @@ struct BestBallPlayerDetailSheet: View {
             for key in ["TKL", "INT", "CRS", "SA", "PAS", "FD", "FC"] {
                 if let v = extras[key], v > 0 { parts.append("\(v) \(key)") }
             }
-            if g.ftm > 0 { parts.append("CS") }
+            // Clean sheet only pays GK (+5) and DEF (+3) — don't decorate
+            // mids/forwards with a stat that isn't part of their score.
+            if g.ftm > 0, isKeeper || player.position == "DEF" { parts.append("CS") }
             if isKeeper, extras["W"] == 1 { parts.append("W") }
             if g.fgm > 0 { parts.append("\(g.fgm) YC") }
             if g.fga > 0 { parts.append("\(g.fga) RC") }

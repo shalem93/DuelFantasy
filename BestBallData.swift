@@ -2809,20 +2809,25 @@ nonisolated struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvi
                 cleanSheet: raw.cleanSheet, gameFinal: gameFinal, teamWon: raw.teamWon
             )
 
-            let lookup: [String: Double] = [
+            var lookup: [String: Double] = [
                 "G": Double(goals), "A": Double(assists),
                 "SOT": Double(sot), "SH": Double(shots),
                 "SV": Double(saves), "YC": Double(yc), "RC": Double(rc),
                 "TKL": Double(tacklesWon), "INT": Double(interceptions),
                 "CRS": Double(crosses), "PAS": Double(accuratePasses),
                 "FD": Double(foulsDrawn), "FC": Double(foulsConceded),
-                // GK/DEF scoring inputs — these were always SCORED (Pickford's
-                // 9.3 = 8 saves − 2 conceded + 3 fouls drawn + passes) but not
-                // surfaced as columns, so goalies looked half-tracked.
-                "GA": Double(goalsAgainst),
-                "CS": (raw.cleanSheet && gameFinal) ? 1 : 0,
-                "W": (raw.teamWon && gameFinal) ? 1 : 0,
             ]
+            // GA / CS / W only for positions they SCORE for (the columns
+            // render a dash when the key is absent): GA and the win bonus
+            // are goalkeeper-only, clean sheet pays GK (+5) and DEF (+3).
+            // A forward showing "1 W" implied points he doesn't earn.
+            if raw.position == "GK" {
+                lookup["GA"] = Double(goalsAgainst)
+                lookup["W"] = (raw.teamWon && gameFinal) ? 1 : 0
+            }
+            if raw.position == "GK" || raw.position == "DEF" {
+                lookup["CS"] = (raw.cleanSheet && gameFinal) ? 1 : 0
+            }
             entries.append((raw.fullID, fpts, lookup))
         }
         return entries
