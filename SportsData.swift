@@ -293,6 +293,25 @@ struct CompositeMatchProvider: MatchProvider {
                         guard espnQuotes.count == 2 else { return nil }
                         quotes = espnQuotes
                     }
+                } else if let spreadHome = fixture.spreadHome, spreadHome != 0,
+                          fixture.sportKey.hasPrefix("americanfootball_") {
+                    // DK pulls the MONEYLINE on huge spreads (USC -38.5 over
+                    // SJSU → ML "OFF") but keeps spread and total — skipping
+                    // the game hid it from Pick'em entirely. Estimate a fair
+                    // two-way ML from the spread (logistic, k=9 — calibrated
+                    // against DK's own -31.5 ↔ +3000/-10000 pairing on the
+                    // same slate) so the game renders with winner buttons and
+                    // its REAL margin/total markets attach as usual.
+                    let favProb = min(0.985, 1.0 / (1.0 + exp(-abs(spreadHome) / 9.0)))
+                    let favML = -(favProb / (1.0 - favProb)) * 100.0
+                    let dogML = (favProb / (1.0 - favProb)) * 100.0
+                    let homeFavored = spreadHome < 0
+                    let espnQuotes = rrQuotesFromTwoWayAmericanOdds(
+                        teamA: fixture.awayTeam, oddsA: homeFavored ? dogML : favML,
+                        teamB: fixture.homeTeam, oddsB: homeFavored ? favML : dogML
+                    )
+                    guard espnQuotes.count == 2 else { return nil }
+                    quotes = espnQuotes
                 } else {
                     // No valid odds — skip this game
                     return nil
@@ -832,6 +851,12 @@ nonisolated struct ESPNPropBoardProvider {
 
     static func supportsProps(matchID: String) -> Bool {
         guard let key = sportKeyFromMatchID(matchID) else { return false }
+        // ESPN's DK mirror publishes NO propBets collection for college
+        // football — player props on college athletes are prohibited in many
+        // states, so the board simply doesn't exist (verified: every CFB
+        // event's odds item has propBets: nil while NFL's carries the ref).
+        // Showing the toggle just dead-ended in "No props posted yet".
+        if key == "americanfootball_ncaaf" { return false }
         return !statTypes(forSportKey: key).isEmpty
             || !milestoneTypes(forSportKey: key).isEmpty
             || supportsFirstHalf(sportKey: key)
