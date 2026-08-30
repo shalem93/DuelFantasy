@@ -173,7 +173,11 @@ struct BestBallRosterView: View {
                             let bench = sortedRoster.filter { !starterIDs.contains($0.playerID) }
 
                             ForEach(starterEntries, id: \.pick.id) { entry in
-                                playerRow(pick: entry.pick, isScoring: true, isPitcher: false, slotLabel: entry.slotLabel)
+                                // Slot fillers (roster players holding an
+                                // empty lineup slot mid-week) don't get the
+                                // scoring star until they actually score.
+                                let scoring = scoringPlayerIDs.isEmpty || scoringPlayerIDs.contains(entry.pick.playerID)
+                                playerRow(pick: entry.pick, isScoring: scoring, isPitcher: false, slotLabel: entry.slotLabel)
                                 Divider().padding(.leading, 44)
                             }
 
@@ -625,10 +629,40 @@ struct BestBallRosterView: View {
             points: points,
             constraints: constraints
         )
-        return assigned.compactMap { slot in
+        let assignedEntries: [(pick: BestBallPick, slotLabel: String?)] = assigned.compactMap { slot in
             guard let pick = pickByID[slot.playerID] else { return nil }
             return (pick, slot.label)
         }
+        // Mid-week only some starters have scored, which left the lineup
+        // rendering fewer slots than the league configures (7 rows with the
+        // FLEX slots missing entirely). Walk the canonical slot sequence,
+        // keep each scored starter in its slot, and fill every empty slot
+        // with the best unused roster player (no star until they score).
+        let fullLabels = constraints.flatMap { Array(repeating: $0.label, count: $0.count) }
+        var pool = assignedEntries
+        var used = Set(assignedEntries.map { $0.pick.playerID })
+        var out: [(pick: BestBallPick, slotLabel: String?)] = []
+        for label in fullLabels {
+            if let i = pool.firstIndex(where: { $0.slotLabel == label }) {
+                out.append(pool.remove(at: i))
+                continue
+            }
+            let filler = sortedRoster.first(where: { p in
+                !used.contains(p.playerID) && Self.positionFitsSlot(p.playerPosition, label: label)
+            }) ?? sortedRoster.first(where: { !used.contains($0.playerID) })
+            guard let f = filler else { continue }
+            used.insert(f.playerID)
+            out.append((f, label))
+        }
+        out.append(contentsOf: pool)
+        return out
+    }
+
+    private static func positionFitsSlot(_ position: String, label: String) -> Bool {
+        let norm = label.uppercased()
+        if norm.contains("FLEX") || norm == "UTIL" { return true }
+        let pos = position.uppercased()
+        return pos == norm || pos.hasPrefix(norm) || norm.hasPrefix(pos)
     }
 
     // MARK: - Player Row
