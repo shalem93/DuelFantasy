@@ -696,6 +696,16 @@ final class DFSViewModel {
                 singleGamePlayers[gameID] = converted
                 return converted
             }
+            // This game's players aren't in the loaded pool. Falling through
+            // to the full slate here let SG bot generation draft from EVERY
+            // game — a CFB showdown settled with ~2000 main-slate lineups
+            // whose players all graded DNP (MEM@UNLV, Aug 2026). An empty
+            // pool defers generation until the right players load. Only
+            // fall through when the pool carries no game scoping at all
+            // (UFC-captain-style contests where player gameIDs are absent).
+            if players.contains(where: { $0.gameID != nil }) {
+                return []
+            }
         }
         // Window-scoped slates (NFL Main-sans-SNF, Afternoon/Night Only,
         // and explicit evening slates): filter the pool by the games baked
@@ -6198,6 +6208,18 @@ final class DFSViewModel {
 
         guard snapshot.allGamesFinal else { return }
         guard !settledTournaments.contains(tournament.id) else { return }
+
+        // Never settle against a field that doesn't belong to this tournament.
+        // The live-cache write above already refuses mismatched fields, but the
+        // settle path had no gate: a CFB showdown settled against bots built
+        // from the MAIN slate's pool and persisted ~2000 wrong-game lineups
+        // (MEM@UNLV, Aug 2026) — every foreign player then graded DNP and the
+        // standings' name-resolution storm hammered ESPN. Defer; a later pass
+        // (or the past-settlement sweep) settles once the correct field exists.
+        guard botsMatchTournament(fieldEntries, tournamentID: tournament.id) else {
+            print("[DFS-\(sport)] Skipping settlement of \(tournament.id) — fieldEntries don't match this tournament's pool/shape, deferring")
+            return
+        }
 
         // NEVER settle a contest the user hasn't actually entered. The
         // lobby's default selection is the smallest contest (the -2 H2H),
