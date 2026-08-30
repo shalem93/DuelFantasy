@@ -217,10 +217,11 @@ struct BestBallMatchupView: View {
                 // reads like a standard fantasy box score rather than a
                 // flat FLEX list.
                 let constraints = BestBallLineupConfig.requirements(for: league).constraints
+                let fullLabels = constraints.flatMap { Array(repeating: $0.label, count: $0.count) }
                 let rawOrdered1 = orderedSlots(team: slots1, constraints: constraints)
                 let rawOrdered2 = orderedSlots(team: slots2, constraints: constraints)
-                let ordered1 = padSlots(rawOrdered1, toMatch: rawOrdered2, roster: roster1, weekScore: weekScore1)
-                let ordered2 = padSlots(rawOrdered2, toMatch: rawOrdered1, roster: roster2, weekScore: weekScore2)
+                let ordered1 = padSlots(rawOrdered1, fullLabels: fullLabels, roster: roster1, weekScore: weekScore1)
+                let ordered2 = padSlots(rawOrdered2, fullLabels: fullLabels, roster: roster2, weekScore: weekScore2)
                 let count = max(ordered1.count, ordered2.count)
                 VStack(spacing: 0) {
                     ForEach(0..<count, id: \.self) { index in
@@ -241,7 +242,8 @@ struct BestBallMatchupView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 12)
             } else {
-                let count = max(slots1.count, slots2.count)
+                let starterTarget = viewModel.currentLeague.map { BestBallLineupConfig.requirements(for: $0).starters } ?? 0
+                let count = max(max(slots1.count, slots2.count), starterTarget)
                 let filled1 = padEntries(slots1, to: count, roster: roster1, weekScore: weekScore1)
                 let filled2 = padEntries(slots2, to: count, roster: roster2, weekScore: weekScore2)
                 VStack(spacing: 0) {
@@ -265,30 +267,39 @@ struct BestBallMatchupView: View {
         }
     }
 
-    /// Mid-week, one side often has fewer scoring starters than the other
-    /// (its players haven't played yet), leaving half-empty rows where the
-    /// lone player floats ambiguously. Fill the short side's missing rows
-    /// with that team's unused roster players (shown with "-" points) so
-    /// every row pairs a player from each team.
+    /// Mid-week a team often has fewer scoring starters than its lineup has
+    /// slots (players haven't played yet), leaving rows missing or half-empty.
+    /// Emit the FULL canonical lineup: walk the league's slot labels in order,
+    /// consume the team's scoring starters by label, and fill every gap with
+    /// an unused roster player (shown with "-" points). Both sides produce the
+    /// same slot sequence, so rows align by label and the row count always
+    /// equals the league's starter count — one side can't render 8 rows while
+    /// its opponent renders 9.
     private func padSlots(
         _ slots: [(label: String, entry: (pick: BestBallPick, pts: Double))],
-        toMatch other: [(label: String, entry: (pick: BestBallPick, pts: Double))],
+        fullLabels: [String],
         roster: [BestBallPick],
         weekScore: BestBallWeeklyScore?
     ) -> [(label: String, entry: (pick: BestBallPick, pts: Double))] {
-        guard slots.count < other.count else { return slots }
-        var out = slots
+        var pool = slots
         var used = Set(slots.map { $0.entry.pick.playerID })
-        for idx in slots.count..<other.count {
-            let label = other[idx].label
+        var out: [(label: String, entry: (pick: BestBallPick, pts: Double))] = []
+        for label in fullLabels {
+            if let i = pool.firstIndex(where: { $0.label == label }) {
+                out.append(pool.remove(at: i))
+                continue
+            }
             let candidate = roster.first(where: { p in
                 !used.contains(p.playerID) && Self.positionFits(p.playerPosition, slotLabel: label)
             }) ?? roster.first(where: { !used.contains($0.playerID) })
-            guard let filler = candidate else { break }
+            guard let filler = candidate else { continue }
             used.insert(filler.playerID)
             let pts = weekScore?.playerPoints[filler.playerID] ?? 0
             out.append((label: label, entry: (pick: filler, pts: pts)))
         }
+        // Any assigned slots whose label isn't in the canonical list (shouldn't
+        // happen, but never drop a real scorer).
+        out.append(contentsOf: pool)
         return out
     }
 
@@ -346,8 +357,13 @@ struct BestBallMatchupView: View {
         slots1: [(pick: BestBallPick, pts: Double)],
         slots2: [(pick: BestBallPick, pts: Double)]
     ) -> some View {
-        let count = max(slots1.count, slots2.count)
         let isPitcherSection = title == "PITCHERS"
+        let sectionTarget: Int = {
+            guard let league = viewModel.currentLeague else { return 0 }
+            let constraints = BestBallLineupConfig.requirements(for: league).constraints
+            return constraints.first(where: { (($0.label == "P") == isPitcherSection) })?.count ?? 0
+        }()
+        let count = max(max(slots1.count, slots2.count), sectionTarget)
         let filled1 = padEntries(slots1, to: count, roster: roster1, weekScore: weekScore1) {
             BestBallLineupConfig.isPitcher($0.playerPosition) == isPitcherSection
         }
@@ -417,28 +433,35 @@ struct BestBallMatchupView: View {
             for isPitcher in [true, false] {
                 let a1 = slots1.filter { BestBallLineupConfig.isPitcher($0.pick.playerPosition) == isPitcher }
                 let a2 = slots2.filter { BestBallLineupConfig.isPitcher($0.pick.playerPosition) == isPitcher }
-                let n = max(a1.count, a2.count)
+                let sectionTarget: Int = {
+                    guard let league = viewModel.currentLeague else { return 0 }
+                    let constraints = BestBallLineupConfig.requirements(for: league).constraints
+                    return constraints.first(where: { (($0.label == "P") == isPitcher) })?.count ?? 0
+                }()
+                let n = max(max(a1.count, a2.count), sectionTarget)
                 let p1 = padEntries(a1, to: n, roster: roster1, weekScore: weekScore1) { BestBallLineupConfig.isPitcher($0.playerPosition) == isPitcher }
                 let p2 = padEntries(a2, to: n, roster: roster2, weekScore: weekScore2) { BestBallLineupConfig.isPitcher($0.playerPosition) == isPitcher }
-                f1.formUnion(p1.dropFirst(a1.count).map { $0.pick.playerID })
-                f2.formUnion(p2.dropFirst(a2.count).map { $0.pick.playerID })
+                f1.formUnion(Set(p1.map { $0.pick.playerID }).subtracting(a1.map { $0.pick.playerID }))
+                f2.formUnion(Set(p2.map { $0.pick.playerID }).subtracting(a2.map { $0.pick.playerID }))
             }
             return (f1, f2)
         }
         if sport == "NFL" || sport == "CFB" || sport == "EPL", let league = viewModel.currentLeague {
             let constraints = BestBallLineupConfig.requirements(for: league).constraints
+            let fullLabels = constraints.flatMap { Array(repeating: $0.label, count: $0.count) }
             let o1 = orderedSlots(team: slots1, constraints: constraints)
             let o2 = orderedSlots(team: slots2, constraints: constraints)
-            let p1 = padSlots(o1, toMatch: o2, roster: roster1, weekScore: weekScore1)
-            let p2 = padSlots(o2, toMatch: o1, roster: roster2, weekScore: weekScore2)
-            return (Set(p1.dropFirst(o1.count).map { $0.entry.pick.playerID }),
-                    Set(p2.dropFirst(o2.count).map { $0.entry.pick.playerID }))
+            let p1 = padSlots(o1, fullLabels: fullLabels, roster: roster1, weekScore: weekScore1)
+            let p2 = padSlots(o2, fullLabels: fullLabels, roster: roster2, weekScore: weekScore2)
+            return (Set(p1.map { $0.entry.pick.playerID }).subtracting(o1.map { $0.entry.pick.playerID }),
+                    Set(p2.map { $0.entry.pick.playerID }).subtracting(o2.map { $0.entry.pick.playerID }))
         }
-        let n = max(slots1.count, slots2.count)
+        let starterTarget = viewModel.currentLeague.map { BestBallLineupConfig.requirements(for: $0).starters } ?? 0
+        let n = max(max(slots1.count, slots2.count), starterTarget)
         let p1 = padEntries(slots1, to: n, roster: roster1, weekScore: weekScore1)
         let p2 = padEntries(slots2, to: n, roster: roster2, weekScore: weekScore2)
-        return (Set(p1.dropFirst(slots1.count).map { $0.pick.playerID }),
-                Set(p2.dropFirst(slots2.count).map { $0.pick.playerID }))
+        return (Set(p1.map { $0.pick.playerID }).subtracting(slots1.map { $0.pick.playerID }),
+                Set(p2.map { $0.pick.playerID }).subtracting(slots2.map { $0.pick.playerID }))
     }
 
     private var benchComparison: some View {
