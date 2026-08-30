@@ -1456,29 +1456,49 @@ func pickemFirstHalfScores(summary: [String: Any]) -> (away: Int, home: Int, awa
 /// Whether a soccer summary's rosters are populated enough to grade props
 /// from — at least one roster entry carrying per-player stats. Right at
 /// full-time ESPN can briefly serve the summary without them.
-/// Kickoff time from a summary's header — used to defer DNP voids until a
-/// match has been over long enough for ESPN's rosters to be fully populated.
-func pickemSummaryKickoff(summary: [String: Any]) -> Date? {
-    guard let header = summary["header"] as? [String: Any],
-          let comps = header["competitions"] as? [[String: Any]],
-          let ds = comps.first?["date"] as? String else { return nil }
-    let iso = ISO8601DateFormatter()
-    if let d = iso.date(from: ds) { return d }
-    // ESPN often omits seconds ("2026-08-30T15:30Z")
-    let fmt = DateFormatter()
-    fmt.locale = Locale(identifier: "en_US_POSIX")
-    fmt.timeZone = TimeZone(identifier: "UTC")
-    fmt.dateFormat = "yyyy-MM-dd'T'HH:mm'Z'"
-    return fmt.date(from: ds)
+/// Three-way verdict for grading a soccer prop from the summary rosters.
+/// Distinguishes a CONFIRMED DNP (entry present, flags say he never came on)
+/// from data that simply hasn't filled in yet — ESPN populates roster stats
+/// in stages around full time, and voiding on ambiguity permanently robbed
+/// winning goalscorer picks.
+enum PickemSoccerPropVerdict {
+    case value(Double)
+    case confirmedDNP
+    case unknown
 }
 
-func pickemSoccerRostersReady(summary: [String: Any]) -> Bool {
-    guard let rosters = summary["rosters"] as? [[String: Any]], !rosters.isEmpty else { return false }
-    return rosters.contains { block in
-        ((block["roster"] as? [[String: Any]]) ?? []).contains { entry in
-            !(((entry["stats"] as? [[String: Any]]) ?? []).isEmpty)
+func pickemSoccerPropVerdict(summary: [String: Any], athleteID: String, statNames: [String]) -> PickemSoccerPropVerdict {
+    guard let rosters = summary["rosters"] as? [[String: Any]], !rosters.isEmpty else { return .unknown }
+    for block in rosters {
+        for entry in (block["roster"] as? [[String: Any]]) ?? [] {
+            guard let ath = entry["athlete"] as? [String: Any],
+                  (ath["id"] as? String ?? (ath["id"] as? Int).map(String.init)) == athleteID else { continue }
+            let started = entry["starter"] as? Bool
+            let cameOn = entry["subbedIn"] as? Bool
+            let played = (entry["active"] as? Bool ?? false) || (started ?? false) || (cameOn ?? false)
+            let stats = (entry["stats"] as? [[String: Any]]) ?? []
+            if played {
+                // On the pitch but sheet not filled yet → wait, don't guess.
+                guard !stats.isEmpty else { return .unknown }
+                var map: [String: Double] = [:]
+                for s in stats {
+                    if let n = s["name"] as? String {
+                        map[n] = s["value"] as? Double
+                            ?? (s["displayValue"] as? String).flatMap(Double.init) ?? 0
+                    }
+                }
+                return .value(statNames.reduce(0.0) { $0 + (map[$1] ?? 0) })
+            }
+            // Unused sub only when the flags are explicitly present-and-false;
+            // absent flags mean the sheet hasn't been written yet.
+            if started == false && cameOn == false { return .confirmedDNP }
+            return .unknown
         }
     }
+    // Not on either sheet: with both squads fully listed that's a real
+    // omission (out of the matchday squad) — otherwise still filling.
+    let totalEntries = rosters.reduce(0) { $0 + (($1["roster"] as? [[String: Any]])?.count ?? 0) }
+    return totalEntries >= 30 ? .confirmedDNP : .unknown
 }
 
 func pickemPropStat(summary: [String: Any], athleteID: String, statKey: String) -> Double? {
@@ -1826,43 +1846,51 @@ nonisolated struct ESPNMatchResultProvider: MatchResultProvider {
                                     guard parts.count >= 5, let line = Double(parts[4]) else { continue }
                                     let athleteID = parts[2]
                                     let statKey = parts[3]
-                                    guard let value = pickemPropStat(summary: json, athleteID: athleteID, statKey: statKey) else {
-                                        // Soccer per-player stats ride in rosters[] —
-                                        // right at full-time ESPN can serve a summary
-                                        // whose rosters are missing or stat-less.
-                                        // Voiding then is WRONG and permanent (Palmer
-                                        // scored but his goalscorer pick graded +0
-                                        // PUSH). Leave ungraded; the next grading
-                                        // cycle retries with the filled summary.
-                                        let soccerKeys: Set<String> = ["g", "sh", "st", "sa", "gsv"]
-                                        if soccerKeys.contains(statKey) {
-                                            if !pickemSoccerRostersReady(summary: json) { continue }
-                                            // rostersReady only proves SOME entries have
-                                            // stats — ESPN fills them in stages after FT,
-                                            // and Palmer's goalscorer Yes graded PUSH
-                                            // because HIS entry was still stat-less right
-                                            // at full time (a permanent void). Defer any
-                                            // soccer DNP void until kickoff + 3.5h, when
-                                            // the roster sheet is reliably final.
-                                            if let kickoff = pickemSummaryKickoff(summary: json),
-                                               Date() < kickoff.addingTimeInterval(3.5 * 3600) {
-                                                continue
-                                            }
-                                        }
-                                        results[mid] = "PUSH"   // DNP / not in box — void
-                                        continue
-                                    }
                                     // Milestone props ("to hit a HR", "to score a TD/goal", "to assist") are Yes/No
                                     let isYesNo = statKey == "hr" || statKey == "anytd" || statKey == "g" || statKey == "sa"
                                     let overLabel = isYesNo ? "Yes" : "Over \(pickemFormatLine(line))"
                                     let underLabel = isYesNo ? "No" : "Under \(pickemFormatLine(line))"
-                                    if value > line {
-                                        results[mid] = overLabel
-                                    } else if value < line {
-                                        results[mid] = underLabel
-                                    } else {
-                                        results[mid] = "PUSH"
+                                    func grade(_ value: Double) {
+                                        if value > line {
+                                            results[mid] = overLabel
+                                        } else if value < line {
+                                            results[mid] = underLabel
+                                        } else {
+                                            results[mid] = "PUSH"
+                                        }
                                     }
+
+                                    // Soccer grades from the rosters[] sheet, which ESPN
+                                    // fills in STAGES around full time — a stat-less or
+                                    // missing entry is NOT a DNP yet (Palmer's goalscorer
+                                    // Yes graded PUSH twice this way, permanently). Void
+                                    // only on POSITIVE evidence (entry present, flags say
+                                    // he never came on / full sheets omit him); ambiguity
+                                    // stays ungraded and the next 60s cycle retries — so
+                                    // props settle minutes after FT like every other market.
+                                    let soccerKeys: Set<String> = ["g", "sh", "st", "sa", "gsv"]
+                                    if sport.sportPath.hasPrefix("soccer"), soccerKeys.contains(statKey) {
+                                        let statNames: [String]
+                                        switch statKey {
+                                        case "g":   statNames = ["totalGoals"]
+                                        case "sh":  statNames = ["totalShots"]
+                                        case "st":  statNames = ["shotsOnTarget"]
+                                        case "sa":  statNames = ["goalAssists"]
+                                        default:    statNames = ["saves"]
+                                        }
+                                        switch pickemSoccerPropVerdict(summary: json, athleteID: athleteID, statNames: statNames) {
+                                        case .value(let v): grade(v)
+                                        case .confirmedDNP: results[mid] = "PUSH"
+                                        case .unknown: break   // retry next cycle
+                                        }
+                                        continue
+                                    }
+
+                                    guard let value = pickemPropStat(summary: json, athleteID: athleteID, statKey: statKey) else {
+                                        results[mid] = "PUSH"   // DNP / not in box — void
+                                        continue
+                                    }
+                                    grade(value)
                                 }
                             }
                         }
