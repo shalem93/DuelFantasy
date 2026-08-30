@@ -1456,6 +1456,22 @@ func pickemFirstHalfScores(summary: [String: Any]) -> (away: Int, home: Int, awa
 /// Whether a soccer summary's rosters are populated enough to grade props
 /// from — at least one roster entry carrying per-player stats. Right at
 /// full-time ESPN can briefly serve the summary without them.
+/// Kickoff time from a summary's header — used to defer DNP voids until a
+/// match has been over long enough for ESPN's rosters to be fully populated.
+func pickemSummaryKickoff(summary: [String: Any]) -> Date? {
+    guard let header = summary["header"] as? [String: Any],
+          let comps = header["competitions"] as? [[String: Any]],
+          let ds = comps.first?["date"] as? String else { return nil }
+    let iso = ISO8601DateFormatter()
+    if let d = iso.date(from: ds) { return d }
+    // ESPN often omits seconds ("2026-08-30T15:30Z")
+    let fmt = DateFormatter()
+    fmt.locale = Locale(identifier: "en_US_POSIX")
+    fmt.timeZone = TimeZone(identifier: "UTC")
+    fmt.dateFormat = "yyyy-MM-dd'T'HH:mm'Z'"
+    return fmt.date(from: ds)
+}
+
 func pickemSoccerRostersReady(summary: [String: Any]) -> Bool {
     guard let rosters = summary["rosters"] as? [[String: Any]], !rosters.isEmpty else { return false }
     return rosters.contains { block in
@@ -1819,8 +1835,19 @@ nonisolated struct ESPNMatchResultProvider: MatchResultProvider {
                                         // PUSH). Leave ungraded; the next grading
                                         // cycle retries with the filled summary.
                                         let soccerKeys: Set<String> = ["g", "sh", "st", "sa", "gsv"]
-                                        if soccerKeys.contains(statKey), !pickemSoccerRostersReady(summary: json) {
-                                            continue
+                                        if soccerKeys.contains(statKey) {
+                                            if !pickemSoccerRostersReady(summary: json) { continue }
+                                            // rostersReady only proves SOME entries have
+                                            // stats — ESPN fills them in stages after FT,
+                                            // and Palmer's goalscorer Yes graded PUSH
+                                            // because HIS entry was still stat-less right
+                                            // at full time (a permanent void). Defer any
+                                            // soccer DNP void until kickoff + 3.5h, when
+                                            // the roster sheet is reliably final.
+                                            if let kickoff = pickemSummaryKickoff(summary: json),
+                                               Date() < kickoff.addingTimeInterval(3.5 * 3600) {
+                                                continue
+                                            }
                                         }
                                         results[mid] = "PUSH"   // DNP / not in box — void
                                         continue
