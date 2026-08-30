@@ -735,13 +735,18 @@ final class TennisBracketViewModel {
 
             // Fetch stored results
             if let token = accessToken {
-                let storedResults = (try? await SupabaseService.shared.fetchTennisBracketResults(
+                let storedResults = try? await SupabaseService.shared.fetchTennisBracketResults(
                     tournamentID: tournamentID, accessToken: token
-                )) ?? [:]
+                )
                 // Staleness check before writing — guards against the
                 // stale ATP load shoving its results into a now-WTA state.
                 guard myToken == currentLoadToken, myDrawType == selectedDrawType else { return }
-                if !storedResults.isEmpty {
+                if let storedResults {
+                    // A SUCCESSFUL fetch is authoritative even when empty:
+                    // after an admin results_data reset, a running session
+                    // holding the old phantom map in memory would otherwise
+                    // keep it and re-upload it on the next merge. Only a
+                    // FAILED fetch (nil) preserves in-memory results.
                     // Structural prune: stale phantom gradings (deep-round
                     // "winners" with undecided feeders) re-uploaded by old
                     // sessions must not seed local state.
