@@ -1018,9 +1018,15 @@ final class TennisBracketViewModel {
         // Open was seeded Aug 25 when R1 is Aug 30) flips the row to locked
         // days before a ball is hit, and nothing ever un-locked it — the
         // bracket card sat LOCKED with zero results while entries should
-        // still be open. If no match has finished and the CURRENT estimate
-        // says the slam hasn't started, reopen with the corrected lock.
-        if t.status == "locked" || t.status == "live", results.isEmpty,
+        // still be open. If the CURRENT estimate says the slam hasn't started,
+        // reopen with the corrected lock — even if `results` is non-empty:
+        // those entries can only be phantom gradings let through by the old
+        // stale gate (today's gate anchors at this same estimate, so a fresh
+        // fetch could never produce results before it), and requiring
+        // results.isEmpty here was a chicken-and-egg: the load path seeds
+        // `results` from the polluted server row before this runs, so the
+        // pollution itself blocked the heal that clears the pollution.
+        if t.status == "locked" || t.status == "live",
            let corrected = Self.estimatedLockTime(grandSlam: t.grandSlam, year: Int(t.season) ?? Calendar.current.component(.year, from: Date())),
            corrected > Date() {
             let reopened = TennisBracketTournament(
@@ -1044,8 +1050,9 @@ final class TennisBracketViewModel {
                 try? await SupabaseService.shared.updateTennisBracketResults(
                     tournamentID: t.id, results: [:], accessToken: token
                 )
+                let clearedCount = results.count
                 results = [:]
-                print("[TennisBracket] Reopened \(t.id) — locked by a stale estimate, R1 hasn't started (new lock \(corrected)); cleared \(results.count) stale results")
+                print("[TennisBracket] Reopened \(t.id) — locked by a stale estimate, R1 hasn't started (new lock \(corrected)); cleared \(clearedCount) stale results")
             }
         }
 
