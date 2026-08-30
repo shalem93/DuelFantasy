@@ -204,7 +204,7 @@ struct TennisBracketGroupMember: Identifiable, Equatable {
 
 // MARK: - Bracket Engine
 
-struct TennisBracketEngine {
+nonisolated struct TennisBracketEngine {
 
     static let rounds = ["R1", "R2", "R3", "R4", "QF", "SF", "F"]
     static let matchesPerRound = [64, 32, 16, 8, 4, 2, 1]
@@ -363,6 +363,18 @@ struct TennisBracketEngine {
         return eliminated
     }
 
+    /// Off-main-actor leaderboard grading. Scoring 1000–2000 bracket entries
+    /// against a live results map takes long enough to hitch scrolling when
+    /// it lands on the main actor mid-refresh — every async call site should
+    /// use this instead of the synchronous version.
+    @concurrent static func computeLeaderboardAsync(
+        entries: [TennisBracketEntry],
+        results: [String: String],
+        currentUserID: String?
+    ) async -> [TennisBracketLeaderboardEntry] {
+        computeLeaderboard(entries: entries, results: results, currentUserID: currentUserID)
+    }
+
     /// Compute leaderboard from entries + results.
     static func computeLeaderboard(
         entries: [TennisBracketEntry],
@@ -492,14 +504,17 @@ struct TennisBracketEngine {
 
 // MARK: - ESPN Tennis Results Provider
 
-struct ESPNTennisResultsProvider: Sendable {
+nonisolated struct ESPNTennisResultsProvider: Sendable {
     private let session: URLSession
 
     init(session: URLSession = .shared) { self.session = session }
 
     /// Fetch completed match results from ESPN tennis scoreboard.
     /// Maps each completed match to a draw slot using player names.
-    func fetchMatchResults(
+    /// @concurrent: drills into hundreds of per-match $ref URLs and parses
+    /// each response — on the main actor this froze hub scrolling while the
+    /// slam was live.
+    @concurrent func fetchMatchResults(
         drawType: DrawType,
         drawPlayers: [TennisBracketPlayer],
         grandSlam: GrandSlam = .frenchOpen,
@@ -2768,7 +2783,18 @@ struct ESPNTennisDrawFetcher: Sendable {
 
 // MARK: - Bot Bracket Generator
 
-struct TennisBracketBotDrafter {
+nonisolated struct TennisBracketBotDrafter {
+
+    /// Off-main-actor bot generation: 999 brackets × 127 picks each is a
+    /// visible main-thread stall when a field regenerates mid-session.
+    @concurrent static func generateBotEntriesAsync(
+        draw: [TennisBracketPlayer],
+        grandSlam: GrandSlam,
+        count: Int,
+        tournamentID: String
+    ) async -> [TennisBracketEntry] {
+        generateBotEntries(draw: draw, grandSlam: grandSlam, count: count, tournamentID: tournamentID)
+    }
 
     enum BotPersonality: CaseIterable {
         case chalkPicker

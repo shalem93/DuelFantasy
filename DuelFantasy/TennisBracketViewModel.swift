@@ -707,7 +707,7 @@ final class TennisBracketViewModel {
                             picks: otherEntry.picks,
                             totalPoints: 0, rank: 0, isBot: false, isCurrentUser: true
                         )]
-                        let board = TennisBracketEngine.computeLeaderboard(
+                        let board = await TennisBracketEngine.computeLeaderboardAsync(
                             entries: entries, results: storedResults, currentUserID: uid
                         )
                         guard let userRow = board.first(where: { $0.isCurrentUser }) else { return }
@@ -823,7 +823,7 @@ final class TennisBracketViewModel {
                         }
                     }
                 }
-                leaderboardEntries = TennisBracketEngine.computeLeaderboard(
+                leaderboardEntries = await TennisBracketEngine.computeLeaderboardAsync(
                     entries: fieldEntries,
                     results: results,
                     currentUserID: userID
@@ -861,7 +861,7 @@ final class TennisBracketViewModel {
                         fieldEntries = []
                         fieldGenerated = false
                         await generateBotField()
-                        leaderboardEntries = TennisBracketEngine.computeLeaderboard(
+                        leaderboardEntries = await TennisBracketEngine.computeLeaderboardAsync(
                             entries: fieldEntries,
                             results: results,
                             currentUserID: userID
@@ -951,7 +951,7 @@ final class TennisBracketViewModel {
                 isCurrentUser: true
             ))
             // Recompute the leaderboard so the user gets a rank.
-            leaderboardEntries = TennisBracketEngine.computeLeaderboard(
+            leaderboardEntries = await TennisBracketEngine.computeLeaderboardAsync(
                 entries: fieldEntries,
                 results: results,
                 currentUserID: userID
@@ -1141,7 +1141,7 @@ final class TennisBracketViewModel {
         }
 
         // Compute leaderboard
-        leaderboardEntries = TennisBracketEngine.computeLeaderboard(
+        leaderboardEntries = await TennisBracketEngine.computeLeaderboardAsync(
             entries: fieldEntries,
             results: results,
             currentUserID: userID
@@ -1164,7 +1164,7 @@ final class TennisBracketViewModel {
                 fieldEntries = []
                 fieldGenerated = false
                 await generateBotField()
-                leaderboardEntries = TennisBracketEngine.computeLeaderboard(
+                leaderboardEntries = await TennisBracketEngine.computeLeaderboardAsync(
                     entries: fieldEntries,
                     results: results,
                     currentUserID: userID
@@ -1288,7 +1288,7 @@ final class TennisBracketViewModel {
         fieldGenerated = true
 
         print("[TennisBracket] Generating 999 bot brackets...")
-        let bots = TennisBracketBotDrafter.generateBotEntries(
+        let bots = await TennisBracketBotDrafter.generateBotEntriesAsync(
             draw: drawPlayers,
             grandSlam: tournament.grandSlam,
             count: 999,
@@ -1347,7 +1347,7 @@ final class TennisBracketViewModel {
         guard let token = accessToken else { return }
 
         // Compute final leaderboard
-        let finalLeaderboard = TennisBracketEngine.computeLeaderboard(
+        let finalLeaderboard = await TennisBracketEngine.computeLeaderboardAsync(
             entries: fieldEntries,
             results: results,
             currentUserID: userID

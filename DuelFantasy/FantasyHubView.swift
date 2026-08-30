@@ -1105,7 +1105,7 @@ struct FantasyHubView: View {
                     isCurrentUser: rec.userID == userID
                 )
             }
-            let leaderboard = TennisBracketEngine.computeLeaderboard(
+            let leaderboard = await TennisBracketEngine.computeLeaderboardAsync(
                 entries: asEntries, results: matchResults, currentUserID: userID
             )
             guard let me = leaderboard.first(where: { $0.isCurrentUser }) else {
@@ -1147,7 +1147,7 @@ struct FantasyHubView: View {
                     return memberUserIDs.contains(uid)
                 }
                 guard groupEntries.count >= 2 else { continue }
-                let groupLeaderboard = TennisBracketEngine.computeLeaderboard(
+                let groupLeaderboard = await TennisBracketEngine.computeLeaderboardAsync(
                     entries: groupEntries, results: matchResults, currentUserID: userID
                 )
                 guard let meGroup = groupLeaderboard.first(where: { $0.isCurrentUser }) else { continue }
