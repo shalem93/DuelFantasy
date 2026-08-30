@@ -380,6 +380,26 @@ final class TennisBracketViewModel {
         return calendar.date(from: components)
     }
 
+    /// Results cutoff for the qualifying-match date gate. The stored
+    /// lockTime can be a stale too-early estimate (the US Open was seeded
+    /// Aug 25 while R1 starts Aug 30) — anchoring the gate to it let
+    /// QUALIFYING matches grade as R1 results, which then flipped the
+    /// tournament live and blocked the zero-results reopen heal. Use the
+    /// LATER of the stored value and the current estimate: quals always end
+    /// before real R1, so the later anchor can only exclude them.
+    static func resultsNotBefore(for t: TennisBracketTournament) -> Date? {
+        let estimate = estimatedLockTime(
+            grandSlam: t.grandSlam,
+            year: Int(t.season) ?? Calendar.current.component(.year, from: Date())
+        )
+        switch (t.lockTime, estimate) {
+        case let (stored?, est?): return max(stored, est)
+        case let (stored?, nil): return stored
+        case let (nil, est?): return est
+        default: return nil
+        }
+    }
+
     // MARK: - Load Tournament
 
     func loadTournament() async {
@@ -736,7 +756,7 @@ final class TennisBracketViewModel {
                let t = tournament {
                 let espnResults = await espnProvider.fetchMatchResults(
                     drawType: t.drawType, drawPlayers: drawPlayers, grandSlam: t.grandSlam,
-                    notBefore: t.lockTime
+                    notBefore: Self.resultsNotBefore(for: t)
                 )
                 if !espnResults.isEmpty {
                     for (slot, winner) in espnResults { results[slot] = winner }
@@ -788,7 +808,7 @@ final class TennisBracketViewModel {
                         drawType: t.drawType,
                         drawPlayers: drawPlayers,
                         grandSlam: t.grandSlam,
-                        notBefore: t.lockTime
+                        notBefore: Self.resultsNotBefore(for: t)
                     )
                     var merged = results
                     for (slot, winner) in freshResults {
@@ -1000,7 +1020,7 @@ final class TennisBracketViewModel {
         // bracket card sat LOCKED with zero results while entries should
         // still be open. If no match has finished and the CURRENT estimate
         // says the slam hasn't started, reopen with the corrected lock.
-        if t.status == "locked", results.isEmpty,
+        if t.status == "locked" || t.status == "live", results.isEmpty,
            let corrected = Self.estimatedLockTime(grandSlam: t.grandSlam, year: Int(t.season) ?? Calendar.current.component(.year, from: Date())),
            corrected > Date() {
             let reopened = TennisBracketTournament(
@@ -1017,7 +1037,15 @@ final class TennisBracketViewModel {
                     status: "open", lockTime: corrected
                 )
                 try? await SupabaseService.shared.upsertTennisBracketTournament(record: record, accessToken: token)
-                print("[TennisBracket] Reopened \(t.id) — locked by a stale estimate, R1 hasn't started (new lock \(corrected))")
+                // Clear any results the stale window let through (qualifying
+                // matches graded as R1). Leaving them on the row would merge
+                // wrong winners back in at settle time via the settled
+                // restore path.
+                try? await SupabaseService.shared.updateTennisBracketResults(
+                    tournamentID: t.id, results: [:], accessToken: token
+                )
+                results = [:]
+                print("[TennisBracket] Reopened \(t.id) — locked by a stale estimate, R1 hasn't started (new lock \(corrected)); cleared \(results.count) stale results")
             }
         }
 
@@ -1084,7 +1112,7 @@ final class TennisBracketViewModel {
                 drawType: tournament.drawType,
                 drawPlayers: drawPlayers,
                 grandSlam: tournament.grandSlam,
-                notBefore: tournament.lockTime
+                notBefore: Self.resultsNotBefore(for: tournament)
             )
             var merged = results
             for (slot, winner) in espnResults {
@@ -1602,7 +1630,7 @@ final class TennisBracketViewModel {
         if !lockTimePassed, drawAvailable {
             let espnResults = await espnProvider.fetchMatchResults(
                 drawType: tournament.drawType, drawPlayers: drawPlayers, grandSlam: tournament.grandSlam,
-                notBefore: tournament.lockTime
+                notBefore: Self.resultsNotBefore(for: tournament)
             )
             if !espnResults.isEmpty {
                 for (slot, winner) in espnResults { results[slot] = winner }
