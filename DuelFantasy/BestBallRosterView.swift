@@ -639,6 +639,10 @@ struct BestBallRosterView: View {
         // keep each scored starter in its slot, and fill every empty slot
         // with the best unused roster player (no star until they score).
         let fullLabels = constraints.flatMap { Array(repeating: $0.label, count: $0.count) }
+        // Real eligibility from the lineup config — a label-string heuristic
+        // put a GOALKEEPER in an EPL FLEX slot (FLEX is outfield-only, and
+        // NFL FLEX excludes QBs).
+        let eligibleByLabel = Dictionary(constraints.map { ($0.label, $0.eligible) }, uniquingKeysWith: { a, _ in a })
         var pool = assignedEntries
         var used = Set(assignedEntries.map { $0.pick.playerID })
         var out: [(pick: BestBallPick, slotLabel: String?)] = []
@@ -647,22 +651,19 @@ struct BestBallRosterView: View {
                 out.append(pool.remove(at: i))
                 continue
             }
+            let fits: (BestBallPick) -> Bool = { p in
+                guard let eligible = eligibleByLabel[label] else { return true }
+                return eligible.contains(p.playerPosition.uppercased())
+            }
             let filler = sortedRoster.first(where: { p in
-                !used.contains(p.playerID) && Self.positionFitsSlot(p.playerPosition, label: label)
-            }) ?? sortedRoster.first(where: { !used.contains($0.playerID) })
+                !used.contains(p.playerID) && fits(p)
+            })
             guard let f = filler else { continue }
             used.insert(f.playerID)
             out.append((f, label))
         }
         out.append(contentsOf: pool)
         return out
-    }
-
-    private static func positionFitsSlot(_ position: String, label: String) -> Bool {
-        let norm = label.uppercased()
-        if norm.contains("FLEX") || norm == "UTIL" { return true }
-        let pos = position.uppercased()
-        return pos == norm || pos.hasPrefix(norm) || norm.hasPrefix(pos)
     }
 
     // MARK: - Player Row

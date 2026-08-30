@@ -218,10 +218,11 @@ struct BestBallMatchupView: View {
                 // flat FLEX list.
                 let constraints = BestBallLineupConfig.requirements(for: league).constraints
                 let fullLabels = constraints.flatMap { Array(repeating: $0.label, count: $0.count) }
+                let eligibleByLabel = Dictionary(constraints.map { ($0.label, $0.eligible) }, uniquingKeysWith: { a, _ in a })
                 let rawOrdered1 = orderedSlots(team: slots1, constraints: constraints)
                 let rawOrdered2 = orderedSlots(team: slots2, constraints: constraints)
-                let ordered1 = padSlots(rawOrdered1, fullLabels: fullLabels, roster: roster1, weekScore: weekScore1)
-                let ordered2 = padSlots(rawOrdered2, fullLabels: fullLabels, roster: roster2, weekScore: weekScore2)
+                let ordered1 = padSlots(rawOrdered1, fullLabels: fullLabels, eligibleByLabel: eligibleByLabel, roster: roster1, weekScore: weekScore1)
+                let ordered2 = padSlots(rawOrdered2, fullLabels: fullLabels, eligibleByLabel: eligibleByLabel, roster: roster2, weekScore: weekScore2)
                 let count = max(ordered1.count, ordered2.count)
                 VStack(spacing: 0) {
                     ForEach(0..<count, id: \.self) { index in
@@ -278,6 +279,7 @@ struct BestBallMatchupView: View {
     private func padSlots(
         _ slots: [(label: String, entry: (pick: BestBallPick, pts: Double))],
         fullLabels: [String],
+        eligibleByLabel: [String: Set<String>],
         roster: [BestBallPick],
         weekScore: BestBallWeeklyScore?
     ) -> [(label: String, entry: (pick: BestBallPick, pts: Double))] {
@@ -289,9 +291,15 @@ struct BestBallMatchupView: View {
                 out.append(pool.remove(at: i))
                 continue
             }
+            // Real eligibility from the lineup config — a label-string
+            // heuristic put a GOALKEEPER in an EPL FLEX slot. A slot with
+            // no eligible roster player stays empty rather than taking an
+            // ineligible one.
             let candidate = roster.first(where: { p in
-                !used.contains(p.playerID) && Self.positionFits(p.playerPosition, slotLabel: label)
-            }) ?? roster.first(where: { !used.contains($0.playerID) })
+                guard !used.contains(p.playerID) else { return false }
+                guard let eligible = eligibleByLabel[label] else { return true }
+                return eligible.contains(p.playerPosition.uppercased())
+            })
             guard let filler = candidate else { continue }
             used.insert(filler.playerID)
             let pts = weekScore?.playerPoints[filler.playerID] ?? 0
@@ -320,13 +328,6 @@ struct BestBallMatchupView: View {
             out.append((pick: pick, pts: weekScore?.playerPoints[pick.playerID] ?? 0))
         }
         return out
-    }
-
-    private static func positionFits(_ position: String, slotLabel: String) -> Bool {
-        let label = slotLabel.uppercased()
-        if label.contains("FLEX") || label == "UTIL" { return true }
-        let pos = position.uppercased()
-        return pos == label || pos.hasPrefix(label) || label.hasPrefix(pos)
     }
 
     /// Assigns a team's scoring starters to canonical NFL lineup slots
@@ -449,10 +450,11 @@ struct BestBallMatchupView: View {
         if sport == "NFL" || sport == "CFB" || sport == "EPL", let league = viewModel.currentLeague {
             let constraints = BestBallLineupConfig.requirements(for: league).constraints
             let fullLabels = constraints.flatMap { Array(repeating: $0.label, count: $0.count) }
+            let eligibleByLabel = Dictionary(constraints.map { ($0.label, $0.eligible) }, uniquingKeysWith: { a, _ in a })
             let o1 = orderedSlots(team: slots1, constraints: constraints)
             let o2 = orderedSlots(team: slots2, constraints: constraints)
-            let p1 = padSlots(o1, fullLabels: fullLabels, roster: roster1, weekScore: weekScore1)
-            let p2 = padSlots(o2, fullLabels: fullLabels, roster: roster2, weekScore: weekScore2)
+            let p1 = padSlots(o1, fullLabels: fullLabels, eligibleByLabel: eligibleByLabel, roster: roster1, weekScore: weekScore1)
+            let p2 = padSlots(o2, fullLabels: fullLabels, eligibleByLabel: eligibleByLabel, roster: roster2, weekScore: weekScore2)
             return (Set(p1.map { $0.entry.pick.playerID }).subtracting(o1.map { $0.entry.pick.playerID }),
                     Set(p2.map { $0.entry.pick.playerID }).subtracting(o2.map { $0.entry.pick.playerID }))
         }
