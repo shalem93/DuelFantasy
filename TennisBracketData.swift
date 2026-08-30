@@ -1222,7 +1222,7 @@ nonisolated struct ESPNTennisResultsProvider: Sendable {
     /// matches so "S. Wawrinka" resolves to "Stan Wawrinka". And handles ESPN's
     /// Asian name ordering (e.g. "Wu Yibing" → "Yibing Wu") via reversed-token
     /// fallback.
-    private func findDrawPosition(name: String, in draw: [TennisBracketPlayer]) -> Int? {
+    func findDrawPosition(name: String, in draw: [TennisBracketPlayer]) -> Int? {
         let normalized = TennisBracketEngine.normalizedName(name)
 
         // Exact match first

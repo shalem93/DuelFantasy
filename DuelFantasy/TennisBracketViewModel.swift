@@ -750,7 +750,7 @@ final class TennisBracketViewModel {
                     // Structural prune: stale phantom gradings (deep-round
                     // "winners" with undecided feeders) re-uploaded by old
                     // sessions must not seed local state.
-                    results = TennisBracketEngine.structurallyValidResults(storedResults)
+                    results = sanitizedResults(storedResults)
                 }
             }
 
@@ -768,7 +768,7 @@ final class TennisBracketViewModel {
                 )
                 if !espnResults.isEmpty {
                     for (slot, winner) in espnResults { results[slot] = winner }
-                    results = TennisBracketEngine.structurallyValidResults(results)
+                    results = sanitizedResults(results)
                     if let token = accessToken {
                         try? await SupabaseService.shared.updateTennisBracketResults(
                             tournamentID: t.id, results: results, accessToken: token
@@ -805,7 +805,7 @@ final class TennisBracketViewModel {
                        tournamentID: t.id, accessToken: token
                    ),
                    !stored.isEmpty {
-                    results = TennisBracketEngine.structurallyValidResults(stored)
+                    results = sanitizedResults(stored)
                     print("[TennisBracket] settled: restored \(results.count)/\(stored.count) results from server row")
                 }
                 // Fetch ESPN results for the settled tournament's own
@@ -823,7 +823,7 @@ final class TennisBracketViewModel {
                     for (slot, winner) in freshResults {
                         merged[slot] = winner
                     }
-                    merged = TennisBracketEngine.structurallyValidResults(merged)
+                    merged = sanitizedResults(merged)
                     if merged != results {
                         results = merged
                         if let token = accessToken {
@@ -1019,6 +1019,28 @@ final class TennisBracketViewModel {
         isSubmitting = false
     }
 
+    // MARK: - Result Sanitization
+
+    /// Structural prune + draw-consistency prune. Beyond the feeder-chain
+    /// check, an R1 result is only real if its winner maps to one of the TWO
+    /// draw players actually in that match slot — phantom gradings from the
+    /// stale-gate era carry qualifying-round winners ("H. Wendelken") who
+    /// aren't in the main draw at all, and "never shrink" kept re-uploading
+    /// them. Both US Open draws carry 128 real names (no "Qualifier"
+    /// placeholders), so the strict check is safe; draws with unnamed slots
+    /// skip it via the all-named guard.
+    private func sanitizedResults(_ raw: [String: String]) -> [String: String] {
+        var cleaned = raw
+        if drawPlayers.count == 128, drawPlayers.allSatisfy({ !$0.name.isEmpty }) {
+            cleaned = cleaned.filter { slot, winner in
+                guard slot.hasPrefix("R1-"), let m = Int(slot.dropFirst(3)) else { return true }
+                guard let wPos = espnProvider.findDrawPosition(name: winner, in: drawPlayers) else { return false }
+                return wPos == 2 * m - 1 || wPos == 2 * m
+            }
+        }
+        return TennisBracketEngine.structurallyValidResults(cleaned)
+    }
+
     // MARK: - Status Transitions
 
     private func checkStatusTransition() async {
@@ -1131,9 +1153,29 @@ final class TennisBracketViewModel {
                 grandSlam: tournament.grandSlam,
                 notBefore: Self.resultsNotBefore(for: tournament)
             )
-            var merged = results
-            for (slot, winner) in espnResults {
-                merged[slot] = winner
+            // First 48h of the slam: the fresh date-gated fetch is the ONLY
+            // trustworthy source — stored results can carry qualifying-era
+            // phantoms that are structurally indistinguishable (a qualifier's
+            // QUALI win graded into the R1 slot he really occupies "eliminated"
+            // his real R1 opponent before they played). REPLACE instead of
+            // merging so those self-heal; after 48h revert to merge-never-
+            // shrink, which protects deep-tournament state against transient
+            // partial fetches.
+            let earlyWindow: Bool = {
+                guard let est = Self.estimatedLockTime(
+                    grandSlam: tournament.grandSlam,
+                    year: Int(tournament.season) ?? Calendar.current.component(.year, from: Date())
+                ) else { return false }
+                return Date() < est.addingTimeInterval(48 * 3600)
+            }()
+            var merged: [String: String]
+            if earlyWindow, !espnResults.isEmpty {
+                merged = espnResults
+            } else {
+                merged = results
+                for (slot, winner) in espnResults {
+                    merged[slot] = winner
+                }
             }
             // Structural prune AFTER the merge: "never shrink" protects
             // against transient empty fetches, but it also re-uploaded stale
@@ -1141,7 +1183,7 @@ final class TennisBracketViewModel {
             // the merged map lets legit results accumulate while impossible
             // ones (winner of an undecided feeder) die here instead of
             // round-tripping through the server forever.
-            merged = TennisBracketEngine.structurallyValidResults(merged)
+            merged = sanitizedResults(merged)
             if merged != results {
                 results = merged
                 if let token = accessToken {
