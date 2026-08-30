@@ -688,7 +688,7 @@ final class TennisBracketViewModel {
                         async let entriesFetch = SupabaseService.shared.fetchTennisBracketEntries(
                             tournamentID: otherID, accessToken: token
                         )
-                        let storedResults = (try? await resultsFetch) ?? [:]
+                        let storedResults = TennisBracketEngine.structurallyValidResults((try? await resultsFetch) ?? [:])
                         let records = (try? await entriesFetch) ?? []
                         guard !records.isEmpty, !storedResults.isEmpty else { return }
                         let entries = records.map { rec in
@@ -742,7 +742,10 @@ final class TennisBracketViewModel {
                 // stale ATP load shoving its results into a now-WTA state.
                 guard myToken == currentLoadToken, myDrawType == selectedDrawType else { return }
                 if !storedResults.isEmpty {
-                    results = storedResults
+                    // Structural prune: stale phantom gradings (deep-round
+                    // "winners" with undecided feeders) re-uploaded by old
+                    // sessions must not seed local state.
+                    results = TennisBracketEngine.structurallyValidResults(storedResults)
                 }
             }
 
@@ -760,6 +763,7 @@ final class TennisBracketViewModel {
                 )
                 if !espnResults.isEmpty {
                     for (slot, winner) in espnResults { results[slot] = winner }
+                    results = TennisBracketEngine.structurallyValidResults(results)
                     if let token = accessToken {
                         try? await SupabaseService.shared.updateTennisBracketResults(
                             tournamentID: t.id, results: results, accessToken: token
@@ -796,8 +800,8 @@ final class TennisBracketViewModel {
                        tournamentID: t.id, accessToken: token
                    ),
                    !stored.isEmpty {
-                    results = stored
-                    print("[TennisBracket] settled: restored \(stored.count) results from server row")
+                    results = TennisBracketEngine.structurallyValidResults(stored)
+                    print("[TennisBracket] settled: restored \(results.count)/\(stored.count) results from server row")
                 }
                 // Fetch ESPN results for the settled tournament's own
                 // draw type. Without this, `results` was empty (Supabase
@@ -814,6 +818,7 @@ final class TennisBracketViewModel {
                     for (slot, winner) in freshResults {
                         merged[slot] = winner
                     }
+                    merged = TennisBracketEngine.structurallyValidResults(merged)
                     if merged != results {
                         results = merged
                         if let token = accessToken {
@@ -1125,6 +1130,13 @@ final class TennisBracketViewModel {
             for (slot, winner) in espnResults {
                 merged[slot] = winner
             }
+            // Structural prune AFTER the merge: "never shrink" protects
+            // against transient empty fetches, but it also re-uploaded stale
+            // phantom deep-round gradings held in a device's memory. Pruning
+            // the merged map lets legit results accumulate while impossible
+            // ones (winner of an undecided feeder) die here instead of
+            // round-tripping through the server forever.
+            merged = TennisBracketEngine.structurallyValidResults(merged)
             if merged != results {
                 results = merged
                 if let token = accessToken {
@@ -1576,9 +1588,11 @@ final class TennisBracketViewModel {
             // decided. A live slam (e.g. an in-progress Wimbledon) has a partial
             // rank/points, which would otherwise be written to history as a
             // finished "past result".
-            let matchResults = (try? await SupabaseService.shared.fetchTennisBracketResults(
-                tournamentID: tid, accessToken: token
-            )) ?? [:]
+            let matchResults = TennisBracketEngine.structurallyValidResults(
+                (try? await SupabaseService.shared.fetchTennisBracketResults(
+                    tournamentID: tid, accessToken: token
+                )) ?? [:]
+            )
             guard matchResults["F-1"] != nil else {
                 print("[TennisBracket] syncSettledHistory: \(tid) final (F-1) not decided — in progress, skipping")
                 continue

@@ -228,6 +228,39 @@ nonisolated struct TennisBracketEngine {
         "\(round)-\(matchNumber)"
     }
 
+    /// Drop structurally impossible results: a round-N winner is only real if
+    /// BOTH round-(N-1) feeder slots are decided and the winner actually won
+    /// one of them. Phantom gradings (qualifying matches mis-slotted into deep
+    /// rounds via draw-position meeting-point inference, or stale pre-reset
+    /// data re-merged by a device's in-memory "never shrink" results) showed
+    /// QF/SF/F winners on DAY 1 — no legitimate feed can produce a deep-round
+    /// result before its feeders, so this prunes them wherever results enter
+    /// the pipeline (server restore + ESPN merge). R1 entries always pass.
+    static func structurallyValidResults(_ results: [String: String]) -> [String: String] {
+        var valid: [String: String] = [:]
+        // R1 is axiomatically valid.
+        for (slot, winner) in results where slot.hasPrefix("R1-") {
+            valid[slot] = winner
+        }
+        // Walk deeper rounds in order so each round validates against the
+        // already-pruned previous one.
+        for r in 1..<rounds.count {
+            let round = rounds[r]
+            let prev = rounds[r - 1]
+            for m in 1...matchesPerRound[r] {
+                let slot = matchSlot(round: round, matchNumber: m)
+                guard let winner = results[slot] else { continue }
+                let feeder1 = valid[matchSlot(round: prev, matchNumber: 2 * m - 1)]
+                let feeder2 = valid[matchSlot(round: prev, matchNumber: 2 * m)]
+                guard let f1 = feeder1, let f2 = feeder2 else { continue }
+                let w = normalizedName(winner)
+                guard w == normalizedName(f1) || w == normalizedName(f2) else { continue }
+                valid[slot] = winner
+            }
+        }
+        return valid
+    }
+
     /// Which slot does the winner of `slot` advance to?
     /// R1-1 → R2-1, R1-2 → R2-1, R1-3 → R2-2, R1-4 → R2-2, ...
     static func advancementSlot(from slot: String) -> String? {

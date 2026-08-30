@@ -1070,9 +1070,11 @@ struct FantasyHubView: View {
             // (settle() runs on whichever device gets there first and
             // can skip rows that weren't in its `fieldEntries` at that
             // moment). Local computation is the source of truth.
-            let matchResults = (try? await SupabaseService.shared.fetchTennisBracketResults(
-                tournamentID: tid, accessToken: token
-            )) ?? [:]
+            let matchResults = TennisBracketEngine.structurallyValidResults(
+                (try? await SupabaseService.shared.fetchTennisBracketResults(
+                    tournamentID: tid, accessToken: token
+                )) ?? [:]
+            )
             guard !matchResults.isEmpty else {
                 print("[FantasyHub] \(tid): no results yet on server — skipping")
                 continue
