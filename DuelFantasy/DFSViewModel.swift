@@ -7923,7 +7923,10 @@ final class DFSViewModel {
                 // with ESPN's. The event ID is all a scoring provider needs
                 // (they fetch summary?event=<id>), so go straight at it rather
                 // than rendering a box score of dashes.
-                if Self.isEventFetchCoolingDown(eventID) { return }
+                // The cooldown exists to stop background sweeps from hammering
+                // dead events — a user staring at the standings screen should
+                // always get a live attempt, even if a sweep just failed.
+                if !isPresenting, Self.isEventFetchCoolingDown(eventID) { return }
                 print("[DFS-\(sport)] Box scores: \(eventID) not in the \(dateString) fetch — querying the event directly")
                 gamesForStats = [DFSSlateGame(
                     id: eventID, awayTeam: "", homeTeam: "",
@@ -7954,6 +7957,14 @@ final class DFSViewModel {
         }
 
         if let snapshot = try? await providerForStats.fetchScoreSnapshot(for: gamesForStats) {
+            // Backing out of the standings screen cancels the hosting .task,
+            // which aborts the in-flight URLSession calls — the provider then
+            // returns an EMPTY (or partial) snapshot. Treating that as a real
+            // ESPN failure poisoned the event with the 10-min cooldown and
+            // cached/latched partial data, so rapid out-and-back navigation
+            // between sports made the next standings open render all dashes.
+            // A cancelled load must leave no trace.
+            if Task.isCancelled { return }
             // Merge rather than replace, and only latch on a NON-empty result
             // (matching the PGA/NASCAR paths) so an empty fetch doesn't mark
             // the contest done and block every later attempt.
@@ -7966,8 +7977,20 @@ final class DFSViewModel {
                 for g in gamesForStats { Self.markEventFetchFailed(g.id) }
                 print("[DFS-\(sport)] Box scores: empty snapshot for \(tournamentId) (games: \(gamesForStats.map(\.id).joined(separator: ",")))")
             } else {
-                if isPresenting { pastTournamentStatsLoaded = tournamentId }
-                Self.cachePastBoxScore(tournamentId, snapshot.playerLiveStats)
+                // Latch + cache only when EVERY requested game came back
+                // (providers key gameLiveInfo per successfully-fetched game).
+                // A partial snapshot — some of a main slate's games rate-
+                // limited — would otherwise be cached process-wide, and the
+                // cache short-circuit at the top would serve those dashes
+                // for the rest of the session. Partial stats still merge
+                // above for display; the next open refetches the gaps.
+                let coveredAllGames = gamesForStats.allSatisfy { snapshot.gameLiveInfo[$0.id] != nil }
+                if coveredAllGames {
+                    if isPresenting { pastTournamentStatsLoaded = tournamentId }
+                    Self.cachePastBoxScore(tournamentId, snapshot.playerLiveStats)
+                } else {
+                    print("[DFS-\(sport)] Box scores: partial snapshot for \(tournamentId) (\(snapshot.gameLiveInfo.count)/\(gamesForStats.count) games) — not caching, will refetch")
+                }
             }
             // Box scores are keyed by ESPN athlete ID, but single-game/showdown
             // lineups reference stub IDs (e.g. wnba-<dkDraftableId>) that don't
