@@ -1246,31 +1246,86 @@ nonisolated protocol BestBallWeeklyScoringProvider {
 // MARK: - ESPN Best Ball Player Provider
 
 /// Simple reference-type cache for player projection data
-private class BBProjectionCache {
+/// Session cache shared by every fetch the provider runs. The CFB pool
+/// fans out ~140 roster tasks that all read/write this concurrently —
+/// unsynchronized Dictionary mutation corrupted the heap and crashed with
+/// `-[NSTaggedPointerString count] sent to 0x8000000000000000` the moment
+/// the providers moved off the main actor (real parallelism). Every
+/// property is lock-guarded; per-access atomicity is enough for a cache
+/// (a racing read-modify-write can lose an entry, which just refetches —
+/// it can never corrupt memory).
+private final class BBProjectionCache: @unchecked Sendable {
+    private let lock = NSLock()
+
+    private var _teamRatings: [String: [String: Double]] = [:]
+    private var _leagueProjections: [String: Double] = [:]
+    private var _leagueHRCounts: [String: Int] = [:]
+    private var _leagueProjectionsFetched: Set<String> = []
+    private var _nflADPBoard: FFCADPProvider.Board?
+    private var _eplLeadersSeason: Int?
+    private var _eplAvgPoints: [String: Double] = [:]
+    private var _eplAvgFetched = false
+    private var _cfbLeadersSeason: Int?
+    private var _cfbAvgPoints: [String: Double] = [:]
+    private var _cfbAvgScopesFetched: Set<String> = []
+
     /// Team-level performance ratings: [teamID: [espnAthleteID: 0-1 rating]]
-    var teamRatings: [String: [String: Double]] = [:]
+    var teamRatings: [String: [String: Double]] {
+        get { lock.lock(); defer { lock.unlock() }; return _teamRatings }
+        set { lock.lock(); defer { lock.unlock() }; _teamRatings = newValue }
+    }
     /// League-wide fantasy point projections from leaders endpoint: [espnAthleteID: projectedPoints]
-    var leagueProjections: [String: Double] = [:]
+    var leagueProjections: [String: Double] {
+        get { lock.lock(); defer { lock.unlock() }; return _leagueProjections }
+        set { lock.lock(); defer { lock.unlock() }; _leagueProjections = newValue }
+    }
     /// Last season HR counts from ESPN leaders: [espnAthleteID: hrCount]
-    var leagueHRCounts: [String: Int] = [:]
+    var leagueHRCounts: [String: Int] {
+        get { lock.lock(); defer { lock.unlock() }; return _leagueHRCounts }
+        set { lock.lock(); defer { lock.unlock() }; _leagueHRCounts = newValue }
+    }
     /// Whether league-wide projections have been fetched for a given sport key
-    var leagueProjectionsFetched: Set<String> = []
+    var leagueProjectionsFetched: Set<String> {
+        get { lock.lock(); defer { lock.unlock() }; return _leagueProjectionsFetched }
+        set { lock.lock(); defer { lock.unlock() }; _leagueProjectionsFetched = newValue }
+    }
     /// NFL market ADP board (fetched once per session).
-    var nflADPBoard: FFCADPProvider.Board?
+    var nflADPBoard: FFCADPProvider.Board? {
+        get { lock.lock(); defer { lock.unlock() }; return _nflADPBoard }
+        set { lock.lock(); defer { lock.unlock() }; _nflADPBoard = newValue }
+    }
     /// The season year whose eng.1 leaders actually had data (the new
     /// season's are empty until matches are played).
-    var eplLeadersSeason: Int?
+    var eplLeadersSeason: Int? {
+        get { lock.lock(); defer { lock.unlock() }; return _eplLeadersSeason }
+        set { lock.lock(); defer { lock.unlock() }; _eplLeadersSeason = newValue }
+    }
     /// EPL avg fantasy points per match played: [playerID: avg].
-    var eplAvgPoints: [String: Double] = [:]
-    var eplAvgFetched = false
+    var eplAvgPoints: [String: Double] {
+        get { lock.lock(); defer { lock.unlock() }; return _eplAvgPoints }
+        set { lock.lock(); defer { lock.unlock() }; _eplAvgPoints = newValue }
+    }
+    var eplAvgFetched: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _eplAvgFetched }
+        set { lock.lock(); defer { lock.unlock() }; _eplAvgFetched = newValue }
+    }
     /// The season year whose CFB leaders had data (empty until games are
     /// played early in a new season, so this is last season until then).
-    var cfbLeadersSeason: Int?
+    var cfbLeadersSeason: Int? {
+        get { lock.lock(); defer { lock.unlock() }; return _cfbLeadersSeason }
+        set { lock.lock(); defer { lock.unlock() }; _cfbLeadersSeason = newValue }
+    }
     /// CFB avg fantasy points per game played: [playerID: avg].
-    var cfbAvgPoints: [String: Double] = [:]
+    var cfbAvgPoints: [String: Double] {
+        get { lock.lock(); defer { lock.unlock() }; return _cfbAvgPoints }
+        set { lock.lock(); defer { lock.unlock() }; _cfbAvgPoints = newValue }
+    }
     /// Pool scopes ("all"/"power") whose averages sweep already ran —
     /// the two scopes contain different players.
-    var cfbAvgScopesFetched: Set<String> = []
+    var cfbAvgScopesFetched: Set<String> {
+        get { lock.lock(); defer { lock.unlock() }; return _cfbAvgScopesFetched }
+        set { lock.lock(); defer { lock.unlock() }; _cfbAvgScopesFetched = newValue }
+    }
 }
 
 nonisolated struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
