@@ -26,8 +26,10 @@ import SwiftUI
             let comps = cal.dateComponents([.month, .day], from: date)
             let mmdd = (comps.month ?? 1) * 100 + (comps.day ?? 1)
             switch self {
-            case .pga, .ufc:
+            case .ufc:
                 return true                              // year-round
+            case .pga:
+                return mmdd >= 105 && mmdd <= 825        // The Sentry → Tour Championship (fall series demoted)
             case .nba:
                 return mmdd >= 1021 || mmdd <= 613       // preseason → Finals (2026 title decided Jun 13)
             case .nhl:
