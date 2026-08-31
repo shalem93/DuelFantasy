@@ -1326,6 +1326,12 @@ private final class BBProjectionCache: @unchecked Sendable {
         get { lock.lock(); defer { lock.unlock() }; return _cfbAvgScopesFetched }
         set { lock.lock(); defer { lock.unlock() }; _cfbAvgScopesFetched = newValue }
     }
+    private var _cfbTeamMultipliers: [String: Double]?
+    /// CFB team-context projection multipliers (power-conf / AP boost), one fetch per session.
+    var cfbTeamMultipliers: [String: Double]? {
+        get { lock.lock(); defer { lock.unlock() }; return _cfbTeamMultipliers }
+        set { lock.lock(); defer { lock.unlock() }; _cfbTeamMultipliers = newValue }
+    }
 }
 
 nonisolated struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
@@ -1377,6 +1383,26 @@ nonisolated struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
         }
         if sportName == "CFB" {
             await attachCFBAverages(to: &players, scope: cfbPool ?? "all")
+            // Yahoo-style team context: our projections are raw last-season
+            // production, which stuffed the top of the board with small-school
+            // volume stars (NIU/TXST/Miami-OH QBs top-10) while Yahoo's board
+            // is power-conference-dominated. Dampen non-power-conference
+            // production (a G5 stat line doesn't translate 1:1 against P4
+            // schedules) and boost AP-ranked programs, whose offenses
+            // produce the fantasy scores market boards actually expect.
+            let mults = await fetchCFBTeamContextMultipliers(teamList: teamList)
+            players = players.map { p in
+                guard let m = mults[p.team], m != 1.0 else { return p }
+                var adjusted = BestBallPlayer(
+                    id: p.id, name: p.name, team: p.team, position: p.position,
+                    projectedPoints: p.projectedPoints * m,
+                    sport: p.sport, lastSeasonHR: p.lastSeasonHR
+                )
+                adjusted.adpPPR = p.adpPPR
+                adjusted.adp2QB = p.adp2QB
+                adjusted.avgPointsPerMatch = p.avgPointsPerMatch
+                return adjusted
+            }
         }
 
         // NFL: attach real market ADP (PPR + 2QB superflex boards). The
@@ -2208,6 +2234,34 @@ nonisolated struct ESPNBestBallPlayerProvider: BestBallPlayerProvider {
     /// per game PLAYED. The PROJ column divides season totals by 17 (the
     /// NFL parser CFB shares), so this is the honest per-game rate for a
     /// 12-13 game college season.
+    /// Per-team projection multipliers for CFB: power-conference teams stay
+    /// at 1.0, everyone else dampens to 0.72, and AP Top 25 programs boost
+    /// from 1.05 (rank 25) up to 1.15 (rank 1) — an AP-ranked G5 team (Boise
+    /// style) takes the boost path, not the dampener. One fetch per session.
+    private func fetchCFBTeamContextMultipliers(teamList: [BBTeamRef]) async -> [String: Double] {
+        if let cached = cache.cfbTeamMultipliers { return cached }
+        let powerIDs = await fetchCFBPowerConferenceTeamIDs(groups: [1, 4, 5, 8]).union(["87"])
+        var mult: [String: Double] = [:]
+        for team in teamList {
+            mult[team.abbreviation] = powerIDs.contains(team.id) ? 1.0 : 0.72
+        }
+        if let url = URL(string: "https://site.api.espn.com/apis/site/v2/sports/football/college-football/rankings"),
+           let (data, _) = try? await session.data(from: url),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let boards = json["rankings"] as? [[String: Any]],
+           let ap = boards.first(where: { ($0["name"] as? String)?.contains("AP") == true }) ?? boards.first,
+           let ranks = ap["ranks"] as? [[String: Any]] {
+            for entry in ranks {
+                guard let team = entry["team"] as? [String: Any],
+                      let abbr = team["abbreviation"] as? String,
+                      let rank = entry["current"] as? Int else { continue }
+                mult[abbr] = 1.15 - (Double(rank - 1) * (0.10 / 24.0))
+            }
+        }
+        cache.cfbTeamMultipliers = mult
+        return mult
+    }
+
     private func attachCFBAverages(to players: inout [BestBallPlayer], scope: String) async {
         if !cache.cfbAvgScopesFetched.contains(scope) {
             cache.cfbAvgScopesFetched.insert(scope)
