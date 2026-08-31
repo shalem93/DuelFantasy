@@ -1194,8 +1194,12 @@ final class TennisBracketViewModel {
             }
         }
 
-        // Load field entries if not yet done
-        if fieldEntries.isEmpty {
+        // Load field entries when the BOT field is missing — not merely when
+        // the array is empty. After an ATP↔WTA switch the late-bind pick
+        // restore injects the user's own entry first, so the isEmpty check
+        // saw one row, skipped the load, and the WTA leaderboard rendered
+        // just the user against 999 invisible bots.
+        if fieldEntries.filter({ $0.isBot }).count < 500 {
             await loadFieldEntries()
         }
 
@@ -1245,7 +1249,15 @@ final class TennisBracketViewModel {
         if let records = try? await SupabaseService.shared.fetchTennisBracketEntries(
             tournamentID: tournament.id, accessToken: token
         ), records.count >= 500 {
-            fieldEntries = records.map { rec in
+            // Dedupe bots by entry name — repeated generation passes have
+            // batch-inserted the same 999 bots multiple times (ATP ended up
+            // with 2998 rows), which triples the leaderboard.
+            var seenBotNames = Set<String>()
+            let uniqueRecords = records.filter { rec in
+                guard rec.isBot ?? false else { return true }
+                return seenBotNames.insert(rec.entryName).inserted
+            }
+            fieldEntries = uniqueRecords.map { rec in
                 TennisBracketEntry(
                     id: UUID(uuidString: rec.id) ?? UUID(),
                     tournamentID: rec.tournamentID,
@@ -1258,7 +1270,7 @@ final class TennisBracketViewModel {
                     isCurrentUser: rec.userID == userID
                 )
             }
-            print("[TennisBracket] Loaded \(fieldEntries.count) entries from table")
+            print("[TennisBracket] Loaded \(fieldEntries.count) entries from table (\(records.count) rows)")
             return
         }
 
@@ -1392,11 +1404,21 @@ final class TennisBracketViewModel {
             tournamentID: tournament.id, botField: botPicksData, accessToken: token
         )
 
-        // Batch insert to entries table
-        let botTuples = bots.map { (name: $0.entryName, picks: $0.picks) }
-        try? await SupabaseService.shared.batchInsertTennisBracketBotEntries(
-            tournamentID: tournament.id, bots: botTuples, accessToken: token
-        )
+        // Batch insert to entries table — but only if the server doesn't
+        // already hold a field. Generation can run after a transient entries
+        // fetch failure, and blind re-insertion duplicated the 999 bots
+        // (ATP reached 2998 rows).
+        let existingCount = (try? await SupabaseService.shared.fetchTennisBracketEntries(
+            tournamentID: tournament.id, accessToken: token
+        ))?.count ?? 0
+        if existingCount < 500 {
+            let botTuples = bots.map { (name: $0.entryName, picks: $0.picks) }
+            try? await SupabaseService.shared.batchInsertTennisBracketBotEntries(
+                tournamentID: tournament.id, bots: botTuples, accessToken: token
+            )
+        } else {
+            print("[TennisBracket] Skipping bot batch-insert — server already has \(existingCount) entries")
+        }
     }
 
     // MARK: - Settlement
