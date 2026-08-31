@@ -542,6 +542,18 @@ nonisolated struct ESPNTennisResultsProvider: Sendable {
 
     init(session: URLSession = .shared) { self.session = session }
 
+    /// ESPN serves dates both with and without seconds ("…T15:05:00Z" /
+    /// "…T15:05Z"). Try the strict internet-date form first, then the
+    /// seconds-less variant.
+    static func parseESPNCompDate(_ s: String) -> Date? {
+        if let d = ISO8601DateFormatter().date(from: s) { return d }
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.timeZone = TimeZone(identifier: "UTC")
+        fmt.dateFormat = "yyyy-MM-dd'T'HH:mm'Z'"
+        return fmt.date(from: s)
+    }
+
     /// Fetch completed match results from ESPN tennis scoreboard.
     /// Maps each completed match to a draw slot using player names.
     /// @concurrent: drills into hundreds of per-match $ref URLs and parses
@@ -806,19 +818,24 @@ nonisolated struct ESPNTennisResultsProvider: Sendable {
                         guard hasWinner else { continue }
                         // Parse competition date once before the inner task so it
                         // doesn't capture `comp` (which is the only sendable concern).
-                        let compDate: Date? = {
-                            if let dateStr = comp["date"] as? String {
-                                return ISO8601DateFormatter().date(from: dateStr)
-                            }
-                            return nil
-                        }()
+                        // ESPN core dates OMIT SECONDS ("2026-08-30T15:05Z") and
+                        // ISO8601DateFormatter requires them — the bare formatter
+                        // returned nil for EVERY comp, so every qualifying match
+                        // sailed through the date gate as "undated" and the phantom
+                        // gradings kept re-deriving on each fetch no matter how many
+                        // times the server was reset.
+                        let compDate: Date? = (comp["date"] as? String).flatMap(Self.parseESPNCompDate)
                         // Date gate: drop qualifying/warm-up matches played before
                         // the main draw started (12h grace for timezone skew).
-                        // Undated competitions pass — the draw-position mapping
-                        // still validates them.
-                        if let notBefore, let d = compDate,
-                           d < notBefore.addingTimeInterval(-12 * 3600) {
-                            continue
+                        // With a gate active, UNDATED comps are dropped too —
+                        // every legitimate slam competition carries a date, and
+                        // "undated passes" was the escape hatch phantom quali
+                        // gradings kept slipping through.
+                        if let notBefore {
+                            guard let d = compDate,
+                                  d >= notBefore.addingTimeInterval(-12 * 3600) else {
+                                continue
+                            }
                         }
                         group.addTask {
                             let names: [String?] = await withTaskGroup(of: (Int, String?).self) { inner in
