@@ -418,7 +418,7 @@ struct FantasyHubView: View {
                     .background(Color.green.opacity(0.12))
                     .foregroundStyle(Color(red: 0.1, green: 0.55, blue: 0.25))
                     .clipShape(Capsule())
-                Text(league.sport)
+                Text(displaySportLabel(league.sport))
                     .font(.caption2.weight(.bold))
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)

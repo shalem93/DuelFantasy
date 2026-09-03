@@ -191,7 +191,7 @@ struct DFSContestView: View {
                                         selectedSport = sport
                                     }
                                 } label: {
-                                    Text(sport.rawValue)
+                                    Text(displaySportLabel(sport.rawValue))
                                         .font(.subheadline.weight(.semibold))
                                         .padding(.horizontal, 16)
                                         .padding(.vertical, 8)
@@ -1489,7 +1489,7 @@ struct DFSContestView: View {
                 .font(.system(size: 48))
                 .foregroundStyle(.secondary)
 
-            Text("No College Football Games Today")
+            Text("No NCAAF Games Today")
                 .font(.title3.weight(.semibold))
 
             Text("There are no college football games scheduled today. Check back on Saturday!")
@@ -2662,7 +2662,7 @@ struct DFSContestView: View {
                                                 statsSportFilter = sport
                                             }
                                         } label: {
-                                            Text(sport)
+                                            Text(displaySportLabel(sport))
                                                 .font(.subheadline.weight(.semibold))
                                                 .padding(.horizontal, 14)
                                                 .padding(.vertical, 7)
@@ -2880,7 +2880,7 @@ struct DFSContestView: View {
                             .background(Color(.systemGray5))
                             .clipShape(Capsule())
                     }
-                    Text(sportLabel(for: result))
+                    Text(displaySportLabel(sportLabel(for: result)))
                         .font(.system(size: 9, weight: .bold))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -3742,7 +3742,7 @@ struct DFSContestView: View {
                         .foregroundStyle(.white)
                         .clipShape(Capsule())
 
-                    Text(sportLabelForTournament(entry.tournamentID))
+                    Text(displaySportLabel(sportLabelForTournament(entry.tournamentID)))
                         .font(.caption.weight(.bold))
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)

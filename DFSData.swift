@@ -6396,6 +6396,13 @@ nonisolated struct MockDFSSlateProvider: DFSSlateProvider {
 
 /// Fetches NBA slate games for a specific date key (YYYYMMDD format) from ESPN.
 /// Returns the games as DFSSlateGame objects suitable for live scoring.
+
+/// User-facing label for an internal sport key. Internal identifiers, tid
+/// prefixes, and DB values all stay "CFB" — only the rendered text changes.
+nonisolated func displaySportLabel(_ sport: String) -> String {
+    sport.uppercased() == "CFB" ? "NCAAF" : sport
+}
+
 func fetchSlateGamesForDate(_ dateKey: String) async -> [DFSSlateGame] {
     return await fetchSlateGamesForDate(dateKey, espnSport: "basketball/nba")
 }

@@ -665,7 +665,7 @@ private struct CommishSettingsSheet: View {
                 VStack(spacing: 16) {
                     // Header
                     VStack(spacing: 4) {
-                        Text(league.sport)
+                        Text(displaySportLabel(league.sport))
                             .font(.caption.weight(.bold))
                             .padding(.horizontal, 10)
                             .padding(.vertical, 4)

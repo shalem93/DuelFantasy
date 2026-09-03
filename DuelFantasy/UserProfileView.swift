@@ -250,7 +250,7 @@ struct UserProfileView: View {
                                         .frame(width: 20)
                                     VStack(alignment: .leading, spacing: 2) {
                                         HStack(spacing: 4) {
-                                            Text(sport)
+                                            Text(displaySportLabel(sport))
                                                 .font(.system(size: 9, weight: .bold))
                                                 .padding(.horizontal, 5)
                                                 .padding(.vertical, 1)
@@ -380,7 +380,7 @@ struct UserProfileView: View {
                                         .frame(width: 20)
                                     VStack(alignment: .leading, spacing: 2) {
                                         HStack(spacing: 4) {
-                                            Text(sport)
+                                            Text(displaySportLabel(sport))
                                                 .font(.system(size: 9, weight: .bold))
                                                 .padding(.horizontal, 5)
                                                 .padding(.vertical, 1)

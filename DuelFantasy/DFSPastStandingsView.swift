@@ -238,7 +238,7 @@ struct DFSPastStandingsView: View {
                     Text("FINAL")
                         .font(.caption.weight(.bold))
                         .foregroundStyle(.white)
-                    Text(sportLabel)
+                    Text(displaySportLabel(sportLabel))
                         .font(.caption2.weight(.bold))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)

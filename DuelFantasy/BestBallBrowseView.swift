@@ -79,7 +79,7 @@ struct BestBallBrowseView: View {
             )
         case "CFB":
             return SportOption(
-                name: "CFB", icon: "football.fill",
+                name: "NCAAF", icon: "football.fill",
                 tagline: "Saturdays all fall",
                 seasonNote: "Week 1 late August · 15 wks",
                 gradient: [Color(red: 0.45, green: 0.10, blue: 0.08), Color(red: 0.75, green: 0.28, blue: 0.10)]
@@ -223,7 +223,7 @@ struct BestBallBrowseView: View {
                     HStack(spacing: 8) {
                         filterPill("All", sport: nil)
                         ForEach(sports, id: \.self) { sport in
-                            filterPill(sport, sport: sport)
+                            filterPill(displaySportLabel(sport), sport: sport)
                         }
                     }
                     .padding(.horizontal, 2)
@@ -474,7 +474,7 @@ struct BestBallBrowseView: View {
                         .font(.subheadline.weight(.bold))
                         .lineLimit(1)
                     HStack(spacing: 6) {
-                        Text(league.sport)
+                        Text(displaySportLabel(league.sport))
                             .font(.caption2.weight(.heavy))
                             .foregroundStyle(option.gradient.last ?? brandPurple)
                         Text("•")
