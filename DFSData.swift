@@ -10,9 +10,9 @@ enum DFSTournamentType: String, Codable, Equatable {
     static func from(tournamentID: String) -> DFSTournamentType {
         if tournamentID.contains("-sg-") { return .singleGame }
         if tournamentID.contains("-eve") { return .evening }
-        // Time-window slates (NFL "Afternoon Only", CFB "Night Only")
-        // share the evening type's plumbing.
-        if tournamentID.contains("-aft-") || tournamentID.contains("-night-") { return .evening }
+        // Time-window slates (NFL "Afternoon Only", CFB "Night Only",
+        // MLB "Early Only") share the evening type's plumbing.
+        if tournamentID.contains("-aft-") || tournamentID.contains("-night-") || tournamentID.contains("-early-") { return .evening }
         return .main
     }
 
@@ -20,6 +20,7 @@ enum DFSTournamentType: String, Codable, Equatable {
     static func windowLabel(for tournamentID: String) -> String? {
         if tournamentID.contains("-aft-") { return "Afternoon Only" }
         if tournamentID.contains("-night-") { return "Night Only" }
+        if tournamentID.contains("-early-") { return "Early Only" }
         if tournamentID.contains("-eve") { return "Evening" }
         return nil
     }
@@ -3636,6 +3637,25 @@ nonisolated struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
             print("[MLB-DFS] Night Only slate: \(lateGames.count) games from \(includedGames.count)")
         }
 
+        // DK-style early/main split: on days with a HANDFUL of afternoon
+        // games and a big evening block (getaway Thursdays: two 12:35s,
+        // then a wall of 7:05s), DK's Main slate is the ~7pm block and the
+        // afternoon games get their own "Early Only" slate. Mirroring that
+        // keeps our Main from locking at 12:35 for a slate that's 80%
+        // evening games. Balanced days (weekend afternoons) keep the
+        // current all-day Main.
+        var mlbMainWindowIDs: [String]? = nil
+        let mlbEarlyGames = includedGames.filter { firstPitchHourET($0) < 17.0 }
+        let mlbEveningGames = includedGames.filter { firstPitchHourET($0) >= 17.0 }
+        if !mlbEarlyGames.isEmpty, mlbEarlyGames.count <= 3,
+           mlbEveningGames.count >= 4 {
+            mlbMainWindowIDs = mlbEveningGames.map(\.id)
+            mlbWindowSlates.append(DFSWindowSlate(
+                token: "early", title: "Early Only", gameIDs: mlbEarlyGames.map(\.id)
+            ))
+            print("[MLB-DFS] Early/Main split: \(mlbEarlyGames.count) early games → Early Only, Main = \(mlbEveningGames.count) evening games")
+        }
+
         // A 1-game MLB day (All-Star break, weather wipeouts) gets ONLY the
         // showdown contest, same as every other sport — a 10-player classic
         // slate drawn from two teams is redundant with the single game.
@@ -3649,6 +3669,7 @@ nonisolated struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
             includedGames: includedGames,
             mainPlayers: sortedPlayersFiltered,
             perGameShowdownSalaries: mlbPerGameShowdownSalaries.isEmpty ? nil : mlbPerGameShowdownSalaries,
+            mainWindowGameIDs: mlbMainWindowIDs,
             windowSlates: mlbWindowSlates
         )
 

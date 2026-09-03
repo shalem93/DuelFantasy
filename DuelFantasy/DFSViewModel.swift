@@ -714,9 +714,20 @@ final class DFSViewModel {
             let idSet = Set(windowIDs)
             return players.filter { idSet.contains($0.gameID ?? "") }
         }
-        // Reconstructed -aft-/-night- slates that lost their explicit window:
-        // derive it from kickoff times so the pool isn't the (wrong) generic
-        // evening set.
+        // Reconstructed -aft-/-night-/-early- slates that lost their explicit
+        // window: derive it from kickoff times so the pool isn't the (wrong)
+        // generic evening set.
+        if t.id.contains("-early-") {
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
+            let ids = Set(slateGames.filter { g in
+                let c = cal.dateComponents([.hour, .minute], from: g.startTime)
+                return Double(c.hour ?? 0) + Double(c.minute ?? 0) / 60.0 < 17.0
+            }.map(\.id))
+            if !ids.isEmpty {
+                return players.filter { ids.contains($0.gameID ?? "") }
+            }
+        }
         if t.id.contains("-aft-") || t.id.contains("-night-") {
             var cal = Calendar(identifier: .gregorian)
             cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
@@ -1807,6 +1818,14 @@ final class DFSViewModel {
             let idSet = Set(windowIDs)
             if let windowLock = slateGames.filter({ idSet.contains($0.id) }).map(\.startTime).min() {
                 return windowLock
+            }
+        }
+        // Early-window slate that lost its window: lock at the day's first
+        // game (the early block starts the slate) rather than the evening
+        // fallback below.
+        if t.id.contains("-early-") {
+            if let firstGame = slateGames.map(\.startTime).min() {
+                return firstGame
             }
         }
         if t.tournamentType.isEvening {
