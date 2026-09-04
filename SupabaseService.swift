@@ -3701,15 +3701,27 @@ nonisolated final class SupabaseService {
     }
 
     func fetchPlayoffTiersEntries(tournamentID: String, accessToken: String) async throws -> [PlayoffTiersEntryRecord] {
-        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/playoff_tiers_entries"), resolvingAgainstBaseURL: false)
-        components?.queryItems = [
-            URLQueryItem(name: "tournament_id", value: "eq.\(tournamentID)"),
-            URLQueryItem(name: "select", value: "*"),
-            URLQueryItem(name: "order", value: "total_points.desc"),
-            URLQueryItem(name: "limit", value: "1100")
-        ]
-        guard let url = components?.url else { throw URLError(.badURL) }
-        return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+        // PostgREST caps each response at 1000 rows and, with every row tied
+        // at 0 points pre-settle, WHICH 1000 came back was arbitrary — the
+        // user's own entry flickered in and out of leaderboards and computed
+        // ranks drifted between fetches. Paginate on a stable id order until
+        // a short page arrives (3-page ceiling — no field exceeds 3000).
+        var all: [PlayoffTiersEntryRecord] = []
+        for page in 0..<3 {
+            var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/playoff_tiers_entries"), resolvingAgainstBaseURL: false)
+            components?.queryItems = [
+                URLQueryItem(name: "tournament_id", value: "eq.\(tournamentID)"),
+                URLQueryItem(name: "select", value: "*"),
+                URLQueryItem(name: "order", value: "total_points.desc,id.asc"),
+                URLQueryItem(name: "limit", value: "1000"),
+                URLQueryItem(name: "offset", value: "\(page * 1000)")
+            ]
+            guard let url = components?.url else { throw URLError(.badURL) }
+            let batch: [PlayoffTiersEntryRecord] = try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+            all.append(contentsOf: batch)
+            if batch.count < 1000 { break }
+        }
+        return all
     }
 
     func fetchUserPlayoffTiersEntry(tournamentID: String, userID: String, accessToken: String) async throws -> PlayoffTiersEntryRecord? {
@@ -4035,15 +4047,27 @@ nonisolated final class SupabaseService {
     }
 
     func fetchSoccerTiersEntries(tournamentID: String, accessToken: String) async throws -> [SoccerTiersEntryRecord] {
-        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/soccer_tiers_entries"), resolvingAgainstBaseURL: false)
-        components?.queryItems = [
-            URLQueryItem(name: "tournament_id", value: "eq.\(tournamentID)"),
-            URLQueryItem(name: "select", value: "*"),
-            URLQueryItem(name: "order", value: "total_points.desc"),
-            URLQueryItem(name: "limit", value: "1100")
-        ]
-        guard let url = components?.url else { throw URLError(.badURL) }
-        return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+        // PostgREST caps each response at 1000 rows and, with every row tied
+        // at 0 points pre-settle, WHICH 1000 came back was arbitrary — the
+        // user's own entry flickered in and out of leaderboards and computed
+        // ranks drifted between fetches. Paginate on a stable id order until
+        // a short page arrives (3-page ceiling — no field exceeds 3000).
+        var all: [SoccerTiersEntryRecord] = []
+        for page in 0..<3 {
+            var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/soccer_tiers_entries"), resolvingAgainstBaseURL: false)
+            components?.queryItems = [
+                URLQueryItem(name: "tournament_id", value: "eq.\(tournamentID)"),
+                URLQueryItem(name: "select", value: "*"),
+                URLQueryItem(name: "order", value: "total_points.desc,id.asc"),
+                URLQueryItem(name: "limit", value: "1000"),
+                URLQueryItem(name: "offset", value: "\(page * 1000)")
+            ]
+            guard let url = components?.url else { throw URLError(.badURL) }
+            let batch: [SoccerTiersEntryRecord] = try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+            all.append(contentsOf: batch)
+            if batch.count < 1000 { break }
+        }
+        return all
     }
 
     func fetchUserSoccerTiersEntry(tournamentID: String, userID: String, accessToken: String) async throws -> SoccerTiersEntryRecord? {
@@ -4644,15 +4668,27 @@ nonisolated final class SupabaseService {
     }
 
     func fetchTennisBracketEntries(tournamentID: String, accessToken: String) async throws -> [TennisBracketEntryRecord] {
-        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/tennis_bracket_entries"), resolvingAgainstBaseURL: false)
-        components?.queryItems = [
-            URLQueryItem(name: "tournament_id", value: "eq.\(tournamentID)"),
-            URLQueryItem(name: "select", value: "*"),
-            URLQueryItem(name: "order", value: "total_points.desc"),
-            URLQueryItem(name: "limit", value: "1100")
-        ]
-        guard let url = components?.url else { throw URLError(.badURL) }
-        return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+        // PostgREST caps each response at 1000 rows and, with every row tied
+        // at 0 points pre-settle, WHICH 1000 came back was arbitrary — the
+        // user's own entry flickered in and out of leaderboards and computed
+        // ranks drifted between fetches. Paginate on a stable id order until
+        // a short page arrives (3-page ceiling — no field exceeds 3000).
+        var all: [TennisBracketEntryRecord] = []
+        for page in 0..<3 {
+            var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/tennis_bracket_entries"), resolvingAgainstBaseURL: false)
+            components?.queryItems = [
+                URLQueryItem(name: "tournament_id", value: "eq.\(tournamentID)"),
+                URLQueryItem(name: "select", value: "*"),
+                URLQueryItem(name: "order", value: "total_points.desc,id.asc"),
+                URLQueryItem(name: "limit", value: "1000"),
+                URLQueryItem(name: "offset", value: "\(page * 1000)")
+            ]
+            guard let url = components?.url else { throw URLError(.badURL) }
+            let batch: [TennisBracketEntryRecord] = try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+            all.append(contentsOf: batch)
+            if batch.count < 1000 { break }
+        }
+        return all
     }
 
     func fetchUserTennisBracketEntry(tournamentID: String, userID: String, accessToken: String) async throws -> TennisBracketEntryRecord? {
@@ -5043,15 +5079,27 @@ nonisolated final class SupabaseService {
     }
 
     func fetchGolfTiersEntries(tournamentID: String, accessToken: String) async throws -> [GolfTiersEntryRecord] {
-        var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/golf_tiers_entries"), resolvingAgainstBaseURL: false)
-        components?.queryItems = [
-            URLQueryItem(name: "tournament_id", value: "eq.\(tournamentID)"),
-            URLQueryItem(name: "select", value: "*"),
-            URLQueryItem(name: "order", value: "total_points.asc"),
-            URLQueryItem(name: "limit", value: "1100")
-        ]
-        guard let url = components?.url else { throw URLError(.badURL) }
-        return try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+        // PostgREST caps each response at 1000 rows and, with every row tied
+        // at 0 points pre-settle, WHICH 1000 came back was arbitrary — the
+        // user's own entry flickered in and out of leaderboards and computed
+        // ranks drifted between fetches. Paginate on a stable id order until
+        // a short page arrives (3-page ceiling — no field exceeds 3000).
+        var all: [GolfTiersEntryRecord] = []
+        for page in 0..<3 {
+            var components = URLComponents(url: SupabaseConfig.url.appending(path: "/rest/v1/golf_tiers_entries"), resolvingAgainstBaseURL: false)
+            components?.queryItems = [
+                URLQueryItem(name: "tournament_id", value: "eq.\(tournamentID)"),
+                URLQueryItem(name: "select", value: "*"),
+                URLQueryItem(name: "order", value: "total_points.asc,id.asc"),
+                URLQueryItem(name: "limit", value: "1000"),
+                URLQueryItem(name: "offset", value: "\(page * 1000)")
+            ]
+            guard let url = components?.url else { throw URLError(.badURL) }
+            let batch: [GolfTiersEntryRecord] = try await request(url: url, method: "GET", body: Optional<String>.none, bearerToken: accessToken)
+            all.append(contentsOf: batch)
+            if batch.count < 1000 { break }
+        }
+        return all
     }
 
     func fetchUserGolfTiersEntry(tournamentID: String, userID: String, accessToken: String) async throws -> GolfTiersEntryRecord? {

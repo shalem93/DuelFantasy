@@ -423,14 +423,40 @@ final class TennisBracketViewModel {
         // bracket would disappear until they re-toggled draw types.
         let isSwitchingTournament = lastLoadedTournamentID != tournamentID
         if isSwitchingTournament {
-            drawAvailable = false
-            hasSubmitted = false
-            userPicks = [:]
-            results = [:]
-            drawPlayers = []
-            leaderboardEntries = []
-            fieldEntries = []
-            fieldGenerated = false
+            // Stash the outgoing draw's full state so toggling back (ATP↔WTA,
+            // or leaving to the lobby and returning) restores INSTANTLY from
+            // memory — the network refresh below still runs and updates the
+            // restored state in place instead of blanking the screen first.
+            if let outgoing = lastLoadedTournamentID {
+                drawSnapshots[outgoing] = DrawSnapshot(
+                    tournament: tournament, drawPlayers: drawPlayers,
+                    drawAvailable: drawAvailable, results: results,
+                    fieldEntries: fieldEntries, leaderboardEntries: leaderboardEntries,
+                    userPicks: userPicks, hasSubmitted: hasSubmitted,
+                    fieldGenerated: fieldGenerated, lastRefreshDate: lastRefreshDate
+                )
+            }
+            if let snap = drawSnapshots[tournamentID] {
+                tournament = snap.tournament
+                drawPlayers = snap.drawPlayers
+                drawAvailable = snap.drawAvailable
+                results = snap.results
+                fieldEntries = snap.fieldEntries
+                leaderboardEntries = snap.leaderboardEntries
+                userPicks = snap.userPicks
+                hasSubmitted = snap.hasSubmitted
+                fieldGenerated = snap.fieldGenerated
+                lastRefreshDate = snap.lastRefreshDate
+            } else {
+                drawAvailable = false
+                hasSubmitted = false
+                userPicks = [:]
+                results = [:]
+                drawPlayers = []
+                leaderboardEntries = []
+                fieldEntries = []
+                fieldGenerated = false
+            }
             myGroups = []
             currentGroup = nil
             currentGroupMembers = []
@@ -1021,6 +1047,25 @@ final class TennisBracketViewModel {
         isSubmitting = false
     }
 
+    // MARK: - Draw Snapshots
+
+    /// Per-tournament state stash for instant restore when toggling
+    /// ATP↔WTA or re-entering the bracket screen. Display-only cache —
+    /// every load still refreshes from the network and overwrites it.
+    private struct DrawSnapshot {
+        var tournament: TennisBracketTournament?
+        var drawPlayers: [TennisBracketPlayer]
+        var drawAvailable: Bool
+        var results: [String: String]
+        var fieldEntries: [TennisBracketEntry]
+        var leaderboardEntries: [TennisBracketLeaderboardEntry]
+        var userPicks: [String: String]
+        var hasSubmitted: Bool
+        var fieldGenerated: Bool
+        var lastRefreshDate: Date?
+    }
+    @ObservationIgnored private var drawSnapshots: [String: DrawSnapshot] = [:]
+
     // MARK: - Result Sanitization
 
     /// Structural prune + draw-consistency prune. Beyond the feeder-chain
@@ -1584,6 +1629,41 @@ final class TennisBracketViewModel {
            let decoded = try? JSONSerialization.jsonObject(with: dfsHistoryData) as? [[String: Any]] {
             localHistory = decoded
         }
+
+        // PURGE phantom imports: during the stale-date-gate era a LIVE slam
+        // carried a fake F-1 "result", which made the settled-history import
+        // treat it as finished — the in-progress US Open sat in Past Results
+        // as "#999 of 1,000". Any local tennis row whose tournament is NOT
+        // settled server-side is removed here; the real row re-imports when
+        // the slam actually settles.
+        var purgedTids: [String] = []
+        for row in localHistory {
+            guard let tid = row["tournamentId"] as? String,
+                  tid.contains("-atp-") || tid.contains("-wta-") else { continue }
+            guard let rec = try? await SupabaseService.shared.fetchTennisBracketTournament(
+                tournamentID: tid, accessToken: token
+            ) else { continue }   // unreachable/missing row — leave as-is
+            if rec.status != "settled" {
+                purgedTids.append(tid)
+            }
+        }
+        if !purgedTids.isEmpty {
+            localHistory.removeAll { row in
+                (row["tournamentId"] as? String).map(purgedTids.contains) ?? false
+            }
+            if let encoded = try? JSONSerialization.data(withJSONObject: localHistory) {
+                dfsHistoryData = encoded
+            }
+            if !settledTournamentData.isEmpty,
+               var settled = try? JSONSerialization.jsonObject(with: settledTournamentData) as? [String] {
+                settled.removeAll(where: purgedTids.contains)
+                if let enc = try? JSONSerialization.data(withJSONObject: settled) {
+                    settledTournamentData = enc
+                }
+            }
+            print("[TennisBracket] purged \(purgedTids.count) unsettled slam(s) from Past Results: \(purgedTids)")
+        }
+
         let existingTids = Set(localHistory.compactMap { $0["tournamentId"] as? String })
 
         // PASS 1 — `dfs_tournament_results` (the canonical Past Results
