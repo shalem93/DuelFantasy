@@ -3,6 +3,7 @@ import SwiftUI
 struct BestBallMatchupView: View {
     @Bindable var viewModel: BestBallViewModel
     let initialMatchup: BestBallMatchup
+    @State private var detailPlayer: BBPlayerRef? = nil
 
     private var brandPurple: Color {
         Color(red: 0.48, green: 0.23, blue: 0.93)
@@ -66,6 +67,9 @@ struct BestBallMatchupView: View {
         .navigationTitle("Week \(viewModel.selectedWeek) Matchup")
         .navigationBarTitleDisplayMode(.inline)
         .background(Color(.systemGroupedBackground))
+        .sheet(item: $detailPlayer) { ref in
+            BestBallPlayerDetailSheet(viewModel: viewModel, player: ref)
+        }
     }
 
     // MARK: - Week Navigator
@@ -526,6 +530,8 @@ struct BestBallMatchupView: View {
                         .foregroundStyle(.tertiary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture { detailPlayer = BBPlayerRef(playerID: p1.pick.playerID, name: p1.pick.playerName, team: p1.pick.playerTeam, position: p1.pick.playerPosition) }
 
                 // Points box
                 Text(p1.pts > 0 ? String(format: "%.1f", p1.pts) : "-")
@@ -567,6 +573,8 @@ struct BestBallMatchupView: View {
                         .foregroundStyle(.tertiary)
                 }
                 .frame(maxWidth: .infinity, alignment: .trailing)
+                .contentShape(Rectangle())
+                .onTapGesture { detailPlayer = BBPlayerRef(playerID: p2.pick.playerID, name: p2.pick.playerName, team: p2.pick.playerTeam, position: p2.pick.playerPosition) }
             } else {
                 Text("-")
                     .font(.system(size: 13, weight: .bold).monospacedDigit())
@@ -599,6 +607,8 @@ struct BestBallMatchupView: View {
                         .foregroundStyle(.tertiary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture { detailPlayer = BBPlayerRef(playerID: p1.playerID, name: p1.playerName, team: p1.playerTeam, position: p1.playerPosition) }
 
                 Text(pts1 > 0 ? String(format: "%.1f", pts1) : "-")
                     .font(.system(size: 11, weight: .medium).monospacedDigit())
@@ -632,6 +642,8 @@ struct BestBallMatchupView: View {
                         .foregroundStyle(.tertiary)
                 }
                 .frame(maxWidth: .infinity, alignment: .trailing)
+                .contentShape(Rectangle())
+                .onTapGesture { detailPlayer = BBPlayerRef(playerID: p2.playerID, name: p2.playerName, team: p2.playerTeam, position: p2.playerPosition) }
             } else {
                 Text("")
                     .frame(width: 40)
