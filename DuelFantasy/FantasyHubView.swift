@@ -1070,11 +1070,12 @@ struct FantasyHubView: View {
             // (settle() runs on whichever device gets there first and
             // can skip rows that weren't in its `fieldEntries` at that
             // moment). Local computation is the source of truth.
-            let matchResults = TennisBracketEngine.structurallyValidResults(
-                (try? await SupabaseService.shared.fetchTennisBracketResults(
-                    tournamentID: tid, accessToken: token
-                )) ?? [:]
-            )
+            // No structural prune here: this path only grades tournaments
+            // whose final (F-1) is decided, and settled maps can carry holes
+            // that the prune would cascade into wiped late rounds.
+            let matchResults = (try? await SupabaseService.shared.fetchTennisBracketResults(
+                tournamentID: tid, accessToken: token
+            )) ?? [:]
             guard !matchResults.isEmpty else {
                 print("[FantasyHub] \(tid): no results yet on server — skipping")
                 continue

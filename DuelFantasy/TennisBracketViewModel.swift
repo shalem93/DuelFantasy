@@ -777,8 +777,14 @@ final class TennisBracketViewModel {
                     // FAILED fetch (nil) preserves in-memory results.
                     // Structural prune: stale phantom gradings (deep-round
                     // "winners" with undecided feeders) re-uploaded by old
-                    // sessions must not seed local state.
-                    results = sanitizedResults(storedResults)
+                    // sessions must not seed local state. SETTLED slams are
+                    // exempt — their maps were graded by settlement and can
+                    // legitimately carry holes (a retirement ESPN never
+                    // returned); pruning cascaded one missing QF into wiping
+                    // Wimbledon's SF/F gradings.
+                    results = tournament?.isSettled == true
+                        ? storedResults
+                        : sanitizedResults(storedResults)
                 }
             }
 
@@ -833,8 +839,8 @@ final class TennisBracketViewModel {
                        tournamentID: t.id, accessToken: token
                    ),
                    !stored.isEmpty {
-                    results = sanitizedResults(stored)
-                    print("[TennisBracket] settled: restored \(results.count)/\(stored.count) results from server row")
+                    results = stored
+                    print("[TennisBracket] settled: restored \(stored.count) results from server row")
                 }
                 // Fetch ESPN results for the settled tournament's own
                 // draw type. Without this, `results` was empty (Supabase
@@ -851,7 +857,6 @@ final class TennisBracketViewModel {
                     for (slot, winner) in freshResults {
                         merged[slot] = winner
                     }
-                    merged = sanitizedResults(merged)
                     if merged != results {
                         results = merged
                         if let token = accessToken {
@@ -1682,6 +1687,15 @@ final class TennisBracketViewModel {
         var coveredTids = Set<String>()
         for myRow in canonicalTennisRows where !existingTids.contains(myRow.tournamentID) {
             let tid = myRow.tournamentID
+            // A dfs_tournament_results row can predate real settlement (the
+            // phantom-era settle wrote one for the LIVE US Open) — without
+            // this gate the purge above removed the local row and this pass
+            // immediately re-imported it. Only settled slams import.
+            if let rec = try? await SupabaseService.shared.fetchTennisBracketTournament(
+                tournamentID: tid, accessToken: token
+            ), rec.status != "settled" {
+                continue
+            }
             coveredTids.insert(tid)
             let fieldRows = (try? await SupabaseService.shared.fetchTournamentResults(
                 tournamentID: tid, accessToken: token
@@ -1741,11 +1755,9 @@ final class TennisBracketViewModel {
             // decided. A live slam (e.g. an in-progress Wimbledon) has a partial
             // rank/points, which would otherwise be written to history as a
             // finished "past result".
-            let matchResults = TennisBracketEngine.structurallyValidResults(
-                (try? await SupabaseService.shared.fetchTennisBracketResults(
-                    tournamentID: tid, accessToken: token
-                )) ?? [:]
-            )
+            let matchResults = (try? await SupabaseService.shared.fetchTennisBracketResults(
+                tournamentID: tid, accessToken: token
+            )) ?? [:]
             guard matchResults["F-1"] != nil else {
                 print("[TennisBracket] syncSettledHistory: \(tid) final (F-1) not decided — in progress, skipping")
                 continue
