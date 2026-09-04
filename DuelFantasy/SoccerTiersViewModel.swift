@@ -512,6 +512,27 @@ final class SoccerTiersViewModel {
 
         guard !allPlayerIDs.isEmpty else { return }
 
+        // Concluded (past the hard 45-day window) but never flipped settled:
+        // the stored entry totals ARE the final scores. Re-scoring from ESPN
+        // months later shreds them — dead endpoints and partial caches
+        // rebuilt a 161-point leaderboard over the real 653.8 World Cup
+        // standings. Render straight from the stored rows and never let the
+        // live path touch a concluded tournament again.
+        let pastHardWindow = Date() > (tournament.lockTime ?? .distantFuture).addingTimeInterval(45 * 24 * 3600)
+        if pastHardWindow, !fieldEntries.isEmpty,
+           fieldEntries.contains(where: { $0.totalPoints > 0 }) {
+            let ranked = fieldEntries.sorted { $0.totalPoints > $1.totalPoints }
+            leaderboardEntries = ranked.enumerated().map { i, e in
+                SoccerTiersLeaderboardEntry(
+                    id: e.id, entryName: e.entryName, picks: e.picks,
+                    totalPoints: e.totalPoints, rank: i + 1,
+                    isCurrentUser: e.isCurrentUser, playerPoints: [:]
+                )
+            }
+            lastRefreshDate = Date()
+            return
+        }
+
         // Show last-known scores instantly while the multi-match ESPN fetch
         // runs — otherwise every cold open flashes 0.0 for every player.
         hydratePointsCacheIfNeeded()
