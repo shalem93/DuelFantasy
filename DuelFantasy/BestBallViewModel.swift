@@ -1499,6 +1499,11 @@ final class BestBallViewModel {
     func computeWeeklyScores(leagueID: String) async {
         guard let league = currentLeague, let state = draftState,
               let token = accessToken else { return }
+        // A COMPLETED league's standings are final. Re-scoring months later
+        // (stat feeds gone stale/dead) would batch-upsert garbage over the
+        // real season result — the exact failure that destroyed the World
+        // Cup Tiers final standings.
+        guard league.status == "active" else { return }
 
         // EPL weeks are official matchweeks — never score against the legacy
         // Mon-Sun fallback (it mis-filed Monday games into the next week).
@@ -1650,6 +1655,16 @@ final class BestBallViewModel {
                     dailyEntries.append((leagueID, member.id, week, dateKey, dayPoints, dayStats))
                 }
             }
+            // Zero-clobber guard: if this pass computed 0.0 for EVERY member
+            // while the stored week already has real scores, the stat source
+            // failed (dead endpoints, rate limits) — writing would erase good
+            // data with zeros. Keep what's stored and let a later pass retry.
+            let computedAllZero = memberData.values.allSatisfy { $0.total == 0 }
+            let storedHasScores = weeklyScores.contains { $0.week == week && $0.totalPoints > 0 }
+            if computedAllZero && storedHasScores {
+                print("[BestBall] Week \(week) recompute came back all-zero over existing real scores — refusing to overwrite")
+                return
+            }
             try await SupabaseService.shared.batchUpsertDailyScores(entries: dailyEntries, accessToken: token)
 
             // Recompute standings locally from what we just computed + existing scores
@@ -1776,6 +1791,8 @@ final class BestBallViewModel {
     private func refreshLiveScores(leagueID: String) async {
         guard let league = currentLeague, let state = draftState,
               let token = accessToken else { return }
+        // Never live-rescore a completed league (see computeWeeklyScores).
+        guard league.status == "active" else { return }
 
         let week = selectedWeek
         let (start, end) = BestBallSeasonHelper.weekDateRange(sport: league.sport, week: week)

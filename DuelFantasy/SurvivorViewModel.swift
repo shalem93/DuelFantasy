@@ -285,6 +285,14 @@ final class SurvivorViewModel {
                 entryID: mine.id, status: "eliminated", eliminatedWeek: elimWeek, accessToken: token
             )
         } else if elimWeek == nil, mine.status == "eliminated" {
+            // Un-eliminating is only legitimate when we can PROVE the stored
+            // elimination was wrong — i.e. we actually have that week's game
+            // data and it shows a surviving pick. A failed/empty games fetch
+            // also produces elimWeek == nil, and flipping the entry back to
+            // alive on missing data would flap eliminations every bad fetch.
+            let storedWeek = mine.eliminatedWeek ?? 0
+            let haveGameData = storedWeek > 0 && !(gamesByWeek[storedWeek] ?? []).isEmpty && isWeekComplete(storedWeek)
+            guard haveGameData else { return }
             try? await SupabaseService.shared.updateSurvivorEntry(
                 entryID: mine.id, status: "alive", eliminatedWeek: nil, accessToken: token
             )
