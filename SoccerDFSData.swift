@@ -335,10 +335,18 @@ nonisolated struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
             teamFilter: slateTeams.isEmpty ? nil : slateTeams
         )
 
-        let playersWithRealSalaries: [DFSPlayer]
+        // Pricing attempts run in order: classic feed first, then (for a
+        // one-game day) the per-match showdown feed. Each attempt only
+        // sticks if it covers >=25% of THIS slate's pool — a feed for a
+        // DIFFERENT slate must fall through, not hide the slate: RG's
+        // Friday master carries the WEEKEND "(EPL)" classic slates, which
+        // matched ~0% of the Friday IPS/LIV pool and the old guard threw
+        // "waiting for salary data" without ever trying the showdown feed
+        // that had the game's real prices.
+        var pricedPool: [DFSPlayer]? = nil
         if !socClassicSalaries.isEmpty {
             var applied = 0
-            playersWithRealSalaries = markedPlayers.map { player in
+            let candidate: [DFSPlayer] = markedPlayers.map { player in
                 guard let realSalary = RotoGrindersSalaryProvider.lookupSalary(espnName: player.name, in: socClassicSalaries) else {
                     return player
                 }
@@ -367,23 +375,20 @@ nonisolated struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
                 return updated
             }
             print("[Soccer-DFS] LineupHQ applied: \(applied)/\(markedPlayers.count) players matched DK prices")
-            // The feed must actually cover THIS slate. A classic feed for
-            // a different slate (e.g. this weekend's games while the user
-            // views next Friday's opener) matched ~nobody, everyone kept
-            // their synthetic salary, and the showdown transform's $4,000
-            // floor rendered a flat-$4,000 pool. Same gate as UFC/golf.
             let matchRate = Double(applied) / Double(max(1, markedPlayers.count))
-            guard matchRate >= 0.25 else {
-                print("[Soccer-DFS] Classic feed matches only \(Int(matchRate * 100))% of this slate — not offering it")
-                throw NSError(domain: "SoccerDFS", code: 4, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for the \(league.displayName) slate"])
+            if matchRate >= 0.25 {
+                pricedPool = candidate
+            } else {
+                print("[Soccer-DFS] Classic feed matches only \(Int(matchRate * 100))% of this slate — trying showdown pricing")
             }
-        } else if isSingleGame && !socShowdownSalaries.isEmpty {
+        }
+        if pricedPool == nil, isSingleGame, !socShowdownSalaries.isEmpty {
             // One-game day (WC semifinal/3rd-place/final): DK doesn't post a
             // CLASSIC slate for a single game — only a Showdown — so the
             // classic master is legitimately empty and gating on it hid the
             // slate entirely. Price the pool from the showdown salaries.
             var applied = 0
-            playersWithRealSalaries = markedPlayers.map { player in
+            let candidate: [DFSPlayer] = markedPlayers.map { player in
                 guard let dkPrice = RotoGrindersSalaryProvider.lookupSalary(espnName: player.name, in: socShowdownSalaries) else {
                     return player
                 }
@@ -404,16 +409,18 @@ nonisolated struct ESPNSoccerDFSSlateProvider: DFSSlateProvider {
                 updated.playedRecently = player.playedRecently
                 return updated
             }
-            print("[Soccer-DFS] One-game day, no classic slate — showdown prices applied: \(applied)/\(markedPlayers.count)")
+            print("[Soccer-DFS] One-game day — showdown prices applied: \(applied)/\(markedPlayers.count)")
             // Same this-slate coverage gate as the classic branch.
             let matchRate = Double(applied) / Double(max(1, markedPlayers.count))
-            guard matchRate >= 0.25 else {
+            if matchRate >= 0.25 {
+                pricedPool = candidate
+            } else {
                 print("[Soccer-DFS] Showdown feed matches only \(Int(matchRate * 100))% of this slate — not offering it")
-                throw NSError(domain: "SoccerDFS", code: 4, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for the \(league.displayName) slate"])
             }
-        } else {
-            // No LineupHQ/DraftKings prices for this soccer slate yet — don't
-            // offer a slate built on synthetic salaries. Wait until DK posts it.
+        }
+        // No LineupHQ/DraftKings prices covering THIS slate — don't offer a
+        // slate built on synthetic salaries. Wait until DK posts it.
+        guard let playersWithRealSalaries = pricedPool else {
             throw NSError(domain: "SoccerDFS", code: 4, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for the \(league.displayName) slate"])
         }
         let sortedPlayers = playersWithRealSalaries.sorted(by: { $0.salary > $1.salary })
