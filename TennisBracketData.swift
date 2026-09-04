@@ -3013,8 +3013,18 @@ nonisolated struct TennisBracketBotDrafter {
         grandSlam: GrandSlam,
         rng: inout SeededRNG
     ) -> Double {
-        let rank1 = max(1, Double(player1.rank))
-        let rank2 = max(1, Double(player2.rank))
+        // rank <= 0 is the "no ranking found" sentinel from draw enrichment
+        // (qualifiers outside the top ~150). max(1, rank) turned it into
+        // rank 1 — tied with the world #1 — so bots crowned random
+        // qualifiers champion (J. Kennedy winning the US Open). Unranked
+        // players are longshots: use their seed if somehow seeded, else 150.
+        func effectiveRank(_ p: TennisBracketPlayer) -> Double {
+            if p.rank > 0 { return Double(p.rank) }
+            if let seed = p.seed { return Double(seed) }
+            return 150
+        }
+        let rank1 = effectiveRank(player1)
+        let rank2 = effectiveRank(player2)
         let rankGap = abs(rank1 - rank2)
         let total = rank1 + rank2
         // Higher rank number = worse player, so rank2/total favors player1 when rank2 > rank1

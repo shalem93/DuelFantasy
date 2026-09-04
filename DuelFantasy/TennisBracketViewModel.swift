@@ -99,7 +99,9 @@ final class TennisBracketViewModel {
     // takes out every other @AppStorage write in the app (DFS history,
     // pickem state, settled flags). Cache to the Caches directory instead;
     // iOS can evict it under disk pressure, but it's freely regenerable.
-    private static let botCacheKey = "tennis_bracket_bot_cache"
+    // v2: bot-model version bump (rank-0 sentinel fix) — old cached fields
+    // hold qualifier-champion brackets and must not restore.
+    private static let botCacheKey = "tennis_bracket_bot_cache_v2"
 
     private static func botCacheFileURL(tournamentID: String) -> URL? {
         guard let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
@@ -1363,7 +1365,9 @@ final class TennisBracketViewModel {
             draw: drawPlayers,
             grandSlam: tournament.grandSlam,
             count: 999,
-            tournamentID: tournament.id
+            // "#m2" salt: the model changed (rank-0 fix), so regenerated
+            // picks must not replay the old seeds.
+            tournamentID: tournament.id + "#m2"
         ).map { entry in
             var e = entry
             e = TennisBracketEntry(
