@@ -2479,6 +2479,20 @@ nonisolated struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvi
                     continue
                 }
 
+                if sport == "NFL" || sport == "CFB" {
+                    for entry in Self.parseFootballSummaryEntries(json: json, prefix: prefix, restrictTo: playerIDSet) {
+                        totalPoints[entry.fullID, default: 0] += entry.fpts
+                        for (key, val) in entry.lookup {
+                            totalStats[entry.fullID, default: [:]][key, default: 0] += val
+                        }
+                        dailyBreakdown[dateKey, default: [:]][entry.fullID, default: 0] += entry.fpts
+                        for (key, val) in entry.lookup {
+                            dailyStats[dateKey, default: [:]][entry.fullID, default: [:]][key, default: 0] += val
+                        }
+                    }
+                    continue
+                }
+
                 guard let boxscore = json["boxscore"] as? [String: Any],
                       let playerGroups = boxscore["players"] as? [[String: Any]] else { continue }
 
@@ -2626,6 +2640,15 @@ nonisolated struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvi
                                 json: json, prefix: prefix,
                                 eventID: fetch.gameID, leaguePath: leaguePath,
                                 restrictTo: restrictToPlayerIDs, session: self.session
+                            )
+                        )
+                    }
+
+                    if sport == "NFL" || sport == "CFB" {
+                        return BoxScoreResult(
+                            dateKey: fetch.dateKey,
+                            playerEntries: Self.parseFootballSummaryEntries(
+                                json: json, prefix: prefix, restrictTo: restrictToPlayerIDs
                             )
                         )
                     }
@@ -2940,6 +2963,76 @@ nonisolated struct ESPNBestBallWeeklyScoringProvider: BestBallWeeklyScoringProvi
             entries.append((raw.fullID, fpts, lookup))
         }
         return entries
+    }
+
+    /// Football (NFL/CFB) box scores reuse the SAME label names across
+    /// categories ("YDS"/"TD" appear in passing, rushing, AND receiving), so
+    /// the generic per-category flow was doubly broken: the merged stat
+    /// lookup never matched the UI's prefixed columns (PYDS/RYDS/RECTD → all
+    /// dashes), and scoring ran once per category with a `RYDS ?? YDS`
+    /// fallback that counted a QB's passing yards as rushing yards too
+    /// (0.14/yd) and paid every TD as a 4-point pass TD. Parse per category
+    /// into prefixed keys, then score each athlete ONCE per game.
+    private nonisolated static func parseFootballSummaryEntries(
+        json: [String: Any], prefix: String, restrictTo: Set<String>?
+    ) -> [(fullID: String, fpts: Double, lookup: [String: Double])] {
+        guard let boxscore = json["boxscore"] as? [String: Any],
+              let playerGroups = boxscore["players"] as? [[String: Any]] else { return [] }
+        var byID: [String: [String: Double]] = [:]
+        for group in playerGroups {
+            for stat in (group["statistics"] as? [[String: Any]]) ?? [] {
+                let category = ((stat["name"] as? String) ?? "").lowercased()
+                guard let labels = stat["labels"] as? [String],
+                      let athletes = stat["athletes"] as? [[String: Any]] else { continue }
+                for athlete in athletes {
+                    guard let info = athlete["athlete"] as? [String: Any],
+                          let athleteID = info["id"] as? String ?? (info["id"] as? Int).map(String.init),
+                          let stats = athlete["stats"] as? [String] else { continue }
+                    let fullID = prefix + athleteID
+                    if let restrictTo, !restrictTo.contains(fullID) { continue }
+                    var raw: [String: Double] = [:]
+                    for (i, label) in labels.enumerated() where i < stats.count {
+                        // "C/ATT"-style compounds: keep the first number.
+                        if stats[i].contains("/") {
+                            raw[label] = Double(stats[i].split(separator: "/").first.map(String.init) ?? "") ?? 0
+                        } else {
+                            raw[label] = Double(stats[i]) ?? 0
+                        }
+                    }
+                    var out = byID[fullID] ?? [:]
+                    switch category {
+                    case "passing":
+                        out["PYDS", default: 0] += raw["YDS"] ?? 0
+                        out["PTD", default: 0] += raw["TD"] ?? 0
+                        out["INT", default: 0] += raw["INT"] ?? 0
+                    case "rushing":
+                        out["RYDS", default: 0] += raw["YDS"] ?? 0
+                        out["RTD", default: 0] += raw["TD"] ?? 0
+                    case "receiving":
+                        out["REC", default: 0] += raw["REC"] ?? 0
+                        out["RECYDS", default: 0] += raw["YDS"] ?? 0
+                        out["RECTD", default: 0] += raw["TD"] ?? 0
+                    case "fumbles":
+                        out["FUM", default: 0] += raw["LOST"] ?? 0
+                    default:
+                        // Defensive/interceptions/return categories don't score
+                        // (and their "INT" label must NOT bleed into QB INTs).
+                        break
+                    }
+                    byID[fullID] = out
+                }
+            }
+        }
+        return byID.map { fullID, lookup in
+            let fpts = BestBallScoringEngine.nflFantasyPoints(
+                passYds: Int(lookup["PYDS"] ?? 0), passTD: Int(lookup["PTD"] ?? 0),
+                interceptions: Int(lookup["INT"] ?? 0),
+                rushYds: Int(lookup["RYDS"] ?? 0), rushTD: Int(lookup["RTD"] ?? 0),
+                recYds: Int(lookup["RECYDS"] ?? 0), receptions: Int(lookup["REC"] ?? 0),
+                recTD: Int(lookup["RECTD"] ?? 0), fumblesLost: Int(lookup["FUM"] ?? 0)
+            )
+            return (fullID, fpts, lookup)
+        }
     }
 
     private nonisolated static func computeFantasyPoints(sport: String, labels: [String], stats: [String]) -> Double {
