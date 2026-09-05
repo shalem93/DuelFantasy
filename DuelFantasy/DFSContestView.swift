@@ -2244,8 +2244,15 @@ struct DFSContestView: View {
             if let cached = vm.cachedLiveRanks[cacheKey] {
                 return cached
             }
+            // Half-loaded scoring: the field carries points but the user's own
+            // player points haven't arrived, so lineupScore is a bogus 0 and
+            // "entries above me" is the whole field (#2,000 flashing before it
+            // corrects). Skip the live-computed fallbacks in that state and
+            // let the history/last-known rank stand.
+            let userScoringLoaded = !vm.livePlayerPoints.isEmpty || lineupScore > 0
             // If this tournament's leaderboard is loaded, compute rank from live scores
-            if vm.activeTournamentID == tournament.id, !vm.leaderboardEntries.isEmpty {
+            if vm.activeTournamentID == tournament.id, !vm.leaderboardEntries.isEmpty,
+               userScoringLoaded || !vm.leaderboardEntries.contains(where: { $0.points > 0 }) {
                 let higherCount = vm.leaderboardEntries.filter { $0.points > lineupScore }.count
                 return higherCount + 1
             }
@@ -2253,7 +2260,8 @@ struct DFSContestView: View {
             // previous live-view session). Lets the card show a rank for any
             // entered contest whose field has been generated, not just the
             // currently-selected one.
-            if let cachedLB = vm.cachedLeaderboard(for: tournament.id), !cachedLB.isEmpty {
+            if let cachedLB = vm.cachedLeaderboard(for: tournament.id), !cachedLB.isEmpty,
+               userScoringLoaded || !cachedLB.contains(where: { $0.points > 0 }) {
                 let higherCount = cachedLB.filter { $0.points > lineupScore }.count
                 return higherCount + 1
             }

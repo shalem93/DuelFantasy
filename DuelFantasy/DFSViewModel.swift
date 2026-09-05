@@ -737,8 +737,8 @@ final class DFSViewModel {
             }
             // Night threshold is sport-specific: football's late window is
             // 7pm ET, MLB's DK late slate starts with the ~9:38pm West Coast
-            // first pitches (matching the 20.5 cutoff the slate builder uses).
-            let nightHour: Double = sport == "MLB" ? 20.5 : 19.0
+            // first pitches (matching the 21.0 cutoff the slate builder uses).
+            let nightHour: Double = sport == "MLB" ? 21.0 : 19.0
             let ids: Set<String> = t.id.contains("-aft-")
                 ? Set(slateGames.filter { hourET($0.startTime) >= 15.0 && hourET($0.startTime) < 18.5 }.map(\.id))
                 : Set(slateGames.filter { hourET($0.startTime) >= nightHour }.map(\.id))
@@ -2610,7 +2610,11 @@ final class DFSViewModel {
                             lineupSize: single || sport == "PGA" ? 6 : 8,
                             salaryCap: 50000,
                             isSingleGame: single,
-                            tournamentType: single ? .singleGame : .main
+                            // Type from the tid's token, not just "-sg-": a
+                            // "-night-"/"-aft-"/"-early-" entry stub typed as
+                            // .main rendered "Main Slate" on the lobby card
+                            // until the real slate loaded and corrected it.
+                            tournamentType: DFSTournamentType.from(tournamentID: tid)
                         ))
                     }
                 }
@@ -6024,8 +6028,7 @@ final class DFSViewModel {
                     let pts = livePlayerPoints[pid] ?? 0
                     total += (isSG && i == 0) ? pts * 1.5 : pts
                 }
-                let rank = min(tournament.entryCount, leaderboard.filter({ $0.points > total }).count + 1)
-                cachedLiveRanks["\(tournament.id)-\(ln)"] = rank
+                publishLiveRank(key: "\(tournament.id)-\(ln)", userTotal: total, leaderboard: leaderboard, entryCount: tournament.entryCount)
             }
         }
 
@@ -6099,8 +6102,7 @@ final class DFSViewModel {
                     let pts = livePlayerPoints[pid] ?? 0
                     total += (tObj.isSingleGame && i == 0) ? pts * 1.5 : pts
                 }
-                let rank = min(tObj.entryCount, lb.filter({ $0.points > total }).count + 1)
-                cachedLiveRanks["\(tid)-\(ln)"] = rank
+                publishLiveRank(key: "\(tid)-\(ln)", userTotal: total, leaderboard: lb, entryCount: tObj.entryCount)
             }
         }
 
@@ -6940,8 +6942,7 @@ final class DFSViewModel {
                         let pts = livePlayerPoints[pid] ?? 0
                         total += (tObj.isSingleGame && i == 0) ? pts * 1.5 : pts
                     }
-                    let rank = min(tObj.entryCount, lb.filter({ $0.points > total }).count + 1)
-                    cachedLiveRanks["\(tid)-\(ln)"] = rank
+                    publishLiveRank(key: "\(tid)-\(ln)", userTotal: total, leaderboard: lb, entryCount: tObj.entryCount)
                 }
             }
             print("[DFS-\(sport)] Pre-cached field for \(tid): \(field.count) entries, \(lb.count) leaderboard rows")
@@ -8259,6 +8260,19 @@ final class DFSViewModel {
     /// not touch the shared stats dict while a view is reading it, or the
     /// visible box score blanks to dashes mid-display.
     private var presentedStandingsTID: String?
+
+    /// Publish a live rank for a lineup — unless this pass is a half-loaded
+    /// scoring state. The rank is "field entries above the user's total";
+    /// when the user's own player points haven't loaded yet (`livePlayerPoints`
+    /// empty) but the cached field already carries points, the user's total
+    /// is a bogus 0 and the rank a bogus dead-last (#2,000 flashing on the
+    /// Active Contests card before correcting). Keep the last published
+    /// rank in that state; publish only ranks computed from real scoring.
+    private func publishLiveRank(key: String, userTotal: Double, leaderboard: [DFSLeaderboardEntry], entryCount: Int) {
+        let fieldHasPoints = leaderboard.contains { $0.points > 0 }
+        if userTotal == 0, livePlayerPoints.isEmpty, fieldHasPoints { return }
+        cachedLiveRanks[key] = min(entryCount, leaderboard.filter({ $0.points > userTotal }).count + 1)
+    }
 
     func loadPastTournamentStandings(tournamentId: String) async {
         presentedStandingsTID = tournamentId

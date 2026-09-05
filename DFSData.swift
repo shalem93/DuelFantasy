@@ -3629,7 +3629,9 @@ nonisolated struct ESPNMLBDFSSlateProvider: DFSSlateProvider {
             return Double(c.hour ?? 0) + Double(c.minute ?? 0) / 60.0
         }
         var mlbWindowSlates: [DFSWindowSlate] = []
-        let lateGames = includedGames.filter { firstPitchHourET($0) >= 20.5 }
+        // 9:00pm ET and later — the West Coast block. 8:30 pulled the
+        // 8:40 Central-time games into "Night Only", which isn't DK's cut.
+        let lateGames = includedGames.filter { firstPitchHourET($0) >= 21.0 }
         if lateGames.count >= 2, lateGames.count < includedGames.count {
             mlbWindowSlates.append(DFSWindowSlate(
                 token: "night", title: "Night Only", gameIDs: lateGames.map(\.id)
