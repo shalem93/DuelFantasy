@@ -134,7 +134,7 @@ final class CrashReporter: NSObject, MXMetricManagerSubscriber {
     /// Immediate hang report from HangWatchdog (detection or recovery).
     /// Spools + uploads through the same channel as MetricKit diagnostics,
     /// so reports land in `crash_reports` with kind "watchdog_hang".
-    func reportWatchdogHang(_ reason: String) {
+    func reportWatchdogHang(_ reason: String, frames: [String] = []) {
         var sysinfo = utsname()
         uname(&sysinfo)
         let model = withUnsafeBytes(of: &sysinfo.machine) { buf in
@@ -152,6 +152,9 @@ final class CrashReporter: NSObject, MXMetricManagerSubscriber {
         ]
         if let userID = Self.persistedUserID() {
             row["user_id"] = userID
+        }
+        if !frames.isEmpty {
+            row["call_stack"] = ["main_thread": frames]
         }
         queue.async {
             self.spool(row)
