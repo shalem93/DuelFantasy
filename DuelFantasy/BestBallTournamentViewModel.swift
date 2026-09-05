@@ -58,7 +58,12 @@ final class BestBallTournamentViewModel {
     func loadAll(force: Bool = false) async {
         guard let token = accessToken else { return }
         if isLoading { return }
-        if hasAttemptedLoad, !force, !pool.isEmpty { await refreshScores(); return }
+        if hasAttemptedLoad, !force, !pool.isEmpty {
+            // Bots arrive at lock (loadOrGenerateBots is a no-op before it).
+            await loadOrGenerateBots()
+            await refreshScores()
+            return
+        }
         isLoading = true
         defer { isLoading = false; hasAttemptedLoad = true }
         error = nil
@@ -70,6 +75,15 @@ final class BestBallTournamentViewModel {
                 let rec = BBTTournamentRecord(id: BBTConfig.tournamentID, title: BBTConfig.title, season: BBTConfig.season, status: "open", lockTime: BBTConfig.lockTime)
                 try await SupabaseService.shared.ensureBBTTournament(record: rec, accessToken: token)
                 tournament = (try? await SupabaseService.shared.fetchBBTTournament(id: BBTConfig.tournamentID, accessToken: token)) ?? rec
+            }
+            // The persisted lock time is whatever BBTConfig said when the row
+            // was minted (Thu Sep 10 for a while); while still open, the
+            // config is the source of truth — correct the row so every
+            // client locks at the real opener kickoff.
+            if let t = tournament, t.status == "open",
+               let serverLock = t.lockTime, abs(serverLock.timeIntervalSince(BBTConfig.lockTime)) > 60 {
+                try? await SupabaseService.shared.updateBBTTournamentLockTime(id: t.id, lockTime: BBTConfig.lockTime, accessToken: token)
+                tournament = BBTTournamentRecord(id: t.id, title: t.title, season: t.season, status: t.status, lockTime: BBTConfig.lockTime)
             }
             // Status roll-forward: open → live at lock (any client may flip it).
             if let t = tournament, t.status == "open", Date() >= (t.lockTime ?? BBTConfig.lockTime) {
@@ -90,6 +104,9 @@ final class BestBallTournamentViewModel {
             // 4. Scores.
             await refreshScores()
         } catch {
+            // A pull-to-refresh that ends early cancels the task — that's
+            // not an error to show ("cancelled" banner).
+            if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
             self.error = error.localizedDescription
             print("[BBT] load failed: \(error)")
         }
@@ -116,7 +133,10 @@ final class BestBallTournamentViewModel {
     }
 
     private func loadOrGenerateBots() async {
-        guard bots.isEmpty, let token = accessToken, !pool.isEmpty else { return }
+        // Bots exist only from lock: pre-lock the field is the real entries,
+        // rosters stay editable, and the bot field is drafted against the
+        // prices in force at kickoff rather than a stale pre-season pool.
+        guard bots.isEmpty, isLocked, let token = accessToken, !pool.isEmpty else { return }
         // Server first (shared field), then local cache, then generate.
         if let field = try? await SupabaseService.shared.fetchBBTBotField(id: BBTConfig.tournamentID, accessToken: token),
            field.count >= 500 {
@@ -258,6 +278,33 @@ final class BestBallTournamentViewModel {
             return true
         } catch {
             self.error = "Couldn't submit: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    /// Pre-lock roster edit of one of my entries. Same legality + uniqueness
+    /// rules as a new entry; no fee.
+    func updateEntry(entryID: String, picks: [BBTPlayer]) async -> Bool {
+        guard let token = accessToken else { error = "Sign in to edit"; return false }
+        guard !isLocked else { error = "Entries are locked"; return false }
+        guard let existing = myEntries.first(where: { $0.id == entryID }) else { error = "Entry not found"; return false }
+        if let v = BBTRosterRules.violation(for: picks) { error = v; return false }
+        let ids = Set(picks.map(\.id))
+        if myEntries.contains(where: { $0.id != existing.id && Set($0.picks.map(\.playerID)) == ids }) {
+            error = "You already have this exact roster — change at least one player"
+            return false
+        }
+        isSubmitting = true
+        defer { isSubmitting = false }
+        let bbtPicks = picks.map { BBTPick(playerID: $0.id, name: $0.name, team: $0.team, position: $0.position, price: $0.price) }
+        do {
+            try await SupabaseService.shared.updateBBTEntryPicks(entryID: entryID, picks: bbtPicks, accessToken: token)
+            await loadEntries()
+            standings = await BBTScoringEngine.standingsAsync(entries: userEntries + bots, weekPointsByWeek: weekPoints)
+            error = nil
+            return true
+        } catch {
+            self.error = "Couldn't save: \(error.localizedDescription)"
             return false
         }
     }

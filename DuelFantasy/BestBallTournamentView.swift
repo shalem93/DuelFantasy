@@ -52,7 +52,7 @@ struct BBTLobbyView: View {
                     .foregroundStyle(.white)
                     .clipShape(Capsule())
                 Spacer()
-                Text("\(BBTConfig.season) Season")
+                Text("\(String(BBTConfig.season)) Season")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.white.opacity(0.85))
             }
@@ -60,7 +60,7 @@ struct BBTLobbyView: View {
                 .font(.title2.weight(.bold))
                 .foregroundStyle(.white)
             HStack(spacing: 24) {
-                stat(label: viewModel.isSettled ? "Final Rank" : "Your Rank", value: viewModel.bestRank.map { "#\($0.formatted())" } ?? "—")
+                stat(label: viewModel.isSettled ? "Final Rank" : "Your Rank", value: viewModel.isLocked ? (viewModel.bestRank.map { "#\($0.formatted())" } ?? "—") : "—")
                 stat(label: "Entries", value: "\(viewModel.myEntries.count)/\(BBTConfig.maxEntriesPerUser)")
                 stat(label: "Field", value: viewModel.fieldSize.formatted())
                 Spacer()
@@ -147,7 +147,7 @@ struct BBTLobbyView: View {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(s.entry.entryName).font(.subheadline.weight(.semibold))
-                                Text("$\(s.entry.spent) spent · \(s.entry.picks.count) players")
+                                Text("$\(s.entry.spent)/$\(BBTConfig.budget) spent · \(s.entry.picks.count) players")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
@@ -267,6 +267,7 @@ struct BBTLeaderboardView: View {
 struct BBTEntryDetailView: View {
     @Bindable var viewModel: BestBallTournamentViewModel
     let standing: BBTStanding
+    @State private var showEditor = false
     private var brandPurple: Color { Color(red: 0.48, green: 0.23, blue: 0.93) }
 
     /// Season points per rostered player (sum over weeks with data).
@@ -284,9 +285,9 @@ struct BBTEntryDetailView: View {
                 VStack(spacing: 6) {
                     Text(standing.entry.entryName).font(.title3.weight(.bold))
                     HStack(spacing: 20) {
-                        VStack { Text("#\(standing.rank.formatted())").font(.title2.weight(.bold)).foregroundStyle(brandPurple); Text("Rank").font(.caption2).foregroundStyle(.secondary) }
+                        VStack { Text(viewModel.isLocked ? "#\(standing.rank.formatted())" : "—").font(.title2.weight(.bold)).foregroundStyle(brandPurple); Text("Rank").font(.caption2).foregroundStyle(.secondary) }
                         VStack { Text(String(format: "%.1f", standing.totalPoints)).font(.title2.weight(.bold)); Text("Points").font(.caption2).foregroundStyle(.secondary) }
-                        VStack { Text("$\(standing.entry.spent)").font(.title2.weight(.bold)); Text("Spent").font(.caption2).foregroundStyle(.secondary) }
+                        VStack { Text("$\(standing.entry.spent)/$\(BBTConfig.budget)").font(.title2.weight(.bold)); Text("Spent").font(.caption2).foregroundStyle(.secondary) }
                     }
                 }
                 .padding(16)
@@ -352,6 +353,16 @@ struct BBTEntryDetailView: View {
         }
         .background(Color(.systemGroupedBackground))
         .navigationTitle("Entry")
+        .toolbar {
+            if !viewModel.isLocked, standing.entry.isCurrentUser {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Edit") { showEditor = true }
+                }
+            }
+        }
+        .navigationDestination(isPresented: $showEditor) {
+            BBTBuilderView(viewModel: viewModel, editing: standing.entry)
+        }
         .navigationBarTitleDisplayMode(.inline)
     }
 
@@ -370,8 +381,11 @@ struct BBTEntryDetailView: View {
 
 struct BBTBuilderView: View {
     @Bindable var viewModel: BestBallTournamentViewModel
+    /// Pre-lock edit of an existing entry (nil = new entry).
+    var editing: BBTEntry? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var picks: [BBTPlayer] = []
+    @State private var seededFromEntry = false
     @State private var positionFilter: String = "ALL"
     @State private var search = ""
     @State private var showSubmitted = false
@@ -398,7 +412,16 @@ struct BBTBuilderView: View {
             submitBar
         }
         .background(Color(.systemGroupedBackground))
-        .navigationTitle("Build Roster")
+        .navigationTitle(editing == nil ? "Build Roster" : "Edit Roster")
+        .onAppear {
+            guard let editing, !seededFromEntry else { return }
+            seededFromEntry = true
+            picks = editing.picks.compactMap { pick in
+                viewModel.pool.first { $0.id == pick.playerID }
+                    ?? BBTPlayer(id: pick.playerID, name: pick.name, team: pick.team, position: pick.position,
+                                 price: pick.price, adp: nil, projectedPoints: 0)
+            }
+        }
         .navigationBarTitleDisplayMode(.inline)
         .searchable(text: $search, prompt: "Search players or teams")
         .alert("Entry submitted", isPresented: $showSubmitted) {
@@ -528,14 +551,20 @@ struct BBTBuilderView: View {
             if let v = violation {
                 Text(v).font(.caption).foregroundStyle(.secondary)
             } else {
-                Text("Roster is legal · \(BBTConfig.entryFeeRR) RR entry").font(.caption).foregroundStyle(.secondary)
+                Text(editing == nil ? "Roster is legal · \(BBTConfig.entryFeeRR) RR entry" : "Roster is legal · edits are free until lock")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Button {
                 Task {
-                    if await viewModel.submitEntry(picks: picks) { showSubmitted = true }
+                    if let editing {
+                        if await viewModel.updateEntry(entryID: editing.id, picks: picks) { dismiss() }
+                    } else if await viewModel.submitEntry(picks: picks) {
+                        showSubmitted = true
+                    }
                 }
             } label: {
-                Text(viewModel.isSubmitting ? "Submitting…" : "Submit Entry #\(viewModel.myEntries.count + 1)")
+                Text(viewModel.isSubmitting ? (editing == nil ? "Submitting…" : "Saving…")
+                     : (editing == nil ? "Submit Entry #\(viewModel.myEntries.count + 1)" : "Save Changes"))
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 14)

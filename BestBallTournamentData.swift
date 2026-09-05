@@ -22,11 +22,13 @@ nonisolated enum BBTConfig {
     static let maxEntriesPerUser = 10
     static let entryFeeRR = 10
     static let totalWeeks = 18
-    /// Entries lock at the Week 1 Thursday kickoff (ET).
+    /// Entries lock at the Week 1 opener's kickoff (ET) — 2026: NE @ SEA,
+    /// Wednesday Sep 9, 8:20 PM ET (ESPN 2026-09-10T00:20Z). Rosters are
+    /// editable and bots are not loaded until then.
     static var lockTime: Date {
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = TimeZone(identifier: "America/New_York")!
-        return cal.date(from: DateComponents(year: season, month: 9, day: 10, hour: 20, minute: 15)) ?? .distantFuture
+        return cal.date(from: DateComponents(year: season, month: 9, day: 9, hour: 20, minute: 20)) ?? .distantFuture
     }
     /// Positional floors/ceilings for a legal 15-man roster.
     static let minByPosition: [String: Int] = ["QB": 1, "RB": 2, "WR": 3, "TE": 1]
@@ -409,6 +411,26 @@ extension SupabaseService {
         let body = try JSONSerialization.data(withJSONObject: ["status": status])
         _ = try await bbtRequest(
             path: "bbt_tournaments", query: [URLQueryItem(name: "id", value: "eq.\(id)")],
+            method: "PATCH", body: body, token: accessToken
+        )
+    }
+
+    /// Corrects a persisted lock time (the first client to mint the row
+    /// wrote whatever BBTConfig said at the time).
+    func updateBBTTournamentLockTime(id: String, lockTime: Date, accessToken: String) async throws {
+        let body = try JSONSerialization.data(withJSONObject: ["lock_time": ISO8601DateFormatter().string(from: lockTime)])
+        _ = try await bbtRequest(
+            path: "bbt_tournaments", query: [URLQueryItem(name: "id", value: "eq.\(id)")],
+            method: "PATCH", body: body, token: accessToken
+        )
+    }
+
+    /// Pre-lock roster edit (RLS: own rows only).
+    func updateBBTEntryPicks(entryID: String, picks: [BBTPick], accessToken: String) async throws {
+        let picksJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(picks))
+        let body = try JSONSerialization.data(withJSONObject: ["picks": picksJSON])
+        _ = try await bbtRequest(
+            path: "bbt_entries", query: [URLQueryItem(name: "id", value: "eq.\(entryID)")],
             method: "PATCH", body: body, token: accessToken
         )
     }
