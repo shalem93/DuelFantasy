@@ -6227,23 +6227,7 @@ final class DFSViewModel {
             }
         }
 
-        // Per-contest finality. With a lookahead day merged into the slate
-        // (Saturday's games alongside Friday's), the slate-wide
-        // allGamesFinal stays false until TOMORROW's games end — which
-        // would hold every one of today's contests un-settled overnight.
-        // A showdown is final when ITS game is; a windowed slate when ITS
-        // games are. Slate-wide finality remains the fallback.
-        let contestFinal: Bool = {
-            if snapshot.allGamesFinal { return true }
-            if tournament.tournamentType == .singleGame, let gid = tournament.gameID {
-                return snapshot.gameLiveInfo[gid]?.state == "post"
-            }
-            if let ids = tournament.windowGameIDs, !ids.isEmpty {
-                return ids.allSatisfy { snapshot.gameLiveInfo[$0]?.state == "post" }
-            }
-            return false
-        }()
-        guard contestFinal else { return }
+        guard snapshot.allGamesFinal else { return }
         guard !settledTournaments.contains(tournament.id) else { return }
 
         // Never settle against a field that doesn't belong to this tournament.

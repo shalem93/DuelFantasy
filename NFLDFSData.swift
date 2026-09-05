@@ -47,36 +47,15 @@ nonisolated struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
         if let cached = NFLSlateCache.shared.get() {
             return cached
         }
-        let allEvents = try await fetchNFLAllEvents()
-        let events = selectPrimaryEvents(from: allEvents)
+
+        // Start fetching real DraftKings salaries in parallel with ESPN data
+        async let rgSalaries = RotoGrindersSalaryProvider.shared.fetchSalaries(sport: "nfl", maxClassicSalary: 10000)
+
+        // 1. Fetch NFL events (games) across the relevant date window
+        let events = try await fetchNFLEvents()
         guard !events.isEmpty else {
             throw NSError(domain: "NFLDFS", code: 1, userInfo: [NSLocalizedDescriptionKey: "No NFL games found"])
         }
-        var slate = try await buildDaySlate(events: events)
-
-        // LOOKAHEAD: once every game on the primary day has kicked off,
-        // also offer the NEXT game day (Thursday night's live card used to
-        // hide Sunday's 1pm slate until the rollover). Best-effort — if
-        // Sunday's prices aren't posted yet the build throws and today's
-        // slate stands alone.
-        let calendar = Calendar.current
-        let primaryDay = calendar.startOfDay(for: events.first!.date)
-        let primaryHasPre = events.contains { $0.competitions.first?.status.type.state == "pre" }
-        if !primaryHasPre {
-            let nextEvents = selectNextDayPreEvents(from: allEvents, after: primaryDay)
-            if !nextEvents.isEmpty, let next = try? await buildDaySlate(events: nextEvents) {
-                slate = mergeDaySlates(primary: slate, next: next)
-                print("[NFL-DFS] Lookahead: merged \(nextEvents.count) next-day games (\(next.tournaments.count) contests) into today's locked slate")
-            }
-        }
-        NFLSlateCache.shared.set(slate)
-        return slate
-    }
-
-    /// Builds one game day's full slate from that day's events.
-    private func buildDaySlate(events: [NFLScoreboardEvent]) async throws -> DFSSlate {
-        // Start fetching real DraftKings salaries in parallel with ESPN data
-        async let rgSalaries = RotoGrindersSalaryProvider.shared.fetchSalaries(sport: "nfl", maxClassicSalary: 10000)
 
         // 2. Build included games and collect team references
         var includedGames: [DFSSlateGame] = []
@@ -314,6 +293,7 @@ nonisolated struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
             players: sortedPlayers,
             singleGamePlayers: sgPlayers
         )
+        NFLSlateCache.shared.set(slate)
         return slate
     }
 
@@ -371,7 +351,7 @@ nonisolated struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
 
     /// Fetch NFL events across a wide date window (Thu/Sun/Mon game scheduling).
     /// Prefers live events, then upcoming (nearest date first), then recent post.
-    private func fetchNFLAllEvents() async throws -> [NFLScoreboardEvent] {
+    private func fetchNFLEvents() async throws -> [NFLScoreboardEvent] {
         let calendar = Calendar.current
         // NFL games span Thu-Mon: check -2 to +7 days
         let datesToCheck = (-2...7).compactMap { calendar.date(byAdding: .day, value: $0, to: Date()) }
@@ -401,25 +381,7 @@ nonisolated struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
         }
         var seenIDs = Set<String>()
         allEvents = allEvents.filter { seenIDs.insert($0.id).inserted }
-        return allEvents
-    }
 
-    /// Upcoming ("pre") events on the earliest game day strictly after
-    /// `day` — the lookahead day merged into a fully-locked slate.
-    private func selectNextDayPreEvents(from allEvents: [NFLScoreboardEvent], after day: Date) -> [NFLScoreboardEvent] {
-        let calendar = Calendar.current
-        let future = allEvents.filter { event in
-            calendar.startOfDay(for: event.date) > day
-                && event.competitions.first?.status.type.state == "pre"
-        }
-        guard let nextDay = future.map({ calendar.startOfDay(for: $0.date) }).min() else { return [] }
-        return future.filter { calendar.startOfDay(for: $0.date) == nextDay }.sorted { $0.date < $1.date }
-    }
-
-    /// Picks the primary game day: live day first, then the nearest
-    /// upcoming day, then the most recent finished day (for settlement).
-    private func selectPrimaryEvents(from allEvents: [NFLScoreboardEvent]) -> [NFLScoreboardEvent] {
-        let calendar = Calendar.current
         // Categorize events by state
         var liveEvents: [NFLScoreboardEvent] = []
         var preEvents: [NFLScoreboardEvent] = []
