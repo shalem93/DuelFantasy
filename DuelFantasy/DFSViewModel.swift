@@ -403,6 +403,9 @@ final class DFSViewModel {
             return !players.isEmpty
         }()
         guard hasPool else { return false }
+        // Pre-lock football generates no field (see shouldDeferBotGeneration);
+        // a loaded pool is all "ready" means until lock.
+        if sport == "NFL" || sport == "CFB", Date() < lockTimeForTournament(t) { return true }
 
         // 2. Field populated to a SHOWABLE threshold. We only need enough to
         // render a meaningful leaderboard — the rest can stream in via the
@@ -3273,6 +3276,14 @@ final class DFSViewModel {
         // the next refresh after they leave the builder.
         if isEditingLineup { return true }
 
+        // Football pre-lock: a Saturday CFB / Sunday NFL pool runs 1,000+
+        // players and a 2,000-bot field costs a minute of main-actor time —
+        // the iOS watchdog killed the app on the first NCAAF tap (breadcrumb
+        // "activePlayers rebuild CFB", 62s hang). Nobody can see a pre-lock
+        // field (contest cards aren't tappable until lock), so football
+        // fields generate at lock through the post-lock padding paths.
+        if sport == "NFL" || sport == "CFB" { return true }
+
         if sport == "NHL", t.isSingleGame {
             let pool: [DFSPlayer]
             if let gid = t.gameID, let sg = singleGamePlayers[gid], !sg.isEmpty {
@@ -5592,7 +5603,10 @@ final class DFSViewModel {
                 if staleVsConfirmedLineups || malformedGeneration {
                     let botsToGenerate = max(0, tournament.entryCount - realEntries.count)
                     var freshBots: [DFSFieldEntry] = []
-                    let chunkSize = 10
+                    // Big pools (Saturday CFB / Sunday NFL, 1,000+ players) make each
+                    // bot expensive enough that 10 per yield blocks the main thread past
+                    // the watchdog threshold — yield after every bot there.
+                    let chunkSize = activePlayers.count > 400 ? 1 : 10
                     for index in 0..<botsToGenerate {
                         let newIDs = generateBotLineup(from: activePlayers, salaryCap: tournament.salaryCap, lineupSize: tournament.lineupSize, rosterSlots: tournament.rosterSlots, isSingleGame: tournament.isSingleGame)
                         let baseName = sampleNames[index % sampleNames.count]
@@ -5609,7 +5623,10 @@ final class DFSViewModel {
                     print("[DFS-\(sport)] \(wrongShapeBots.count)/\(trimmedBots.count) saved bots are wrong-shape — discarding entire bot field and regenerating fresh (one-shot)")
                     let botsToGenerate = max(0, tournament.entryCount - realEntries.count)
                     var freshBots: [DFSFieldEntry] = []
-                    let chunkSize = 10
+                    // Big pools (Saturday CFB / Sunday NFL, 1,000+ players) make each
+                    // bot expensive enough that 10 per yield blocks the main thread past
+                    // the watchdog threshold — yield after every bot there.
+                    let chunkSize = activePlayers.count > 400 ? 1 : 10
                     for index in 0..<botsToGenerate {
                         let newIDs = generateBotLineup(from: activePlayers, salaryCap: tournament.salaryCap, lineupSize: tournament.lineupSize, rosterSlots: tournament.rosterSlots, isSingleGame: tournament.isSingleGame)
                         let baseName = sampleNames[index % sampleNames.count]
@@ -5701,7 +5718,10 @@ final class DFSViewModel {
                     let botsNeeded = targetBots - totalNonUser
                     print("[DFS-\(sport)] Padding bot field with \(botsNeeded) bots (had \(totalNonUser), need \(targetBots), locked=\(tournamentIsLocked))")
                     let startIndex = totalNonUser
-                    let chunkSize = 10
+                    // Big pools (Saturday CFB / Sunday NFL, 1,000+ players) make each
+                    // bot expensive enough that 10 per yield blocks the main thread past
+                    // the watchdog threshold — yield after every bot there.
+                    let chunkSize = activePlayers.count > 400 ? 1 : 10
                     for i in 0..<botsNeeded {
                         let botPlayerIDs = generateBotLineup(from: activePlayers, salaryCap: tournament.salaryCap, lineupSize: tournament.lineupSize, rosterSlots: tournament.rosterSlots, isSingleGame: tournament.isSingleGame)
                         let baseName = sampleNames[(startIndex + i) % sampleNames.count]
@@ -5730,7 +5750,10 @@ final class DFSViewModel {
                 // froze the view for minutes.
                 var accumulated: [DFSFieldEntry] = []
                 accumulated.reserveCapacity(count)
-                let chunkSize = 10
+                // Big pools (Saturday CFB / Sunday NFL, 1,000+ players) make each
+                // bot expensive enough that 10 per yield blocks the main thread past
+                // the watchdog threshold — yield after every bot there.
+                let chunkSize = activePlayers.count > 400 ? 1 : 10
                 for index in 0..<count {
                     let botPlayerIDs = generateBotLineup(from: activePlayers, salaryCap: tournament.salaryCap, lineupSize: tournament.lineupSize, rosterSlots: tournament.rosterSlots, isSingleGame: tournament.isSingleGame)
                     if botPlayerIDs.isEmpty { emptyCount += 1 }
@@ -5769,7 +5792,10 @@ final class DFSViewModel {
                     // a chance to render.
                     var botEntries: [DFSFieldEntry] = []
                     var emptyCount = 0
-                    let chunkSize = 10
+                    // Big pools (Saturday CFB / Sunday NFL, 1,000+ players) make each
+                    // bot expensive enough that 10 per yield blocks the main thread past
+                    // the watchdog threshold — yield after every bot there.
+                    let chunkSize = activePlayers.count > 400 ? 1 : 10
                     for index in 0..<botsNeeded {
                         let botPlayerIDs = generateBotLineup(from: activePlayers, salaryCap: tournament.salaryCap, lineupSize: tournament.lineupSize, rosterSlots: tournament.rosterSlots, isSingleGame: tournament.isSingleGame)
                         if botPlayerIDs.isEmpty { emptyCount += 1 }
@@ -6816,7 +6842,10 @@ final class DFSViewModel {
                     if expectedEntries <= 100 { return 10 }
                     return 25
                 }()
-                let chunkSize = 10
+                // Big pools (Saturday CFB / Sunday NFL, 1,000+ players) make each
+                // bot expensive enough that 10 per yield blocks the main thread past
+                // the watchdog threshold — yield after every bot there.
+                let chunkSize = poolForBots.count > 400 ? 1 : 10
                 var publishedReady = false
                 for i in 0..<botsNeeded {
                     let botIDs = generateBotLineup(from: poolForBots, salaryCap: tObj.salaryCap, lineupSize: tObj.lineupSize, rosterSlots: tObj.rosterSlots, isSingleGame: tObj.isSingleGame)
