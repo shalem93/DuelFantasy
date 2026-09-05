@@ -805,54 +805,83 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
         return summary
     }
 
-    /// Replace each DK-priced player's projection with a blend of this
-    /// season's per-game average (weight n/(n+3): one game = 25%, three
-    /// games = 50%), last season's average regressed toward the salary-
-    /// implied projection, and — with no history at all — the salary-
-    /// implied projection alone. Mild 10% regression toward the position
-    /// average at the end. Runs 32 requests wide; the cache makes every
-    /// later slate load free.
+    /// Projection rules (user-directed, Sep 2026 — "the average game total
+    /// is a better estimate right now"):
+    ///   1. Any current-season games → projection IS this season's per-game
+    ///      average. No blending, no regression: a backup QB's two snaps
+    ///      in week 1 say more about his role than his $7,700 price or his
+    ///      last-season line ever will (Sam Huard projected 10.9 off the
+    ///      blend; his real average was a fraction of that).
+    ///   2. Zero games while his TEAM has played this season → he didn't
+    ///      dress or didn't touch the ball: a DNP risk, projected at 25%
+    ///      of the salary-implied number rather than the full thing.
+    ///   3. Team hasn't played yet → last season's average regressed toward
+    ///      the salary-implied projection, or salary-implied alone.
+    /// Runs 32 requests wide; the cache makes every later slate load free.
     private func attachGameLogProjections(to players: [DFSPlayer]) async -> [DFSPlayer] {
         let currentSeason = Calendar.current.component(.year, from: Date())
         let salaryFloor = players.map(\.salary).min() ?? 0
 
-        struct Projected: Sendable { let id: String; let projection: Double }
-        var projections: [String: Double] = [:]
-
-        for chunk in stride(from: 0, to: players.count, by: 32).map({ Array(players[$0..<min($0 + 32, players.count)]) }) {
-            let results: [Projected] = await withTaskGroup(of: Projected.self) { group in
+        // Phase 1: this season's summary for every non-floor player.
+        var curByID: [String: GameLogSummaryCache.Summary] = [:]
+        let fetchable = players.filter { $0.salary > salaryFloor }
+        for chunk in stride(from: 0, to: fetchable.count, by: 32).map({ Array(fetchable[$0..<min($0 + 32, fetchable.count)]) }) {
+            let results: [(String, GameLogSummaryCache.Summary)] = await withTaskGroup(of: (String, GameLogSummaryCache.Summary).self) { group in
                 for player in chunk {
                     group.addTask {
-                        let implied = self.cfbSalaryImpliedProjection(salary: player.salary)
-                        // Deep-bench prices at the slate floor: no history
-                        // fetch, the price already says "unlikely to matter".
-                        if player.salary <= salaryFloor {
-                            return Projected(id: player.id, projection: (implied * 10).rounded() / 10)
-                        }
-                        let cur = await self.gameLogSummary(playerID: player.id, position: player.position, season: currentSeason, isCurrentSeason: true)
-                        // Once this season is established, last season adds little.
-                        let last: GameLogSummaryCache.Summary = cur.games >= 4
-                            ? GameLogSummaryCache.Summary(games: 0, avgFPTS: 0, fetchedAt: Date())
-                            : await self.gameLogSummary(playerID: player.id, position: player.position, season: currentSeason - 1, isCurrentSeason: false)
-
-                        let base: Double
-                        if last.games > 0 {
-                            let wLast = Double(last.games) / Double(last.games + 2)
-                            base = last.avgFPTS * wLast + implied * (1 - wLast)
-                        } else {
-                            base = implied
-                        }
-                        let wCur = Double(cur.games) / Double(cur.games + 3)
-                        var proj = wCur * cur.avgFPTS + (1 - wCur) * base
-                        proj = proj * 0.9 + self.cfbPositionAverage(player.position) * 0.1
-                        return Projected(id: player.id, projection: max(0, (proj * 10).rounded() / 10))
+                        (player.id, await self.gameLogSummary(playerID: player.id, position: player.position, season: currentSeason, isCurrentSeason: true))
                     }
                 }
-                var out: [Projected] = []
-                for await p in group { out.append(p) }
+                var out: [(String, GameLogSummaryCache.Summary)] = []
+                for await r in group { out.append(r) }
                 return out
             }
-            for p in results { projections[p.id] = p.projection }
+            for (id, s) in results { curByID[id] = s }
+        }
+
+        // Which teams have actually played this season (any rostered player
+        // with a logged game). Distinguishes "backup who didn't play" from
+        // "team's opener is this week".
+        var teamsPlayed = Set<String>()
+        for player in players where (curByID[player.id]?.games ?? 0) > 0 {
+            teamsPlayed.insert(player.team)
+        }
+
+        // Phase 2: last season only where it still matters (team unplayed).
+        let needLast = fetchable.filter { (curByID[$0.id]?.games ?? 0) == 0 && !teamsPlayed.contains($0.team) }
+        var lastByID: [String: GameLogSummaryCache.Summary] = [:]
+        for chunk in stride(from: 0, to: needLast.count, by: 32).map({ Array(needLast[$0..<min($0 + 32, needLast.count)]) }) {
+            let results: [(String, GameLogSummaryCache.Summary)] = await withTaskGroup(of: (String, GameLogSummaryCache.Summary).self) { group in
+                for player in chunk {
+                    group.addTask {
+                        (player.id, await self.gameLogSummary(playerID: player.id, position: player.position, season: currentSeason - 1, isCurrentSeason: false))
+                    }
+                }
+                var out: [(String, GameLogSummaryCache.Summary)] = []
+                for await r in group { out.append(r) }
+                return out
+            }
+            for (id, s) in results { lastByID[id] = s }
+        }
+
+        var projections: [String: Double] = [:]
+        for player in players {
+            let implied = cfbSalaryImpliedProjection(salary: player.salary)
+            let proj: Double
+            if player.salary <= salaryFloor {
+                // Slate-floor price: the price already says "unlikely to matter".
+                proj = teamsPlayed.contains(player.team) ? implied * 0.25 : implied
+            } else if let cur = curByID[player.id], cur.games > 0 {
+                proj = cur.avgFPTS                                   // rule 1
+            } else if teamsPlayed.contains(player.team) {
+                proj = implied * 0.25                                // rule 2
+            } else if let last = lastByID[player.id], last.games > 0 {
+                let wLast = Double(last.games) / Double(last.games + 2)
+                proj = last.avgFPTS * wLast + implied * (1 - wLast)  // rule 3
+            } else {
+                proj = implied
+            }
+            projections[player.id] = max(0, (proj * 10).rounded() / 10)
         }
 
         let updated = players.map { player -> DFSPlayer in
