@@ -925,21 +925,61 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
             projections[player.id] = max(0, (proj * 10).rounded() / 10)
         }
 
+        // Depth-chart starters. ESPN publishes no college depth charts, so
+        // the chart is inferred per team + position: QB1, RB1–2, WR1–3, TE1.
+        // Teams that have played this season rank by per-game average (a
+        // player with no 2026 game can't be a starter there — that's the
+        // week-1 backup who threw one pass); teams playing their opener rank
+        // by DK price, which is DK's own read of the depth chart. Only these
+        // players are `isConfirmedActive`, and the bot generator's football
+        // pool drafts confirmed players exclusively — bots stop rostering
+        // third-string backs and $4K DNPs as cap fillers.
+        let starterSlots: [String: Int] = ["QB": 1, "RB": 2, "WR": 3, "TE": 1]
+        var starterIDs = Set<String>()
+        let priced = players.filter { $0.salary > salaryFloor }
+        let byTeamPos = Dictionary(grouping: priced) { "\($0.team)|\($0.position)" }
+        for (key, group) in byTeamPos {
+            let position = key.split(separator: "|").last.map(String.init) ?? ""
+            guard let slots = starterSlots[position] else { continue }
+            let team = group.first?.team ?? ""
+            let ranked: [DFSPlayer]
+            if teamsPlayed.contains(team) {
+                ranked = group
+                    .filter { (curByID[$0.id]?.games ?? 0) > 0 }
+                    .sorted { a, b in
+                        let pa = curByID[a.id]?.avgFPTS ?? 0, pb = curByID[b.id]?.avgFPTS ?? 0
+                        return pa != pb ? pa > pb : a.salary > b.salary
+                    }
+            } else {
+                ranked = group.sorted { a, b in
+                    a.salary != b.salary ? a.salary > b.salary
+                        : (lastByID[a.id]?.avgFPTS ?? 0) > (lastByID[b.id]?.avgFPTS ?? 0)
+                }
+            }
+            for p in ranked.prefix(slots) { starterIDs.insert(p.id) }
+        }
+
         let updated = players.map { player -> DFSPlayer in
-            guard let proj = projections[player.id] else { return player }
+            let isStarter = starterIDs.contains(player.id)
+            guard let proj = projections[player.id] else {
+                var copy = player
+                copy.isConfirmedActive = isStarter
+                return copy
+            }
             var copy = DFSPlayer(
                 id: player.id, name: player.name, team: player.team,
                 position: player.position, salary: player.salary,
                 projectedPoints: proj,
                 gameID: player.gameID, injuryStatus: player.injuryStatus
             )
-            copy.isConfirmedActive = player.isConfirmedActive
+            copy.isConfirmedActive = isStarter
             copy.playedRecently = player.playedRecently
             copy.gamesPlayed = player.gamesPlayed
             return copy
         }
         let nonZero = updated.filter { $0.projectedPoints > 0 }.count
-        print("[CFB-DFS] Game-log projections: \(nonZero)/\(updated.count) players projected > 0")
+        let teamsWithStarters = Set(updated.filter(\.isConfirmedActive).map(\.team)).count
+        print("[CFB-DFS] Game-log projections: \(nonZero)/\(updated.count) players projected > 0; depth starters \(starterIDs.count) across \(teamsWithStarters) teams (\(teamsPlayed.count) teams have 2026 games)")
         return updated
     }
 

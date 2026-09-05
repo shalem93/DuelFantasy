@@ -325,7 +325,15 @@ nonisolated struct DFSBotGenerator: Sendable {
         // Strongly prefer confirmed active players (matched by real salary data).
         // NHL uses a lower threshold because RotoGrinders NHL pools are smaller.
         let confirmed = eligible.filter { $0.isConfirmedActive }
-        let confirmedThreshold = (effectiveSport == "NHL") ? lineupSize + 5 : lineupSize * 2
+        // Football "confirmed" = inferred depth-chart starter (QB1, RB1–2,
+        // WR1–3, TE1 per team). A showdown has ~14 of them; a team without
+        // a priced TE dips under lineupSize*2 and would fall back to the
+        // full pool — keep the starter-only pool as long as a lineup fits.
+        let confirmedThreshold: Int = {
+            if effectiveSport == "NHL" { return lineupSize + 5 }
+            if effectiveSport == "NFL" || effectiveSport == "CFB" { return lineupSize + 3 }
+            return lineupSize * 2
+        }()
         let useConfirmedPool = confirmed.count >= confirmedThreshold
 
         // For MLB: strongly prefer confirmed starters to avoid drafting bench players.
