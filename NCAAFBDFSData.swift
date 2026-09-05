@@ -248,25 +248,48 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
         }
 
         var coveredGames: [DFSSlateGame] = []
+        // Games of DK's primary classic slate — the Main tournaments' scope.
+        var primaryGameIDs: [String]? = nil
         var dkWindowSlates: [DFSWindowSlate] = []
         if let primary = dkClassicSlates.first(where: { !gamesIn($0).isEmpty }) {
             coveredGames = gamesIn(primary)
             print("[CFB-DFS] Main slate mirrors DK classic \"\(primary.name)\": \(coveredGames.count)/\(includedGames.count) games")
-            // Every OTHER classic slate that is a proper subset becomes a
-            // window slate, titled from its ET start like DK labels them.
+            // Every OTHER classic slate DK runs today becomes a window slate,
+            // titled from its ET start like DK labels them. They need NOT be
+            // subsets of the primary: DK's CFB "12:00pm" main covers the noon
+            // and 3:30 games only, and the "7:00pm (Night)" slate is a
+            // separate set — requiring a subset silently dropped Night Only
+            // and left every evening game out of the classic pool (only two
+            // showdowns after 7:30pm on a 68-game Saturday). Games a window
+            // adds beyond the primary join the covered pool; the Main
+            // tournaments stay scoped to the primary's games.
+            var startByToken: [String: Double] = [:]
             for slate in dkClassicSlates where slate.id != primary.id {
                 let games = gamesIn(slate)
-                guard games.count >= 2, games.count < coveredGames.count else { continue }
-                guard Set(games.map(\.id)).isSubset(of: Set(coveredGames.map(\.id))) else { continue }
+                print("[CFB-DFS] DK classic \"\(slate.name)\": \(slate.games.count) DK games → \(games.count) matched; DK pairs: \(slate.games.prefix(4).map { "\($0.away)@\($0.home) \($0.start.map { etCal.dateComponents([.month, .day, .hour, .minute], from: $0).description } ?? "?")" })")
+                guard games.count >= 2, Set(games.map(\.id)) != Set(coveredGames.map(\.id)) else { continue }
                 let startHour = slate.start.map { d -> Double in
                     let c = etCal.dateComponents([.hour, .minute], from: d)
                     return Double(c.hour ?? 0) + Double(c.minute ?? 0) / 60.0
                 } ?? (games.map(kickHourET).min() ?? 0)
-                let token = startHour >= 18.0 ? "night" : "aft"
-                let title = startHour >= 18.0 ? "Night Only" : "Afternoon Only"
-                guard !dkWindowSlates.contains(where: { $0.token == token }) else { continue }
+                // DK's "10:00pm (Late Night)" is a subset of its Night slate —
+                // fold it into Night rather than adding a fourth card.
+                let token = startHour >= 18.0 ? "night" : (startHour >= 14.0 ? "aft" : "early")
+                let title = token == "night" ? "Night Only" : (token == "aft" ? "Afternoon Only" : "Early Only")
+                if let existing = startByToken[token], existing <= startHour { continue }
+                startByToken[token] = startHour
+                dkWindowSlates.removeAll { $0.token == token }
                 dkWindowSlates.append(DFSWindowSlate(token: token, title: title, gameIDs: games.map(\.id)))
                 print("[CFB-DFS] Window slate \"\(title)\" mirrors DK classic \"\(slate.name)\": \(games.count) games")
+            }
+            let primaryIDs = Set(coveredGames.map(\.id))
+            let windowExtra = includedGames.filter { g in
+                !primaryIDs.contains(g.id) && dkWindowSlates.contains { $0.gameIDs.contains(g.id) }
+            }
+            if !windowExtra.isEmpty {
+                print("[CFB-DFS] Window slates add \(windowExtra.count) games beyond DK's main — pool covers \(coveredGames.count + windowExtra.count)")
+                primaryGameIDs = coveredGames.map(\.id)
+                coveredGames += windowExtra
             }
         } else {
             // No DK classic master (early week, outage) — fall back to the
@@ -355,7 +378,7 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
             perGameShowdownSalaries: perGameShowdown.isEmpty ? nil : perGameShowdown,
             // With rescued showdown-only games in the slate, scope the MAIN
             // tournaments (pool + lock) to the DK-covered games explicitly.
-            mainWindowGameIDs: showdownOnlyGames.isEmpty ? nil : coveredGames.map(\.id),
+            mainWindowGameIDs: primaryGameIDs ?? (showdownOnlyGames.isEmpty ? nil : coveredGames.map(\.id)),
             windowSlates: windowSlates
         )
 
