@@ -402,9 +402,20 @@ nonisolated struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
             }
         }
 
+        // A live game still running past midnight (TNF at 12:05am Friday)
+        // must not pin the tab to yesterday when a later day already has
+        // upcoming games; yesterday's contests settle via the past sweep.
+        let todayStart = calendar.startOfDay(for: Date())
+        let liveIsStale = !liveEvents.isEmpty
+            && liveEvents.allSatisfy { calendar.startOfDay(for: $0.date) < todayStart }
+            && preEvents.contains { calendar.startOfDay(for: $0.date) >= todayStart }
+        if liveIsStale {
+            print("[NFL-DFS] Live game(s) from a previous day still running — showing the upcoming day instead")
+        }
+
         // Pick the best game day cluster
         // If there are live games, include them plus same-day pre/post games
-        if !liveEvents.isEmpty {
+        if !liveEvents.isEmpty, !liveIsStale {
             let liveDay = calendar.startOfDay(for: liveEvents.first!.date)
             let sameDayPre = preEvents.filter { calendar.startOfDay(for: $0.date) == liveDay }
             let sameDayPost = postEvents.filter { calendar.startOfDay(for: $0.date) == liveDay }
@@ -413,9 +424,9 @@ nonisolated struct ESPNNFLDFSSlateProvider: DFSSlateProvider {
             return combined.sorted { $0.date < $1.date }
         }
 
-        // No live games: pick nearest upcoming game day
+        // No live games (or only stale ones): pick nearest upcoming game day
         if !preEvents.isEmpty {
-            let sorted = preEvents.sorted { $0.date < $1.date }
+            let sorted = preEvents.filter { !liveIsStale || calendar.startOfDay(for: $0.date) >= todayStart }.sorted { $0.date < $1.date }
             let nearestDay = calendar.startOfDay(for: sorted.first!.date)
             let sameDayPre = sorted.filter { calendar.startOfDay(for: $0.date) == nearestDay }
             let sameDayPost = postEvents.filter { calendar.startOfDay(for: $0.date) == nearestDay }
