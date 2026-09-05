@@ -3358,18 +3358,27 @@ final class DFSViewModel {
     ) async -> [(ids: [String], salaries: [String: Int])] {
         guard count > 0 else { return [] }
         let gen = makeBotGenerator()
-        let settleToken = UUID().uuidString
         return await Task.detached(priority: .userInitiated) {
             var seen = seenLineupKeys
             var out: [(ids: [String], salaries: [String: Int])] = []
             out.reserveCapacity(count)
-            for _ in 0..<count {
+            // The generator's pools (eligible / upgrade tiers) are cached per
+            // token and built from the FIRST projection roll under that
+            // token — one token for the whole field made every bot upgrade
+            // into the same handful of names (Toney 94%). A fresh token every
+            // 40 bots keeps the speed win while spreading exposure.
+            var settleToken = UUID().uuidString
+            for i in 0..<count {
+                if i > 0, i % 40 == 0 { settleToken = UUID().uuidString }
                 let pool: [DFSPlayer] = basePlayers.map { p in
                     // Salary-based projections avoid hindsight bias: higher
                     // salary → higher projection, matching pre-game expectations.
+                    // Noise is deliberately modest — ±50% multiplicative plus
+                    // ±0.3×avg additive let a $4,900 backup QB out-roll a
+                    // $9,000 starter often enough to reach 10% ownership.
                     let salaryRatio = Double(p.salary) / Double(salaryCap) * Double(lineupSize)
-                    let baseProj = salaryRatio * avgPoints * Double.random(in: 0.5...1.5)
-                    let noise = Double.random(in: -0.3...0.3) * avgPoints
+                    let baseProj = salaryRatio * avgPoints * Double.random(in: 0.8...1.2)
+                    let noise = Double.random(in: -0.1...0.1) * avgPoints
                     var player = DFSPlayer(
                         id: p.id, name: p.name, team: "", position: p.position,
                         salary: p.salary, projectedPoints: max(baseProj + noise, 1.0),
@@ -4626,8 +4635,10 @@ final class DFSViewModel {
                         return
                     }
                 }
-                let uniqueGenerated = Set(botEntriesToSave.map { $0.playerIDs.sorted().joined(separator: ",") })
-                if botEntriesToSave.count > 2 && uniqueGenerated.count <= botEntriesToSave.count / 2 {
+                let emptyGenerated = botEntriesToSave.filter { $0.playerIDs.isEmpty }.count
+                let uniqueGenerated = Set(botEntriesToSave.filter { !$0.playerIDs.isEmpty }.map { $0.playerIDs.sorted().joined(separator: ",") })
+                if emptyGenerated > botEntriesToSave.count / 2
+                    || (botEntriesToSave.count > 2 && uniqueGenerated.count <= botEntriesToSave.count / 2) {
                     print("[DFS-\(sport)] NOT saving bot field for \(tid) — generated field is degenerate (\(uniqueGenerated.count)/\(botEntriesToSave.count) unique; pool=\(activePlayers.count) players)")
                 } else if !botEntriesToSave.isEmpty {
                     Task {
@@ -5643,12 +5654,21 @@ final class DFSViewModel {
                             playerSalaries: psals.isEmpty ? nil : psals
                         )
                     }
-                if !botEntriesToSave.isEmpty, let saveToken = accessToken {
+                // Same guard as refreshLive's save: a field of EMPTY lineups
+                // (1,999 bots with no players were persisted for Friday's
+                // CFB main slate) or near-identical ones must never become
+                // the frozen field — settlement then regenerates from scratch.
+                let nonEmptyToSave = botEntriesToSave.filter { !$0.playerIDs.isEmpty }
+                let uniqueToSave = Set(nonEmptyToSave.map { $0.playerIDs.sorted().joined(separator: ",") })
+                if nonEmptyToSave.count < botEntriesToSave.count / 2
+                    || (nonEmptyToSave.count > 2 && uniqueToSave.count <= nonEmptyToSave.count / 2) {
+                    print("[DFS-\(self.sport)] Pre-cache: NOT saving bot field for \(tid) — \(botEntriesToSave.count - nonEmptyToSave.count) empty, \(uniqueToSave.count) unique of \(nonEmptyToSave.count)")
+                } else if !nonEmptyToSave.isEmpty, let saveToken = accessToken {
                     Task {
                         try? await SupabaseService.shared.saveBotField(
-                            tournamentID: tid, botField: botEntriesToSave, accessToken: saveToken
+                            tournamentID: tid, botField: nonEmptyToSave, accessToken: saveToken
                         )
-                        print("[DFS-\(self.sport)] Pre-cache: saved \(botEntriesToSave.count) first-time-post-lock bots for \(tid)")
+                        print("[DFS-\(self.sport)] Pre-cache: saved \(nonEmptyToSave.count) first-time-post-lock bots for \(tid)")
                     }
                 }
             }
@@ -8978,6 +8998,19 @@ final class DFSViewModel {
             if lineupOnly.count >= botLineupSize * 2 {
                 print("[DFS] MLB settlement bot pool restricted to \(lineupOnly.count)/\(baseBotPlayers.count) announced-lineup players")
                 baseBotPlayers = lineupOnly
+            }
+        }
+        // Football: a regenerated field may only roster players who actually
+        // recorded a stat line. The reconstructed pool carries every priced
+        // player (stored salaries), so the salary-weighted regen kept
+        // drafting $4K DNPs as cap fillers — 56% ownership on a WR who
+        // never took the field, "Unknown" names in standings. Players who
+        // played but scored 0 stay in. Guarded against collapsing the pool.
+        if sportPrefix == "nfl" || sportPrefix == "cfb" {
+            let played = baseBotPlayers.filter { snapshot.playerLiveStats[$0.id] != nil }
+            if played.count >= botLineupSize * 4 {
+                print("[DFS] Settlement bot pool restricted to \(played.count)/\(baseBotPlayers.count) players with a box-score line")
+                baseBotPlayers = played
             }
         }
         let avgPoints = allPlayers.isEmpty ? 20.0 : allPlayers.reduce(0.0) { $0 + $1.points } / Double(allPlayers.count)
