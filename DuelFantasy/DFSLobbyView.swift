@@ -260,7 +260,12 @@ struct DFSLobbyView: View {
             guard let main = mainTournaments.first else { return nil }
             let lock = viewModel.lockTimeForTournament(main)
             guard lock > Date(), lock != .distantFuture else { return nil }
-            return "Locks \(lock.formatted(date: .omitted, time: .shortened))"
+            // A lookahead slate (tomorrow's noon kicks shown tonight) needs
+            // the day, or "Locks 12:00 PM" reads as today.
+            if Calendar.current.isDate(lock, inSameDayAs: Date()) {
+                return "Locks \(lock.formatted(date: .omitted, time: .shortened))"
+            }
+            return "Locks \(lock.formatted(.dateTime.weekday(.abbreviated).hour().minute()))"
         }()
         return Group {
             if !mainTournaments.isEmpty {

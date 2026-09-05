@@ -527,6 +527,38 @@ func mlbShowdownPitcherSalary(from mainSalary: Int) -> Int {
 
 /// Builds the full array of tournaments (main 1000, per-game single games, 10-man, 5-man WTA, 3-man H2H)
 /// and the per-game single-game player pools from the main-slate player pool.
+/// Two-day slate merge for the lookahead case: once every game on the
+/// primary day has kicked off, the provider also builds the NEXT game day
+/// (Friday night's live CFB card no longer hides Saturday's noon slate;
+/// Thursday's NFL game no longer hides Sunday). Both days ride in one
+/// DFSSlate so the VM's single-slate state keeps scoring today's live
+/// contests while the lobby offers tomorrow's. Every non-showdown
+/// tournament gets scoped to its own day's games via windowGameIDs —
+/// that's what keeps pools, locks, bots, and settlement per-day.
+func mergeDaySlates(primary: DFSSlate, next: DFSSlate) -> DFSSlate {
+    func scoped(_ tournaments: [DFSTournament], to gameIDs: [String]) -> [DFSTournament] {
+        tournaments.map { t in
+            guard t.gameID == nil, t.windowGameIDs == nil else { return t }
+            return DFSTournament(
+                id: t.id, title: t.title, league: t.league, entryCount: t.entryCount,
+                lineupSize: t.lineupSize, salaryCap: t.salaryCap, rosterSlots: t.rosterSlots,
+                isSingleGame: t.isSingleGame, tournamentType: t.tournamentType,
+                gameID: t.gameID, entryFee: t.entryFee, windowGameIDs: gameIDs
+            )
+        }
+    }
+    let primaryIDs = primary.includedGames.map(\.id)
+    let nextIDs = next.includedGames.map(\.id)
+    var seenPlayers = Set<String>()
+    let players = (primary.players + next.players).filter { seenPlayers.insert($0.id).inserted }
+    return DFSSlate(
+        tournaments: scoped(primary.tournaments, to: primaryIDs) + scoped(next.tournaments, to: nextIDs),
+        includedGames: primary.includedGames + next.includedGames,
+        players: players,
+        singleGamePlayers: primary.singleGamePlayers.merging(next.singleGamePlayers) { a, _ in a }
+    )
+}
+
 func buildMultiTournamentSlate(
     baseID: String,
     league: String,

@@ -47,7 +47,35 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
         if let cached = NCAAFBSlateCache.shared.get() {
             return cached
         }
+        let allEvents = try await fetchNCAAFBAllEvents()
+        let events = selectPrimaryEvents(from: allEvents)
+        guard !events.isEmpty else {
+            throw NSError(domain: "NCAAFBDFS", code: 1, userInfo: [NSLocalizedDescriptionKey: "No college football games found"])
+        }
+        var slate = try await buildDaySlate(events: events)
 
+        // LOOKAHEAD: once every game on the primary day has kicked off there
+        // is nothing left to enter today, so also offer the NEXT game day
+        // (Friday night's live card used to hide Saturday's noon slate until
+        // the 4am rollover). Best-effort — if tomorrow's prices aren't posted
+        // yet the build throws and today's slate stands alone.
+        let calendar = Calendar.current
+        let primaryDay = calendar.startOfDay(for: events.first!.date)
+        let primaryHasPre = events.contains { $0.competitions.contains { $0.status.type.state == "pre" } }
+        if !primaryHasPre {
+            let nextEvents = selectNextDayPreEvents(from: allEvents, after: primaryDay)
+            if !nextEvents.isEmpty, let next = try? await buildDaySlate(events: nextEvents) {
+                slate = mergeDaySlates(primary: slate, next: next)
+                print("[CFB-DFS] Lookahead: merged \(nextEvents.count) next-day games (\(next.tournaments.count) contests) into today's locked slate")
+            }
+        }
+        NCAAFBSlateCache.shared.set(slate)
+        return slate
+    }
+
+    /// Builds one game day's full slate (rosters, DK prices, projections,
+    /// DK-mirrored Main/window/showdown structure) from that day's events.
+    private func buildDaySlate(events: [NCAAFBScoreboardEvent]) async throws -> DFSSlate {
         // Start fetching real DraftKings salaries in parallel with ESPN data.
         // `rgSalaries` is the day's AGGREGATE (every DK slate merged) — good
         // for "does DK price this player at all", useless for slate scope.
@@ -61,12 +89,6 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
         // Shipp, Jeremy Payne) would look unpriced and get capped out of the
         // pool by the depth trim even though DK prices them.
         async let dkShowdownSalariesTask = RotoGrindersSalaryProvider.shared.fetchAllShowdownSalaries(sport: "cfb")
-
-        // 1. Fetch NCAAFB scoreboard events
-        let events = try await fetchNCAAFBEvents()
-        guard !events.isEmpty else {
-            throw NSError(domain: "NCAAFBDFS", code: 1, userInfo: [NSLocalizedDescriptionKey: "No college football games found"])
-        }
 
         // 2. Build team abbreviation -> event ID mapping
         var teamToGameID: [String: String] = [:]
@@ -361,7 +383,6 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
             players: coveredPlayers,
             singleGamePlayers: sgPlayers
         )
-        NCAAFBSlateCache.shared.set(slate)
         return slate
     }
 
@@ -370,7 +391,7 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
     /// Fetch college football scoreboards for -1 to +7 days.
     /// College football games are mostly Saturday -- need wider window to catch them.
     /// Prefers live events, then upcoming (nearest date first), then recent post.
-    private func fetchNCAAFBEvents() async throws -> [NCAAFBScoreboardEvent] {
+    private func fetchNCAAFBAllEvents() async throws -> [NCAAFBScoreboardEvent] {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
 
@@ -403,7 +424,25 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
         }
         var seenIDs = Set<String>()
         allEvents = allEvents.filter { seenIDs.insert($0.id).inserted }
+        return allEvents
+    }
 
+    /// Upcoming ("pre") events on the earliest game day strictly after
+    /// `day` — the lookahead day merged into a fully-locked slate.
+    private func selectNextDayPreEvents(from allEvents: [NCAAFBScoreboardEvent], after day: Date) -> [NCAAFBScoreboardEvent] {
+        let calendar = Calendar.current
+        let future = allEvents.filter { event in
+            calendar.startOfDay(for: event.date) > day
+                && event.competitions.contains { $0.status.type.state == "pre" }
+        }
+        guard let nextDay = future.map({ calendar.startOfDay(for: $0.date) }).min() else { return [] }
+        return future.filter { calendar.startOfDay(for: $0.date) == nextDay }.sorted { $0.date < $1.date }
+    }
+
+    /// Picks the primary game day: live day first, then the nearest
+    /// upcoming day, then the most recent finished day (for settlement).
+    private func selectPrimaryEvents(from allEvents: [NCAAFBScoreboardEvent]) -> [NCAAFBScoreboardEvent] {
+        let calendar = Calendar.current
         // Categorize events
         var liveEvents: [NCAAFBScoreboardEvent] = []
         var preEvents: [NCAAFBScoreboardEvent] = []
