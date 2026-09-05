@@ -115,7 +115,8 @@ struct DFSContestView: View {
     // Open on the highest-priority IN-SEASON sport (the off-season ones sort to
     // the back), so the tab never lands on a dead pill like NBA in June showing
     // "No DFS Slate Available". Falls back to MLB if nothing reads as in-season.
-    @State private var selectedSport: DFSSport = DFSSport.orderedForToday().first ?? .mlb
+    /// DF_DEBUG_SPORT env var (simulator reproduction only) preselects a sport pill.
+    @State private var selectedSport: DFSSport = ProcessInfo.processInfo.environment["DF_DEBUG_SPORT"].flatMap(DFSSport.init(rawValue:)) ?? (DFSSport.orderedForToday().first ?? .mlb)
     /// Entries from previous tournaments that are still in progress (not yet settled)
     @State private var previousInProgressEntries: [DFSEntryRecord] = []
     @State private var statsSportFilter: String = "All"

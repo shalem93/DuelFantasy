@@ -2890,46 +2890,88 @@ actor RotoGrindersSalaryProvider {
         return cleaned.lowercased()
     }
 
-    /// Look up salary for a player by ESPN name. Tries exact match first, then last-name match.
+    /// Look up salary for a player by ESPN name. Tries exact match first,
+    /// then suffix-insensitive (Jr/Sr/II/III/IV either side), then
+    /// last-name + first-initial ("J.T. Realmuto" vs "JT Realmuto").
+    ///
+    /// O(1) per call via a per-map index (`SalaryNameIndex`). The previous
+    /// version scanned the whole map on every miss, running two
+    /// `replacingOccurrences(.regularExpression)` per entry — on Saturday's
+    /// CFB slate (4,170 roster players × ~14,000 lookups × 1,765 salaries)
+    /// that was ~50M regex allocations inside one async task with no
+    /// autorelease drain: a 4.3 GB footprint spike that jetsam killed on
+    /// device (the "NCAAF tab crashes after 10 seconds" report).
     static func lookupSalary(espnName: String, in salaryMap: [String: Int]) -> Int? {
-        let normalized = normalizeName(espnName)
+        SalaryNameIndex.index(for: salaryMap).lookup(normalizeName(espnName))
+    }
 
-        // Exact match
-        if let salary = salaryMap[normalized] { return salary }
-
-        // Try without Jr/Sr suffixes (ESPN might use "Ronald Acuna Jr." vs RG "Ronald Acuna")
-        let withoutSuffix = normalized
-            .replacingOccurrences(of: " jr$", with: "", options: .regularExpression)
-            .replacingOccurrences(of: " sr$", with: "", options: .regularExpression)
-            .replacingOccurrences(of: " ii$", with: "", options: .regularExpression)
-            .replacingOccurrences(of: " iii$", with: "", options: .regularExpression)
-            .replacingOccurrences(of: " iv$", with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespaces)
-        if withoutSuffix != normalized, let salary = salaryMap[withoutSuffix] { return salary }
-
-        // Try the reverse — RG name might have suffix but ESPN doesn't
-        for (rgName, salary) in salaryMap {
-            let rgWithoutSuffix = rgName
-                .replacingOccurrences(of: " jr$", with: "", options: .regularExpression)
-                .replacingOccurrences(of: " sr$", with: "", options: .regularExpression)
-                .trimmingCharacters(in: .whitespaces)
-            if rgWithoutSuffix == normalized { return salary }
+    /// Strip a trailing generational suffix (" jr", " sr", " ii", " iii", " iv")
+    /// from an already-normalized name, without regex.
+    static func stripNameSuffix(_ normalized: String) -> String {
+        for suffix in [" iii", " jr", " sr", " ii", " iv"] where normalized.hasSuffix(suffix) {
+            return String(normalized.dropLast(suffix.count)).trimmingCharacters(in: .whitespaces)
         }
+        return normalized
+    }
 
-        // Last-name + first-initial match for common mismatches
-        // e.g. "J.T. Realmuto" vs "JT Realmuto"
-        let parts = normalized.components(separatedBy: " ")
-        if parts.count >= 2 {
-            let lastName = parts.last!
-            let firstInitial = String(parts[0].prefix(1))
-            for (rgName, salary) in salaryMap {
-                let rgParts = rgName.components(separatedBy: " ")
-                guard rgParts.count >= 2, rgParts.last == lastName else { continue }
-                if String(rgParts[0].prefix(1)) == firstInitial { return salary }
+    /// Derived lookup tables for one salary map, cached by a cheap
+    /// fingerprint of the map (count, value sum, first keys in iteration
+    /// order — copies of the same dictionary share storage and iterate
+    /// identically, so the same map always hits).
+    nonisolated final class SalaryNameIndex: @unchecked Sendable {
+        let exact: [String: Int]
+        let noSuffix: [String: Int]
+        let lastInitial: [String: Int]
+
+        private init(_ map: [String: Int]) {
+            exact = map
+            var ns: [String: Int] = [:]
+            var li: [String: Int] = [:]
+            for (rgName, salary) in map {
+                let stripped = RotoGrindersSalaryProvider.stripNameSuffix(rgName)
+                if stripped != rgName, ns[stripped] == nil { ns[stripped] = salary }
+                let parts = rgName.split(separator: " ")
+                if parts.count >= 2, let first = parts.first?.first, let last = parts.last {
+                    let key = "\(last)|\(first)"
+                    if li[key] == nil { li[key] = salary }
+                }
             }
+            noSuffix = ns
+            lastInitial = li
         }
 
-        return nil
+        func lookup(_ normalized: String) -> Int? {
+            if let s = exact[normalized] { return s }
+            let withoutSuffix = RotoGrindersSalaryProvider.stripNameSuffix(normalized)
+            if withoutSuffix != normalized, let s = exact[withoutSuffix] { return s }
+            if let s = noSuffix[normalized] { return s }
+            let parts = normalized.split(separator: " ")
+            if parts.count >= 2, let first = parts.first?.first, let last = parts.last,
+               let s = lastInitial["\(last)|\(first)"] {
+                return s
+            }
+            return nil
+        }
+
+        private static let lock = NSLock()
+        private static var cache: [(fingerprint: Int, index: SalaryNameIndex)] = []
+
+        static func index(for map: [String: Int]) -> SalaryNameIndex {
+            if map.isEmpty { return SalaryNameIndex(map) }
+            var hasher = Hasher()
+            hasher.combine(map.count)
+            var sum = 0
+            for v in map.values { sum &+= v }
+            hasher.combine(sum)
+            for (k, v) in map.prefix(16) { hasher.combine(k); hasher.combine(v) }
+            let fp = hasher.finalize()
+            lock.lock(); defer { lock.unlock() }
+            if let hit = cache.first(where: { $0.fingerprint == fp }) { return hit.index }
+            let built = SalaryNameIndex(map)
+            cache.append((fp, built))
+            if cache.count > 12 { cache.removeFirst() }
+            return built
+        }
     }
 }
 

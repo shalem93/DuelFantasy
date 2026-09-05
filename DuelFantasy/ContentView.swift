@@ -410,7 +410,12 @@ struct ContentView: View {
     @State private var tennisBracketViewModel = TennisBracketViewModel()
     @State private var golfTiersViewModel = GolfTiersViewModel()
     @State private var soccerTiersViewModel = SoccerTiersViewModel()
-    @State private var selectedTab: Int = 0
+    /// DF_DEBUG_TAB env var (simulator reproduction only) opens on that tab.
+    @State private var selectedTab: Int = {
+        let env = ProcessInfo.processInfo.environment
+        print("[DEBUG] DF_DEBUG_TAB=\(env["DF_DEBUG_TAB"] ?? "nil") DF_DEBUG_SPORT=\(env["DF_DEBUG_SPORT"] ?? "nil")")
+        return env["DF_DEBUG_TAB"].flatMap(Int.init) ?? 0
+    }()
     @State private var selectedDFSResult: DFSResult? = nil
 
     // Friends & Leaderboard

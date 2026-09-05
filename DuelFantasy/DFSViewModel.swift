@@ -8637,6 +8637,7 @@ final class DFSViewModel {
         // size bots to it and a mismatch can never happen, for ANY sport.
         let botLineupSize: Int
         let userEntrySize = userEntry.lineupPlayerIDs.count
+        print("[DFS] settle \(tournamentID): userEntry tid=\(userEntry.tournamentID) #\(userEntry.lineupNumber ?? 1) id=\(userEntry.id.prefix(8)) lineup=\(userEntrySize) isSG=\(isSingleGame)")
         if userEntrySize > 0 {
             botLineupSize = userEntrySize
         } else if isSingleGame {

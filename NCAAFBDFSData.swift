@@ -64,6 +64,7 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
 
         // 1. Fetch NCAAFB scoreboard events
         let events = try await fetchNCAAFBEvents()
+        print("[MEM] CFB after events: \(MemoryFootprint.megabytes) MB (\(events.count) events)")
         guard !events.isEmpty else {
             throw NSError(domain: "NCAAFBDFS", code: 1, userInfo: [NSLocalizedDescriptionKey: "No college football games found"])
         }
@@ -126,6 +127,7 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
         // Trim to slate depth FIRST, keeping every DK-priced player and
         // capping only the unpriced tail (see trimToSlateDepth) — the caps
         // used to run on last-season projections and cut real DK names.
+        print("[MEM] CFB after rosters: \(MemoryFootprint.megabytes) MB (\(players.count) players)")
         let realSalaries = await rgSalaries
         let dkClassicSlates = await dkClassicSlatesTask
         let dkShowdownSalaries = await dkShowdownSalariesTask
@@ -195,7 +197,9 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
         // reports bogus games-played (Toney: 82 pass yds ÷ 16 "games" = the
         // 2.1 that showed in the app) — so nearly the whole pool projected
         // 0.0. Game logs give a true per-game FPPG for this season and last.
+        print("[MEM] CFB after salaries: \(MemoryFootprint.megabytes) MB (\(finalPlayers.count) players)")
         let projectedPlayers = await attachGameLogProjections(to: finalPlayers)
+        print("[MEM] CFB after game logs: \(MemoryFootprint.megabytes) MB")
         let sortedPlayers = projectedPlayers.sorted(by: { $0.salary > $1.salary })
 
         // 7. Build tournaments using shared builder
@@ -850,6 +854,7 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
                 return out
             }
             for (id, s) in results { curByID[id] = s }
+            if curByID.count % 320 < 32 { print("[MEM] CFB game logs \(curByID.count)/\(fetchable.count): \(MemoryFootprint.megabytes) MB") }
         }
 
         // Which teams have actually played this season (any rostered player

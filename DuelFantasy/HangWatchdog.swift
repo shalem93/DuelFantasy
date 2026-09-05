@@ -7,7 +7,7 @@ import os
 /// the code path instead of just "it hung". The `age` in the report tells
 /// whether the crumb is the hang itself (age ≈ 0) or merely the last marked
 /// op before un-instrumented code hung (age large).
-enum PerfBreadcrumb {
+nonisolated enum PerfBreadcrumb {
     private static let state = OSAllocatedUnfairLock(initialState: (crumb: "launch", at: Date()))
 
     static func set(_ crumb: String) {
@@ -29,7 +29,7 @@ enum PerfBreadcrumb {
 /// background threads (watchdog, heartbeat) can read it without touching
 /// UIKit. A suspended (backgrounded) process stops servicing the main queue
 /// too — without this, every trip to the home screen read as a "hang".
-enum AppRunState {
+nonisolated enum AppRunState {
     private static let state = OSAllocatedUnfairLock(initialState: "launching")
     static var current: String { state.withLock { $0 } }
 
@@ -50,7 +50,7 @@ enum AppRunState {
     }
 }
 
-enum MemoryFootprint {
+nonisolated enum MemoryFootprint {
     /// Resident footprint in MB (what jetsam judges), -1 if unavailable.
     static var megabytes: Int {
         var info = task_vm_info_data_t()
