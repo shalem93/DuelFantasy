@@ -335,7 +335,7 @@ final class SurvivorViewModel {
         // fees don't count until their league completes, and this VM
         // can't see league statuses. Recompose from the persisted
         // components BestBallViewModel.reconcileFantasyLedger maintains.
-        let survivorNet = ledger.filter { $0.kind.hasPrefix("survivor") }.reduce(0) { $0 + $1.rrDelta }
+        let survivorNet = ledger.filter { $0.kind.hasPrefix("survivor") || $0.kind.hasPrefix("bbt") }.reduce(0) { $0 + $1.rrDelta }
         let total = survivorNet
             + UserDefaults.standard.integer(forKey: "fantasy_bestball_delta")
             + UserDefaults.standard.integer(forKey: "fantasy_tiers_delta")

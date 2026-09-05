@@ -70,6 +70,7 @@ struct FantasyHubView: View {
     @Bindable var tennisBracketViewModel: TennisBracketViewModel
     @Bindable var golfTiersViewModel: GolfTiersViewModel
     @Bindable var soccerTiersViewModel: SoccerTiersViewModel
+    @Bindable var bbtViewModel: BestBallTournamentViewModel
 
     /// Past Fantasy-hub results fetched directly from the server. Backed
     /// by @AppStorage so the rows survive tab switches and view
@@ -232,13 +233,29 @@ struct FantasyHubView: View {
         let hasActiveGolfTiers = golfTiersViewModel.hasSubmitted && !golfTiersViewModel.isSettled
         let hasActiveSoccerTiers = soccerTiersViewModel.hasSubmitted && !soccerTiersViewModel.isSettled
             && !soccerTiersConcluded
+        let hasActiveBBT = bbtViewModel.hasEntered && !bbtViewModel.isSettled
 
-        if hasActiveBestBall || hasActivePlayoffTiers || hasActiveTennisBracket || hasActiveGolfTiers || hasActiveSoccerTiers {
+        if hasActiveBestBall || hasActivePlayoffTiers || hasActiveTennisBracket || hasActiveGolfTiers || hasActiveSoccerTiers || hasActiveBBT {
             VStack(alignment: .leading, spacing: 12) {
                 Text("ACTIVE CONTESTS")
                     .font(.caption.weight(.bold))
                     .foregroundStyle(.secondary)
                     .padding(.leading, 4)
+
+                if hasActiveBBT {
+                    NavigationLink {
+                        BBTLobbyView(viewModel: bbtViewModel)
+                    } label: {
+                        activeContestCard(
+                            title: BBTConfig.title,
+                            subtitle: bbtViewModel.isLive ? "LIVE · Week \(bbtViewModel.currentWeek)" : "\(bbtViewModel.myEntries.count) ENTR\(bbtViewModel.myEntries.count == 1 ? "Y" : "IES") · LOCKS \(bbtViewModel.lockTime.formatted(.dateTime.month(.abbreviated).day()))",
+                            icon: "dollarsign.circle.fill",
+                            isLive: bbtViewModel.isLive,
+                            detail: bbtViewModel.bestRank.map { "Rank #\($0.formatted())" }
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
 
                 if hasActivePlayoffTiers {
                     NavigationLink {
@@ -618,6 +635,9 @@ struct FantasyHubView: View {
 
             // NFL Survivor
             comingSoonSection
+
+            // NFL Best Ball Tournament (salary-cap season-long best ball)
+            bbtGameTypeCard
         }
     }
 
@@ -817,6 +837,21 @@ struct FantasyHubView: View {
         .buttonStyle(.plain)
     }
 
+    private var bbtGameTypeCard: some View {
+        NavigationLink {
+            BBTLobbyView(viewModel: bbtViewModel)
+        } label: {
+            gameTypeCard(
+                title: BBTConfig.title,
+                subtitle: "Build a 15-man roster under a $\(BBTConfig.budget) auction budget. Best ball scoring all season vs \(BBTConfig.botCount.formatted()) bots — up to \(BBTConfig.maxEntriesPerUser) entries.",
+                icon: "dollarsign.circle.fill",
+                gradient: [Color(red: 0.20, green: 0.10, blue: 0.45), Color(red: 0.48, green: 0.23, blue: 0.93)],
+                status: bbtViewModel.isSettled ? .settled : (bbtViewModel.isLocked ? .live : .open)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
     private var survivorCardStatus: GameStatus {
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
@@ -855,6 +890,10 @@ struct FantasyHubView: View {
         let golfPrefixes = ["masters-", "the-masters-", "us-open-", "the-open-", "pga-championship-"]
         if golfPrefixes.contains(where: { lower.hasPrefix($0) }) {
             return ("Golf Tiers", "figure.golf", Color(red: 0.05, green: 0.45, blue: 0.25))
+        }
+        // NFL Best Ball Tournament: "bbt-nfl-YYYY-e<entryNumber>"
+        if lower.hasPrefix("bbt-") {
+            return ("Best Ball Tournament", "dollarsign.circle.fill", Color(red: 0.48, green: 0.23, blue: 0.93))
         }
         // Best Ball league: synthetic tid `bestball-<leagueID>` we mint
         // when surfacing completed leagues in Past Results.

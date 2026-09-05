@@ -1626,3 +1626,63 @@ select pg_notify('pgrst', 'reload schema');
 -- ============================================================
 alter table public.dfs_tournaments add column if not exists window_game_ids jsonb;
 select pg_notify('pgrst', 'reload schema');
+
+
+-- ============================================================
+-- NFL Best Ball Tournament (Sep 2026): one global salary-cap best ball
+-- tournament per season (id "bbt-nfl-<season>", client-minted with
+-- ignore-duplicates). 2,000 bots live in bot_field jsonb; users hold up
+-- to 10 entries. Finalized weekly player points are cached in
+-- bbt_week_points so one client scores a week for everyone. Entry fees
+-- and payouts flow through fantasy_rr_ledger ('bbt_entry'/'bbt_payout').
+-- ============================================================
+
+create table if not exists public.bbt_tournaments (
+  id text primary key,
+  title text not null,
+  season int not null,
+  status text not null default 'open' check (status in ('open', 'live', 'settled')),
+  lock_time timestamptz,
+  bot_field jsonb,
+  created_at timestamptz not null default now()
+);
+alter table public.bbt_tournaments enable row level security;
+grant select, insert, update on table public.bbt_tournaments to authenticated, service_role;
+create policy bbt_t_select_all on public.bbt_tournaments for select to authenticated using (true);
+create policy bbt_t_insert_auth on public.bbt_tournaments for insert to authenticated with check (true);
+create policy bbt_t_update_auth on public.bbt_tournaments for update to authenticated using (true);
+
+create table if not exists public.bbt_entries (
+  id uuid primary key default gen_random_uuid(),
+  tournament_id text not null references public.bbt_tournaments(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  entry_name text not null default '',
+  entry_number int not null default 1,
+  picks jsonb not null default '[]',
+  total_points double precision,
+  rank int,
+  created_at timestamptz not null default now(),
+  unique (tournament_id, user_id, entry_number)
+);
+alter table public.bbt_entries enable row level security;
+grant select, insert, update on table public.bbt_entries to authenticated, service_role;
+create policy bbt_e_select_all on public.bbt_entries for select to authenticated using (true);
+create policy bbt_e_insert_own on public.bbt_entries for insert to authenticated with check (auth.uid() = user_id);
+create policy bbt_e_update_own on public.bbt_entries for update to authenticated using (auth.uid() = user_id);
+create index if not exists idx_bbt_entries_tournament on public.bbt_entries (tournament_id);
+
+create table if not exists public.bbt_week_points (
+  tournament_id text not null references public.bbt_tournaments(id) on delete cascade,
+  week int not null,
+  player_points jsonb not null default '{}',
+  is_final boolean not null default false,
+  updated_at timestamptz not null default now(),
+  primary key (tournament_id, week)
+);
+alter table public.bbt_week_points enable row level security;
+grant select, insert, update on table public.bbt_week_points to authenticated, service_role;
+create policy bbt_w_select_all on public.bbt_week_points for select to authenticated using (true);
+create policy bbt_w_insert_auth on public.bbt_week_points for insert to authenticated with check (true);
+create policy bbt_w_update_auth on public.bbt_week_points for update to authenticated using (true);
+
+select pg_notify('pgrst', 'reload schema');

@@ -405,6 +405,7 @@ struct ContentView: View {
     )
     @State private var bestBallViewModel = BestBallViewModel()
     @State private var survivorViewModel = SurvivorViewModel()
+    @State private var bbtViewModel = BestBallTournamentViewModel()
     @State private var playoffTiersViewModel = PlayoffTiersViewModel()
     @State private var tennisBracketViewModel = TennisBracketViewModel()
     @State private var golfTiersViewModel = GolfTiersViewModel()
@@ -690,7 +691,7 @@ struct ContentView: View {
                 }
                 .tag(1)
 
-            FantasyHubView(bestBallViewModel: bestBallViewModel, survivorViewModel: survivorViewModel, playoffTiersViewModel: playoffTiersViewModel, tennisBracketViewModel: tennisBracketViewModel, golfTiersViewModel: golfTiersViewModel, soccerTiersViewModel: soccerTiersViewModel)
+            FantasyHubView(bestBallViewModel: bestBallViewModel, survivorViewModel: survivorViewModel, playoffTiersViewModel: playoffTiersViewModel, tennisBracketViewModel: tennisBracketViewModel, golfTiersViewModel: golfTiersViewModel, soccerTiersViewModel: soccerTiersViewModel, bbtViewModel: bbtViewModel)
                 .tabItem {
                     Label("Fantasy", systemImage: "star.circle")
                 }
@@ -1048,6 +1049,7 @@ struct ContentView: View {
             nascarDFSViewModel.profileName = newValue
             bestBallViewModel.profileName = newValue
             survivorViewModel.profileName = newValue
+            bbtViewModel.profileName = newValue
             playoffTiersViewModel.profileName = newValue
             tennisBracketViewModel.profileName = newValue
             golfTiersViewModel.profileName = newValue
@@ -1121,6 +1123,9 @@ struct ContentView: View {
         survivorViewModel.accessToken = auth.accessToken
         survivorViewModel.userID = auth.userID
         survivorViewModel.profileName = profileName
+        bbtViewModel.accessToken = auth.accessToken
+        bbtViewModel.userID = auth.userID
+        bbtViewModel.profileName = profileName
         playoffTiersViewModel.accessToken = auth.accessToken
         playoffTiersViewModel.userID = auth.userID
         playoffTiersViewModel.profileName = profileName
