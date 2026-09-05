@@ -9196,9 +9196,9 @@ final class DFSViewModel {
                 let botsNeeded = targetBots - currentBotCount
                 print("[DFS] Padding saved bot field with \(botsNeeded) additional bots (had \(currentBotCount), need \(targetBots))")
                 let seenLineupKeys = Set(field.map { $0.playerIDs.sorted().joined(separator: "|") })
-                let battingOrders: [String: Int] = Dictionary(uniqueKeysWithValues: baseBotPlayers.compactMap { p in
+                let battingOrders: [String: Int] = Dictionary(baseBotPlayers.compactMap { p in
                     snapshot.playerLiveStats[p.id]?.extraStats?["BO"].map { (p.id, $0) }
-                })
+                }, uniquingKeysWith: { a, _ in a })
                 let generated = await generateSettlementBotsOffMain(
                     count: botsNeeded, basePlayers: baseBotPlayers, battingOrders: battingOrders,
                     salaryCap: salaryCap, lineupSize: botLineupSize, rosterSlots: botRosterSlots,
@@ -9239,9 +9239,9 @@ final class DFSViewModel {
             print("[DFS] No saved bot field for \(tournamentID), generating with salary-based projections (no hindsight)")
             let botsToGenerate = max(0, entryCount - totalRealEntries)
             let seenLineupKeys = Set(field.map { $0.playerIDs.sorted().joined(separator: "|") })
-            let battingOrders: [String: Int] = Dictionary(uniqueKeysWithValues: baseBotPlayers.compactMap { p in
+            let battingOrders: [String: Int] = Dictionary(baseBotPlayers.compactMap { p in
                 snapshot.playerLiveStats[p.id]?.extraStats?["BO"].map { (p.id, $0) }
-            })
+            }, uniquingKeysWith: { a, _ in a })
             let generated = await generateSettlementBotsOffMain(
                 count: botsToGenerate, basePlayers: baseBotPlayers, battingOrders: battingOrders,
                 salaryCap: salaryCap, lineupSize: botLineupSize, rosterSlots: botRosterSlots,

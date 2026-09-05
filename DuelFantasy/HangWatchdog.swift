@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import os
 
 /// Last interesting operation STARTED on the main thread — read by the hang
@@ -16,6 +17,52 @@ enum PerfBreadcrumb {
     static var current: (crumb: String, at: Date) {
         state.withLock { $0 }
     }
+
+    /// Non-blocking read for the crash signal handler (the crashing thread
+    /// may be the one holding the lock).
+    static var currentIfAvailable: (crumb: String, at: Date)? {
+        state.withLockIfAvailable { $0 }
+    }
+}
+
+/// Foreground/background state mirrored from UIApplication notifications so
+/// background threads (watchdog, heartbeat) can read it without touching
+/// UIKit. A suspended (backgrounded) process stops servicing the main queue
+/// too — without this, every trip to the home screen read as a "hang".
+enum AppRunState {
+    private static let state = OSAllocatedUnfairLock(initialState: "launching")
+    static var current: String { state.withLock { $0 } }
+
+    /// Call on the main thread at launch.
+    static func observe() {
+        let pairs: [(Notification.Name, String)] = [
+            (UIApplication.didBecomeActiveNotification, "active"),
+            (UIApplication.willResignActiveNotification, "inactive"),
+            (UIApplication.didEnterBackgroundNotification, "background"),
+            (UIApplication.willEnterForegroundNotification, "foreground"),
+            (UIApplication.willTerminateNotification, "terminating"),
+        ]
+        for (name, value) in pairs {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: nil) { _ in
+                state.withLock { $0 = value }
+            }
+        }
+    }
+}
+
+enum MemoryFootprint {
+    /// Resident footprint in MB (what jetsam judges), -1 if unavailable.
+    static var megabytes: Int {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let kr = withUnsafeMutablePointer(to: &info) { ptr in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { raw in
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), raw, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return -1 }
+        return Int(info.phys_footprint / 1_048_576)
+    }
 }
 
 /// Samples the MAIN thread's call stack from the watchdog thread: suspend it,
@@ -24,7 +71,9 @@ enum PerfBreadcrumb {
 /// suspended main thread that holds it). No allocation happens while the
 /// main thread is suspended (it may hold the malloc lock): frames land in a
 /// pre-sized buffer. Frames read "DuelFantasy.debug.dylib+0x1a2b3c $s…" —
-/// `atos -o <dylib> -arch arm64 -l 0 0x1a2b3c` or `swift demangle` resolves them.
+/// `atos -o <dylib> -arch arm64 -l 0 0x1a2b3c` or `swift demangle` resolves
+/// app frames; system frames resolve with `atos -o <DeviceSupport symbol>
+/// -arch arm64e -offset 0x…`.
 enum MainThreadSampler {
     private static let port = OSAllocatedUnfairLock<thread_act_t>(initialState: 0)
 
@@ -90,68 +139,96 @@ enum MainThreadSampler {
     }
 }
 
-/// Background-thread watchdog that detects main-thread hangs (≥2s without
-/// servicing the main queue) the moment they happen — unlike MetricKit,
-/// which batches hang diagnostics daily and skips Xcode-launched runs.
+/// Background-thread watchdog that detects main-thread hangs the moment they
+/// happen — unlike MetricKit, which batches hang diagnostics daily and skips
+/// Xcode-launched runs.
 ///
-/// On detection it immediately spools a report (breadcrumb + crumb age)
-/// through CrashReporter — so even if the user force-quits mid-freeze the
-/// evidence survives — and on recovery spools a follow-up with the measured
-/// hang duration.
+/// Each cycle enqueues a numbered beat on BOTH the main dispatch queue and the
+/// main actor, sleeps 2s, and checks whether that specific beat ran. (The old
+/// "beat timestamp older than 2s" check flagged an idle main thread whenever
+/// the sleep overslept by a few ms — every such report sampled the main thread
+/// sitting in `__CFRunLoopServiceMachPort`.) Reports carry the breadcrumb,
+/// which channel starved, the app run state, memory footprint, and a sampled
+/// main-thread stack; nothing is reported while the app isn't active (a
+/// suspended process services nothing).
+///
+/// It also writes a heartbeat file every cycle (state, crumb, footprint) that
+/// CrashReporter reads at the NEXT launch: if the previous run's last
+/// heartbeat says "active" and no crash was recorded, the run died without a
+/// trace — a SIGKILL (watchdog / jetsam) or a stop from Xcode — and a row
+/// says so with the last known state.
 final class HangWatchdog: @unchecked Sendable {
     static let shared = HangWatchdog()
-    private let lastBeat = OSAllocatedUnfairLock(initialState: Date())
+    private let dispatchBeat = OSAllocatedUnfairLock<UInt64>(initialState: 0)
+    private let actorBeat = OSAllocatedUnfairLock<UInt64>(initialState: 0)
 
     func start() {
         if Thread.isMainThread {
             MainThreadSampler.captureMainThread()
+            AppRunState.observe()
         } else {
-            DispatchQueue.main.async { MainThreadSampler.captureMainThread() }
+            DispatchQueue.main.async {
+                MainThreadSampler.captureMainThread()
+                AppRunState.observe()
+            }
         }
         let thread = Thread { [self] in
+            var seq: UInt64 = 0
             while true {
-                DispatchQueue.main.async { [self] in
-                    lastBeat.withLock { $0 = Date() }
-                }
+                seq += 1
+                let expected = seq
+                sendBeats(expected)
                 Thread.sleep(forTimeInterval: 2.0)
-                let last = lastBeat.withLock { $0 }
-                guard Date().timeIntervalSince(last) > 2.0 else { continue }
+                CrashReporter.shared.writeHeartbeat()
+                let dispatchRan = dispatchBeat.withLock { $0 } >= expected
+                let actorRan = actorBeat.withLock { $0 } >= expected
+                if dispatchRan && actorRan { continue }
 
-                // Main thread is hung — report NOW (survives force-quit).
+                // Main thread is hung (or the process is suspended — the run
+                // state tells which). Report NOW so force-quit can't lose it.
+                let hangStart = Date().addingTimeInterval(-2.0)
+                let stateAtDetect = AppRunState.current
                 let (crumb, at) = PerfBreadcrumb.current
                 let age = Date().timeIntervalSince(at)
-                let frames = MainThreadSampler.sample()
-                CrashReporter.shared.reportWatchdogHang(
-                    "main thread hung ≥2s — last op: \(crumb) (started \(String(format: "%.1f", age))s before)",
-                    frames: frames
-                )
+                let channels = "dispatch beat \(dispatchRan ? "ran" : "starved"), actor beat \(actorRan ? "ran" : "starved")"
+                if stateAtDetect == "active" {
+                    let frames = MainThreadSampler.sample()
+                    CrashReporter.shared.reportWatchdogHang(
+                        "main thread hung ≥2s [\(channels)] — last op: \(crumb) (started \(String(format: "%.1f", age))s before), footprint \(MemoryFootprint.megabytes) MB",
+                        frames: frames
+                    )
+                }
 
-                // Wait for recovery, then report how long it actually lasted.
-                let hangStart = last
+                // Wait for THAT beat to run, then report the measured duration.
                 var resampled = false
                 while true {
-                    DispatchQueue.main.async { [self] in
-                        lastBeat.withLock { $0 = Date() }
-                    }
                     Thread.sleep(forTimeInterval: 1.0)
-                    let l2 = lastBeat.withLock { $0 }
+                    CrashReporter.shared.writeHeartbeat()
+                    let d = dispatchBeat.withLock { $0 } >= expected
+                    let a = actorBeat.withLock { $0 } >= expected
+                    let now = AppRunState.current
+                    if d && a {
+                        if stateAtDetect == "active" {
+                            let dur = Date().timeIntervalSince(hangStart)
+                            CrashReporter.shared.reportWatchdogHang(
+                                "recovered after \(String(format: "%.1f", dur))s — last op: \(crumb), state \(stateAtDetect) → \(now)"
+                            )
+                        }
+                        break
+                    }
                     // Still hung ~8s in: a second sample tells whether it's
                     // ONE long operation or a chain of them (the watchdog
                     // kill lands around 20s — this is the last evidence).
-                    if !resampled, Date().timeIntervalSince(hangStart) >= 8 {
+                    if !resampled, stateAtDetect == "active", now == "active",
+                       Date().timeIntervalSince(hangStart) >= 8 {
                         resampled = true
                         let frames = MainThreadSampler.sample()
+                        let d2 = dispatchBeat.withLock { $0 } >= expected
+                        let a2 = actorBeat.withLock { $0 } >= expected
                         CrashReporter.shared.reportWatchdogHang(
-                            "still hung after \(String(format: "%.1f", Date().timeIntervalSince(hangStart)))s — last op: \(PerfBreadcrumb.current.crumb)",
+                            "still hung after \(String(format: "%.1f", Date().timeIntervalSince(hangStart)))s [dispatch beat \(d2 ? "ran" : "starved"), actor beat \(a2 ? "ran" : "starved")] — last op: \(PerfBreadcrumb.current.crumb), footprint \(MemoryFootprint.megabytes) MB",
                             frames: frames
                         )
-                    }
-                    if Date().timeIntervalSince(l2) < 1.0 {
-                        let dur = Date().timeIntervalSince(hangStart)
-                        CrashReporter.shared.reportWatchdogHang(
-                            "recovered after \(String(format: "%.1f", dur))s — last op: \(crumb)"
-                        )
-                        break
                     }
                 }
             }
@@ -159,5 +236,14 @@ final class HangWatchdog: @unchecked Sendable {
         thread.name = "hang-watchdog"
         thread.qualityOfService = .utility
         thread.start()
+    }
+
+    private func sendBeats(_ n: UInt64) {
+        DispatchQueue.main.async { [self] in
+            dispatchBeat.withLock { $0 = max($0, n) }
+        }
+        Task { @MainActor [self] in
+            actorBeat.withLock { $0 = max($0, n) }
+        }
     }
 }

@@ -27,8 +27,18 @@ final class CrashReporter: NSObject, MXMetricManagerSubscriber {
 
     func start() {
         MXMetricManager.shared.add(self)
-        // Retry anything a previous launch failed to upload.
-        queue.async { self.uploadSpooled() }
+        installSignalCapture()
+        queue.async {
+            // Evidence from the PREVIOUS run: an in-process signal capture
+            // (Swift trap / abort / bad access) wins; failing that, a
+            // heartbeat that ended while the app was active means the run
+            // died without any crash record (SIGKILL: watchdog, jetsam,
+            // or a stop from Xcode).
+            let hadSignalCrash = self.ingestPendingSignalCrash()
+            self.ingestPreviousHeartbeat(hadSignalCrash: hadSignalCrash)
+            // Retry anything a previous launch failed to upload.
+            self.uploadSpooled()
+        }
     }
 
     // MARK: - MXMetricManagerSubscriber
@@ -162,6 +172,139 @@ final class CrashReporter: NSObject, MXMetricManagerSubscriber {
         }
     }
 
+    // MARK: - In-process signal capture (Swift traps, abort, bad access)
+
+    /// C-string path of the signal crash file, prepared up front so the
+    /// handler doesn't build strings. 64-slot frame buffer likewise.
+    nonisolated(unsafe) static var signalPathC: UnsafeMutablePointer<CChar>?
+    nonisolated(unsafe) static var frameBuffer = UnsafeMutablePointer<UnsafeMutableRawPointer?>.allocate(capacity: 64)
+
+    private var signalFileURL: URL { spoolDir.appendingPathComponent("signal_crash.txt") }
+    private var heartbeatURL: URL { spoolDir.appendingPathComponent("heartbeat.json") }
+
+    /// MetricKit only reports crashes of non-debugger launches, at the NEXT
+    /// launch, and not always. This catches the crash in-process: a Swift
+    /// runtime trap (index out of range, force unwrap, precondition,
+    /// `Dictionary(uniqueKeysWithValues:)` duplicates) arrives as SIGTRAP,
+    /// `fatalError`/ObjC exceptions as SIGABRT, bad memory as SIGSEGV/SIGBUS.
+    /// The handler writes signal + breadcrumb + the crashing thread's
+    /// backtrace with async-signal-safe calls, then re-raises so the OS
+    /// still terminates the process normally.
+    private func installSignalCapture() {
+        Self.signalPathC = strdup(signalFileURL.path)
+        // Alternate signal stack: a stack overflow (deep SwiftUI recursion)
+        // can't run a handler on the exhausted stack — without this those
+        // crashes leave nothing behind.
+        var altStack = stack_t()
+        altStack.ss_size = 256 * 1024
+        altStack.ss_sp = UnsafeMutableRawPointer.allocate(byteCount: altStack.ss_size, alignment: 16)
+        altStack.ss_flags = 0
+        sigaltstack(&altStack, nil)
+        for sig in [SIGTRAP, SIGABRT, SIGILL, SIGSEGV, SIGBUS, SIGFPE] {
+            var action = sigaction()
+            action.__sigaction_u.__sa_handler = crashSignalHandler
+            action.sa_flags = SA_ONSTACK
+            sigemptyset(&action.sa_mask)
+            sigaction(sig, &action, nil)
+        }
+        NSSetUncaughtExceptionHandler { exception in
+            CrashReporter.writeUncaughtException(exception)
+        }
+    }
+
+    private static func writeUncaughtException(_ exception: NSException) {
+        guard let path = signalPathC, access(path, F_OK) != 0 else { return }
+        let text = "exception \(exception.name.rawValue): \(exception.reason ?? "")\n"
+            + "crumb \(PerfBreadcrumb.currentIfAvailable?.crumb ?? "?")\n"
+            + exception.callStackSymbols.joined(separator: "\n") + "\n"
+        try? text.write(toFile: String(cString: path), atomically: true, encoding: .utf8)
+    }
+
+    /// Previous run left a signal capture → one `crash` row.
+    private func ingestPendingSignalCrash() -> Bool {
+        guard let text = try? String(contentsOf: signalFileURL, encoding: .utf8) else { return false }
+        try? FileManager.default.removeItem(at: signalFileURL)
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard !lines.isEmpty else { return false }
+        let head = lines.removeFirst()
+        var crumb = "?"
+        if let first = lines.first, first.hasPrefix("crumb ") {
+            crumb = String(first.dropFirst(6)); lines.removeFirst()
+        }
+        let reason: String
+        if head.hasPrefix("signal "), let n = Int32(head.dropFirst(7)) {
+            reason = "\(Self.signalName(n)) caught in-process — last op: \(crumb)"
+        } else {
+            reason = "\(head) — last op: \(crumb)"
+        }
+        let frames = lines.filter { !$0.isEmpty }
+        var row = baseRow(kind: "crash")
+        row["signal"] = head
+        row["termination_reason"] = reason
+        row["call_stack"] = ["crashed_thread": frames]
+        spool(row)
+        print("[CrashReporter] Ingested previous run's signal crash: \(reason)")
+        return true
+    }
+
+    // MARK: - Heartbeat (abnormal-termination detector)
+
+    /// Written every watchdog cycle. Read once at the next launch.
+    func writeHeartbeat() {
+        let (crumb, at) = PerfBreadcrumb.current
+        let row: [String: Any] = [
+            "ts": Date().timeIntervalSince1970,
+            "state": AppRunState.current,
+            "crumb": crumb,
+            "crumb_age": Date().timeIntervalSince(at),
+            "footprint_mb": MemoryFootprint.megabytes,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: row) else { return }
+        try? data.write(to: heartbeatURL, options: .atomic)
+    }
+
+    private func ingestPreviousHeartbeat(hadSignalCrash: Bool) {
+        guard let data = try? Data(contentsOf: heartbeatURL),
+              let hb = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        try? FileManager.default.removeItem(at: heartbeatURL)
+        guard !hadSignalCrash else { return }
+        let state = hb["state"] as? String ?? "?"
+        // Background / inactive / terminating endings are normal (suspend
+        // then evict, or the user swiped it away). Only an ACTIVE ending
+        // with no crash record is suspicious.
+        guard state == "active" || state == "foreground" || state == "launching" else { return }
+        let ts = hb["ts"] as? Double ?? 0
+        let gap = Date().timeIntervalSince1970 - ts
+        let crumb = hb["crumb"] as? String ?? "?"
+        let age = hb["crumb_age"] as? Double ?? 0
+        let mb = hb["footprint_mb"] as? Int ?? -1
+        var row = baseRow(kind: "abnormal_exit")
+        row["termination_reason"] = "previous run ended while \(state) with no crash record (SIGKILL: watchdog/jetsam, or stopped from Xcode) — last op: \(crumb) (\(String(format: "%.1f", age))s old), footprint \(mb) MB, last heartbeat \(Int(gap))s before this launch"
+        spool(row)
+        print("[CrashReporter] Previous run ended abnormally: \(row["termination_reason"] ?? "")")
+    }
+
+    private func baseRow(kind: String) -> [String: Any] {
+        var sysinfo = utsname()
+        uname(&sysinfo)
+        let model = withUnsafeBytes(of: &sysinfo.machine) { buf in
+            String(decoding: buf.prefix(while: { $0 != 0 }), as: UTF8.self)
+        }
+        let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "?"
+        let build = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "?"
+        var row: [String: Any] = [
+            "kind": kind,
+            "app_version": "\(version) (\(build))",
+            "os_version": ProcessInfo.processInfo.operatingSystemVersionString,
+            "device_model": model,
+            "crashed_at": ISO8601DateFormatter().string(from: Date()),
+        ]
+        if let userID = Self.persistedUserID() {
+            row["user_id"] = userID
+        }
+        return row
+    }
+
     // MARK: - Spool + upload
 
     private var spoolDir: URL {
@@ -205,4 +348,22 @@ final class CrashReporter: NSObject, MXMetricManagerSubscriber {
             task.resume()
         }
     }
+}
+
+/// Signal handler: async-signal-safe path only — open/write/backtrace_symbols_fd,
+/// no Swift allocation beyond the tiny header. Re-raises with the default
+/// action so the process still dies the normal way.
+private func crashSignalHandler(_ sig: Int32) {
+    if let path = CrashReporter.signalPathC {
+        let fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+        if fd >= 0 {
+            var header = "signal \(sig)\ncrumb \(PerfBreadcrumb.currentIfAvailable?.crumb ?? "?")\n"
+            header.withUTF8 { buf in _ = write(fd, buf.baseAddress, buf.count) }
+            let n = backtrace(CrashReporter.frameBuffer, 64)
+            backtrace_symbols_fd(CrashReporter.frameBuffer, n, fd)
+            close(fd)
+        }
+    }
+    signal(sig, SIG_DFL)
+    raise(sig)
 }
