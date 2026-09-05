@@ -189,7 +189,14 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
             throw NSError(domain: "CFBDFS", code: 5, userInfo: [NSLocalizedDescriptionKey: "Waiting for salary data for today's CFB slate"])
         }
 
-        let sortedPlayers = finalPlayers.sorted(by: { $0.salary > $1.salary })
+        // 6b. Real projections from game logs. The roster-stage projection
+        // came from ESPN's team athletes/statistics "leaders" endpoint, which
+        // returns 1–5 athletes per team (one category), ignores ?season=, and
+        // reports bogus games-played (Toney: 82 pass yds ÷ 16 "games" = the
+        // 2.1 that showed in the app) — so nearly the whole pool projected
+        // 0.0. Game logs give a true per-game FPPG for this season and last.
+        let projectedPlayers = await attachGameLogProjections(to: finalPlayers)
+        let sortedPlayers = projectedPlayers.sorted(by: { $0.salary > $1.salary })
 
         // 7. Build tournaments using shared builder
         let slateDate = events.first?.date ?? Date()
@@ -740,6 +747,130 @@ nonisolated struct ESPNNCAAFBDFSSlateProvider: DFSSlateProvider {
         let jitter = abs(stableHash % 200) - 100
         let rounded = ((salary + jitter + 50) / 100) * 100
         return max(2500, min(9000, rounded))
+    }
+
+    // MARK: - Game-Log Projections
+
+    /// Season game-log summary per player, cached for the process. Last
+    /// season's line never changes; the current season's re-fetches after
+    /// 3h so a Saturday's games flow into next week's projections.
+    /// Lock-guarded: the sweep below hits this from dozens of concurrent
+    /// tasks (see the BBProjectionCache heap-corruption crash).
+    private nonisolated final class GameLogSummaryCache: @unchecked Sendable {
+        static let shared = GameLogSummaryCache()
+        struct Summary { let games: Int; let avgFPTS: Double; let fetchedAt: Date }
+        private let lock = NSLock()
+        private var store: [String: Summary] = [:]
+        func get(_ key: String, maxAge: TimeInterval?) -> Summary? {
+            lock.lock(); defer { lock.unlock() }
+            guard let s = store[key] else { return nil }
+            if let maxAge, Date().timeIntervalSince(s.fetchedAt) > maxAge { return nil }
+            return s
+        }
+        func set(_ key: String, _ s: Summary) {
+            lock.lock(); defer { lock.unlock() }
+            store[key] = s
+        }
+    }
+
+    /// DK's price is itself a projection: with no game history (transfers,
+    /// freshmen, first start) it's the best signal we have. Classic CFB
+    /// prices run ~$3,000–$12,000 → ~3.5–24 FPTS.
+    private func cfbSalaryImpliedProjection(salary: Int) -> Double {
+        let frac = min(1.0, max(0.0, Double(salary - 3000) / 9000.0))
+        return 3.5 + pow(frac, 0.9) * 20.5
+    }
+
+    private func cfbPositionAverage(_ position: String) -> Double {
+        switch position {
+        case "QB": return 18.0
+        case "RB": return 12.0
+        case "WR": return 10.0
+        case "TE": return 6.0
+        default: return 8.0
+        }
+    }
+
+    /// Season summary (games, avg FPTS) from the ESPN game log, via cache.
+    private func gameLogSummary(playerID: String, position: String, season: Int, isCurrentSeason: Bool) async -> GameLogSummaryCache.Summary {
+        let key = "\(playerID)|\(season)"
+        let cache = GameLogSummaryCache.shared
+        if let hit = cache.get(key, maxAge: isCurrentSeason ? 3 * 3600 : nil) { return hit }
+        let provider = ESPNPlayerGameLogProvider(session: session)
+        let log = (try? await provider.fetchGameLog(playerID: playerID, position: position, limit: 15, season: season)) ?? []
+        let games = log.count
+        let avg = games > 0 ? log.reduce(0.0) { $0 + $1.fantasyPoints } / Double(games) : 0
+        let summary = GameLogSummaryCache.Summary(games: games, avgFPTS: avg, fetchedAt: Date())
+        cache.set(key, summary)
+        return summary
+    }
+
+    /// Replace each DK-priced player's projection with a blend of this
+    /// season's per-game average (weight n/(n+3): one game = 25%, three
+    /// games = 50%), last season's average regressed toward the salary-
+    /// implied projection, and — with no history at all — the salary-
+    /// implied projection alone. Mild 10% regression toward the position
+    /// average at the end. Runs 32 requests wide; the cache makes every
+    /// later slate load free.
+    private func attachGameLogProjections(to players: [DFSPlayer]) async -> [DFSPlayer] {
+        let currentSeason = Calendar.current.component(.year, from: Date())
+        let salaryFloor = players.map(\.salary).min() ?? 0
+
+        struct Projected: Sendable { let id: String; let projection: Double }
+        var projections: [String: Double] = [:]
+
+        for chunk in stride(from: 0, to: players.count, by: 32).map({ Array(players[$0..<min($0 + 32, players.count)]) }) {
+            let results: [Projected] = await withTaskGroup(of: Projected.self) { group in
+                for player in chunk {
+                    group.addTask {
+                        let implied = self.cfbSalaryImpliedProjection(salary: player.salary)
+                        // Deep-bench prices at the slate floor: no history
+                        // fetch, the price already says "unlikely to matter".
+                        if player.salary <= salaryFloor {
+                            return Projected(id: player.id, projection: (implied * 10).rounded() / 10)
+                        }
+                        let cur = await self.gameLogSummary(playerID: player.id, position: player.position, season: currentSeason, isCurrentSeason: true)
+                        // Once this season is established, last season adds little.
+                        let last: GameLogSummaryCache.Summary = cur.games >= 4
+                            ? GameLogSummaryCache.Summary(games: 0, avgFPTS: 0, fetchedAt: Date())
+                            : await self.gameLogSummary(playerID: player.id, position: player.position, season: currentSeason - 1, isCurrentSeason: false)
+
+                        let base: Double
+                        if last.games > 0 {
+                            let wLast = Double(last.games) / Double(last.games + 2)
+                            base = last.avgFPTS * wLast + implied * (1 - wLast)
+                        } else {
+                            base = implied
+                        }
+                        let wCur = Double(cur.games) / Double(cur.games + 3)
+                        var proj = wCur * cur.avgFPTS + (1 - wCur) * base
+                        proj = proj * 0.9 + self.cfbPositionAverage(player.position) * 0.1
+                        return Projected(id: player.id, projection: max(0, (proj * 10).rounded() / 10))
+                    }
+                }
+                var out: [Projected] = []
+                for await p in group { out.append(p) }
+                return out
+            }
+            for p in results { projections[p.id] = p.projection }
+        }
+
+        let updated = players.map { player -> DFSPlayer in
+            guard let proj = projections[player.id] else { return player }
+            var copy = DFSPlayer(
+                id: player.id, name: player.name, team: player.team,
+                position: player.position, salary: player.salary,
+                projectedPoints: proj,
+                gameID: player.gameID, injuryStatus: player.injuryStatus
+            )
+            copy.isConfirmedActive = player.isConfirmedActive
+            copy.playedRecently = player.playedRecently
+            copy.gamesPlayed = player.gamesPlayed
+            return copy
+        }
+        let nonZero = updated.filter { $0.projectedPoints > 0 }.count
+        print("[CFB-DFS] Game-log projections: \(nonZero)/\(updated.count) players projected > 0")
+        return updated
     }
 
     // MARK: - Projection
