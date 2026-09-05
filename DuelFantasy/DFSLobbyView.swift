@@ -50,7 +50,6 @@ struct DFSLobbyView: View {
                         }
 
                         // Main Slate section
-                        mainSlateSection
 
                         // Evening Slate section
                         eveningSlateSection
@@ -248,35 +247,7 @@ struct DFSLobbyView: View {
         return invite.tournamentID
     }
 
-    // MARK: - Main Slate Section
-
-    private var mainSlateSection: some View {
-        let mainTournaments = viewModel.availableTournaments.filter { $0.tournamentType == .main }
-        // Lock time comes from the tournament's OWN lock (which honors its
-        // window scope), not the earliest game on the slate — a slate can
-        // carry games Main doesn't cover (a showdown-only CFB game kicking
-        // at noon made an 3pm-locking Main slate read "Locks 12:00 PM").
-        let mainSubtitle: String? = {
-            guard let main = mainTournaments.first else { return nil }
-            let lock = viewModel.lockTimeForTournament(main)
-            guard lock > Date(), lock != .distantFuture else { return nil }
-            return "Locks \(lock.formatted(date: .omitted, time: .shortened))"
-        }()
-        return Group {
-            if !mainTournaments.isEmpty {
-                slateCard(
-                    title: "Main Slate",
-                    subtitle: mainSubtitle,
-                    icon: "sportscourt.fill",
-                    iconColor: brandPurple,
-                    tournaments: mainTournaments,
-                    selectedSize: $selectedMainSize
-                )
-            }
-        }
-    }
-
-    // MARK: - Evening Slate Section
+    // MARK: - Classic Slate Sections (Main + window slates, chronological)
 
     /// Sport-appropriate word for a game starting (the evening-slate subtitle
     /// previously hard-coded baseball's "First pitch" for every sport).
@@ -291,34 +262,67 @@ struct DFSLobbyView: View {
         }
     }
 
+    private struct ClassicSlateGroup {
+        let key: String
+        let isMain: Bool
+        let label: String          // "Main" / "Early Only" / "Afternoon Only" / "Night Only" / "Evening"
+        let lock: Date
+        let tournaments: [DFSTournament]
+    }
+
+    /// One card per classic slate — Main plus every window slate — in
+    /// chronological lock order. The Main card used to render first
+    /// unconditionally, which put a 7 PM MLB Main above the 12:35 Early Only.
+    private var classicSlateGroups: [ClassicSlateGroup] {
+        let classic = viewModel.availableTournaments.filter { $0.tournamentType == .main || $0.tournamentType == .evening }
+        var byKey: [String: [DFSTournament]] = [:]
+        var order: [String] = []
+        for t in classic {
+            let key = t.id.split(separator: "-").dropLast().joined(separator: "-")
+            if byKey[key] == nil { order.append(key) }
+            byKey[key, default: []].append(t)
+        }
+        return order.compactMap { key -> ClassicSlateGroup? in
+            guard let ts = byKey[key], let first = ts.first else { return nil }
+            let isMain = first.tournamentType == .main
+            let label = isMain ? "Main" : (DFSTournamentType.windowLabel(for: first.id) ?? "Evening")
+            return ClassicSlateGroup(key: key, isMain: isMain, label: label,
+                                     lock: viewModel.lockTimeForTournament(first), tournaments: ts)
+        }.sorted { a, b in
+            if a.lock != b.lock { return a.lock < b.lock }
+            return a.isMain && !b.isMain   // same lock: Main first
+        }
+    }
+
     private var eveningSlateSection: some View {
-        // One card per WINDOW slate ("Afternoon Only", "Night Only",
-        // legacy "Evening"), grouped by tournament id sans trailing size.
-        let windowTournaments = viewModel.availableTournaments.filter { $0.tournamentType == .evening }
-        let groups: [(key: String, tournaments: [DFSTournament])] = {
-            var byKey: [String: [DFSTournament]] = [:]
-            for t in windowTournaments {
-                let key = t.id.split(separator: "-").dropLast().joined(separator: "-")
-                byKey[key, default: []].append(t)
-            }
-            return byKey.sorted { a, b in
-                let lockA = a.value.first.map { viewModel.lockTimeForTournament($0) } ?? .distantFuture
-                let lockB = b.value.first.map { viewModel.lockTimeForTournament($0) } ?? .distantFuture
-                return lockA < lockB
-            }.map { (key: $0.key, tournaments: $0.value) }
-        }()
-        return Group {
-            ForEach(groups, id: \.key) { group in
-                if let first = group.tournaments.first {
-                    let label = DFSTournamentType.windowLabel(for: first.id) ?? "Evening"
-                    let lock = viewModel.lockTimeForTournament(first)
+        Group {
+            ForEach(classicSlateGroups, id: \.key) { group in
+                if group.isMain {
+                    // Lock time comes from the tournament's OWN lock (which
+                    // honors its window scope), not the earliest game on the
+                    // slate — a showdown-only CFB game kicking at noon made a
+                    // 3pm-locking Main slate read "Locks 12:00 PM".
+                    let subtitle: String? = (group.lock > Date() && group.lock != .distantFuture)
+                        ? "Locks \(group.lock.formatted(date: .omitted, time: .shortened))"
+                        : nil
+                    slateCard(
+                        title: "Main Slate",
+                        subtitle: subtitle,
+                        icon: "sportscourt.fill",
+                        iconColor: brandPurple,
+                        tournaments: group.tournaments,
+                        selectedSize: $selectedMainSize
+                    )
+                } else {
+                    let label = group.label
+                    let night = label == "Night Only" || label == "Evening"
                     slateCard(
                         title: label == "Evening" ? "Evening Slate" : "\(label) Slate",
-                        subtitle: lock == .distantFuture
+                        subtitle: group.lock == .distantFuture
                             ? "Locks at first game"
-                            : "\(startVerb) \(lock.formatted(date: .omitted, time: .shortened))",
-                        icon: label == "Night Only" || label == "Evening" ? "moon.stars.fill" : "sun.max.fill",
-                        iconColor: label == "Night Only" || label == "Evening" ? .indigo : .orange,
+                            : "\(startVerb) \(group.lock.formatted(date: .omitted, time: .shortened))",
+                        icon: night ? "moon.stars.fill" : (label == "Early Only" ? "sunrise.fill" : "sun.max.fill"),
+                        iconColor: night ? .indigo : .orange,
                         tournaments: group.tournaments,
                         selectedSize: $selectedEveningSize
                     )
