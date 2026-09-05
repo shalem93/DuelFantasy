@@ -918,104 +918,72 @@ struct DFSPlayerDetailView: View {
         .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
     }
 
-    private var soccerOutfieldGameLogContent: some View {
-        VStack(spacing: 0) {
-            // Header: DATE, OPP, MIN, G, A, SOT, TK, DEF, YC, FPTS
-            // TK = tackles, DEF = total defensive actions (tackles + interceptions
-            // + blocked shots + clearances). Replaces the SH column — total shots
-            // duplicate the SOT signal and didn't help judge defenders.
-            HStack(spacing: 0) {
-                Text("DATE")
-                    .frame(width: 38, alignment: .leading)
-                Text("OPP")
-                    .frame(width: 52, alignment: .leading)
-                Text("MIN")
-                    .frame(width: 30, alignment: .trailing)
-                Text("G")
-                    .frame(width: 22, alignment: .trailing)
-                Text("A")
-                    .frame(width: 22, alignment: .trailing)
-                Text("SOT")
-                    .frame(width: 30, alignment: .trailing)
-                Text("TK")
-                    .frame(width: 24, alignment: .trailing)
-                Text("DEF")
-                    .frame(width: 28, alignment: .trailing)
-                Text("YC")
-                    .frame(width: 22, alignment: .trailing)
-                Spacer()
-                Text("FPTS")
-                    .frame(width: 42, alignment: .trailing)
-            }
-            .font(.caption2.weight(.bold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 12)
+    /// Column spec for the outfield log: (label, width). Every DK-scored
+    /// category is a real column and the whole table scrolls horizontally —
+    /// the old layout squeezed 8 columns in and dumped the rest ("4 SH · 1
+    /// INT · 1 SA · 7 PAS") on a second line under each row.
+    private static let soccerOutfieldColumns: [(String, CGFloat)] = [
+        ("DATE", 40), ("OPP", 54), ("MIN", 34), ("G", 26), ("A", 26), ("SOT", 34),
+        ("SH", 30), ("TK", 30), ("INT", 32), ("DEF", 34), ("CRS", 34), ("SA", 30),
+        ("PAS", 36), ("FD", 30), ("FC", 30), ("YC", 28), ("RC", 28), ("FPTS", 46)
+    ]
 
-            ForEach(gameLogs) { log in
-                soccerOutfieldRow(log)
+    private var soccerOutfieldGameLogContent: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            VStack(spacing: 0) {
+                HStack(spacing: 0) {
+                    ForEach(Array(Self.soccerOutfieldColumns.enumerated()), id: \.offset) { i, col in
+                        Text(col.0)
+                            .frame(width: col.1, alignment: i < 2 ? .leading : .trailing)
+                    }
+                }
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+
+                ForEach(gameLogs) { log in
+                    soccerOutfieldRow(log)
+                }
             }
         }
     }
 
     private func soccerOutfieldRow(_ log: DFSPlayerGameLog) -> some View {
-        // points=Goals, rebounds=SOT, assists=Assists, threePM=tackles,
-        // threePA=defensive actions sum, fgm=YC, fga=RC
-        VStack(alignment: .leading, spacing: 1) {
-        HStack(spacing: 0) {
-            Text(log.date)
-                .frame(width: 38, alignment: .leading)
-            Text(log.opponent)
-                .frame(width: 52, alignment: .leading)
-                .lineLimit(1)
-            Text(log.minutes)
-                .frame(width: 30, alignment: .trailing)
-            Text("\(log.points)")
-                .frame(width: 22, alignment: .trailing)
-                .fontWeight(log.points > 0 ? .bold : .regular)
-                .foregroundStyle(log.points > 0 ? brandPurple : .primary)
-            Text("\(log.assists)")
-                .frame(width: 22, alignment: .trailing)
-                .fontWeight(log.assists > 0 ? .bold : .regular)
-                .foregroundStyle(log.assists > 0 ? brandPurple : .primary)
-            Text("\(log.rebounds)")
-                .frame(width: 30, alignment: .trailing)
-            Text("\(log.threePM)")
-                .frame(width: 24, alignment: .trailing)
-                .fontWeight(log.threePM >= 3 ? .bold : .regular)
-                .foregroundStyle(log.threePM >= 3 ? brandPurple : .primary)
-            Text("\(log.threePA)")
-                .frame(width: 28, alignment: .trailing)
-                .fontWeight(log.threePA >= 6 ? .bold : .regular)
-                .foregroundStyle(log.threePA >= 6 ? brandPurple : .primary)
-            Text("\(log.fgm)")
-                .frame(width: 22, alignment: .trailing)
-                .foregroundStyle(log.fgm > 0 ? .yellow : .primary)
-            Spacer()
+        // points=Goals, rebounds=SOT, assists=Assists, turnovers=total shots,
+        // threePM=tackles, threePA=defensive actions sum, fgm=YC, fga=RC;
+        // INT/CRS/SA/PAS/FD/FC ride in extraStats.
+        let ex = log.extraStats ?? [:]
+        let w = Self.soccerOutfieldColumns.map(\.1)
+        func cell(_ value: Int, _ idx: Int, hot: Bool = false, color: Color? = nil) -> some View {
+            Text("\(value)")
+                .frame(width: w[idx], alignment: .trailing)
+                .fontWeight(hot ? .bold : .regular)
+                .foregroundStyle(color ?? (hot ? brandPurple : .primary))
+        }
+        return HStack(spacing: 0) {
+            Text(log.date).frame(width: w[0], alignment: .leading)
+            Text(log.opponent).frame(width: w[1], alignment: .leading).lineLimit(1)
+            Text(log.minutes).frame(width: w[2], alignment: .trailing)
+            cell(log.points, 3, hot: log.points > 0)
+            cell(log.assists, 4, hot: log.assists > 0)
+            cell(log.rebounds, 5)
+            cell(log.turnovers, 6)
+            cell(log.threePM, 7, hot: log.threePM >= 3)
+            cell(ex["INT"] ?? 0, 8)
+            cell(log.threePA, 9, hot: log.threePA >= 6)
+            cell(ex["CRS"] ?? 0, 10)
+            cell(ex["SA"] ?? 0, 11)
+            cell(ex["PAS"] ?? 0, 12)
+            cell(ex["FD"] ?? 0, 13)
+            cell(ex["FC"] ?? 0, 14)
+            cell(log.fgm, 15, color: log.fgm > 0 ? .yellow : .primary)
+            cell(log.fga, 16, color: log.fga > 0 ? .red : .primary)
             Text(String(format: "%.1f", log.fantasyPoints))
-                .frame(width: 42, alignment: .trailing)
+                .frame(width: w[17], alignment: .trailing)
                 .foregroundStyle(log.fantasyPoints >= 15 ? brandPurple : .primary)
                 .fontWeight(log.fantasyPoints >= 15 ? .semibold : .regular)
         }
         .font(.caption.monospacedDigit())
-        // Full remaining stat line — every DK-scored category that isn't a
-        // column above (shots, crosses, shot assists, passes, fouls, INT).
-        let extras = log.extraStats ?? [:]
-        let extraLine: String = {
-            var parts: [String] = []
-            if log.turnovers > 0 { parts.append("\(log.turnovers) SH") }
-            for key in ["INT", "CRS", "SA", "PAS", "FD", "FC"] {
-                if let v = extras[key], v > 0 { parts.append("\(v) \(key)") }
-            }
-            if log.fga > 0 { parts.append("\(log.fga) RC") }
-            return parts.joined(separator: " · ")
-        }()
-        if !extraLine.isEmpty {
-            Text(extraLine)
-                .font(.system(size: 9).monospacedDigit())
-                .foregroundStyle(.secondary)
-                .padding(.leading, 90)
-        }
-        }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(log.fantasyPoints >= 20 ? brandPurple.opacity(0.06) : Color.clear)
