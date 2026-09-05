@@ -171,13 +171,19 @@ nonisolated struct DFSBotGenerator: Sendable {
 
         var result = lineup
         var used = Set(result.map(\.id))
-        // Reserve later-game slots roughly PROPORTIONAL to the later games'
-        // share of the slate (2-game slate → ~3-4 of 8 slots, not 1-2), with
-        // a floor of one per later game and per-bot variance — but always
-        // keep a confirmed-starter core from the locking game (>= slots-4).
+        // Reserve later-game slots around the later games' share of the
+        // slate, with REAL per-bot spread. The old rule floored at one slot
+        // per later game and capped at slots-4, so a 7-game EPL slate with
+        // one early kickoff gave every one of 2,000 bots exactly "4 live,
+        // 4 pre". A human field is a mix: some lineups lean on the early
+        // game's confirmed XI, some barely touch it. Multiplier 0.45–1.15 on
+        // the expected count → for 6-of-7 later games that's 3–8 reserved
+        // (0–5 early-game players); late-swap fills the reserved slots with
+        // each later game's confirmed starters as its XI drops.
         let laterShare = Double(laterGames.count) / Double(max(1, slateGames.count))
-        let proportional = Int((Double(slots.count) * laterShare).rounded(.down)) + Int.random(in: -1...1)
-        let target = min(max(laterGames.count, proportional), max(1, slots.count - 4))
+        let expected = Double(slots.count) * laterShare
+        let jitter = Double.random(in: 0.45...1.15)
+        let target = min(max(0, Int((expected * jitter).rounded())), slots.count)
         var rr = Int.random(in: 0..<laterGames.count)   // round-robin start for spread
         func reservedCount() -> Int { result.filter { laterSet.contains($0.gameID ?? "") }.count }
 
